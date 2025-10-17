@@ -1,0 +1,15 @@
+# Meson build directory
+build/
+builddir/
+
+# Compiled objects and libraries
+*.o
+*.so
+
+# Cache files
+.cache/
+
+# Editor-specific files
+.vscode/
+.idea/
+*.swp

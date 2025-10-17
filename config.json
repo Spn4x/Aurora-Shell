@@ -1,0 +1,117 @@
+[
+  {
+    "name": "topbar",
+    "plugin": "./build/widgets/topbar/topbar.so",
+    "stylesheet": "{project_root}/templates/topbar/topbar.css", 
+    "layer": "top",
+    "anchor": "top",
+    "exclusive": true, 
+    "visible_on_start": true,
+    "interactive": true,
+     "margins": {
+      "top": 5,
+      "bottom": 0,
+      "left": 5,
+      "right": 5
+    },
+    "config": { 
+      "modules": {
+        "left": [ { "name": "workspaces" } ],
+        "center": [ { "name": "clock", "on-click": "aurora-shell --toggle calendar" } ],
+        "right": [
+          { "name": "sysinfo", "on-click": "kitty -e btop" },
+          { "name": "audio" },
+          { "name": "zen", "on-click-right": "swaync-client --toggle-panel" }
+        ]
+      }
+    }
+  },
+  {
+    "name": "uptime",
+    "plugin": "./build/widgets/uptime/uptime.so",
+    "stylesheet": "{project_root}/templates/uptime/archbadge.css",
+    "anchor": "bottom-center",
+    "layer": "bottom",
+    "margin": { "bottom": 5 },
+    "text": "{distro}  ·  Uptime: {uptime}",
+    "visible_on_start": true
+  },
+  {
+    "name": "cheatsheet",
+    "plugin": "./build/widgets/cheatsheet/cheatsheet.so",
+     "stylesheet": "{project_root}/templates/cheatsheet/cheatsheet.css",
+    "anchor": "center",
+    "layer": "top",
+    "visible_on_start": false,
+    "interactive": true
+  },
+  {
+    "name": "calendar",
+    "plugin": "./build/widgets/calendar/calendar.so",
+    "anchor": "top-center",
+    "layer": "top",
+    "visible_on_start": false,
+    "stylesheet": "/home/meismeric/VS Code Projects/C-projects/aurora-shell/templates/calendar/calendar.css",
+    "margin": { "top": 5 },
+    "animation": {
+      "property": "margin-top",
+      "from": -600,
+      "to": 15,
+      "duration": 500
+    },
+    "interactive": true
+  },
+    {
+    "name": "control-center",
+    "plugin": "./build/widgets/control-center/control-center.so",
+    "anchor": "top-center",
+    "layer": "overlay",
+    "margin": { "top": 10 },
+    "visible_on_start": false,
+    "stylesheet": "/home/meismeric/VS Code Projects/C-projects/aurora-shell/templates/controlcenter/controlcenter.css",
+      "size": {
+    "width": 600,
+    "height": 200
+  },
+  "interactive": true
+  },
+  {
+  "name": "mpris-player",
+  "plugin": "./build/widgets/mpris_player/libmpris_player.so",
+  "anchor": "center-left",
+  "layer": "top",
+  "margin": { "left": 5 },
+  "visible_on_start": false,
+  "stylesheet": "/home/meismeric/VS Code Projects/C-projects/aurora-shell/templates/mpris_player/style.css",
+   "size": {
+    "width": 700,
+    "height": 450
+   },
+   "interactive": true
+},
+{
+    "name": "launcher",
+    "plugin": "./build/widgets/launcher/launcher.so",
+    "stylesheet": "{project_root}/templates/launcher/launcher.css",
+    "layer": "overlay",
+    "anchor": "center",
+    "visible_on_start": false,
+    "interactive": true
+  },
+{
+    "name": "cachy-selector-wallpapers",
+    "plugin_type": "executable",
+    "path": "./build/widgets/cachy-selector/cachy-selector",
+    "config": {
+      "stylesheet": "{project_root}/templates/cachy-selector/cachy-selector.css",
+      "interactive": true,
+      "margins": {
+        "top": 50
+      },
+      "size": {
+        "width": 800,
+        "height": 175
+      }
+    }
+  }
+]
