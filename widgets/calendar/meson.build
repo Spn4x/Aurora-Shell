@@ -17,5 +17,6 @@ shared_library('calendar', 'calendar.c',
 
 install_data(
   ['data/events.json', 'data/permanent_events.json'],
-  install_dir: data_install_dir
+  install_dir: data_install_dir,
+  install_mode: 'rw-r--r--' 
 )

@@ -1,20 +1,20 @@
 [
   {
     "name": "topbar",
-    "plugin": "./build/widgets/topbar/topbar.so",
-    "stylesheet": "{project_root}/templates/topbar/topbar.css", 
+    "plugin": "/usr/local/lib/aurora-shell/widgets/topbar.so",
+    "stylesheet": "topbar.css",
     "layer": "top",
     "anchor": "top",
-    "exclusive": true, 
+    "exclusive": true,
     "visible_on_start": true,
     "interactive": true,
-     "margins": {
+    "margins": {
       "top": 5,
       "bottom": 0,
       "left": 5,
       "right": 5
     },
-    "config": { 
+    "config": {
       "modules": {
         "left": [ { "name": "workspaces" } ],
         "center": [ { "name": "clock", "on-click": "aurora-shell --toggle calendar" } ],
@@ -28,8 +28,8 @@
   },
   {
     "name": "uptime",
-    "plugin": "./build/widgets/uptime/uptime.so",
-    "stylesheet": "{project_root}/templates/uptime/archbadge.css",
+    "plugin": "/usr/local/lib/aurora-shell/widgets/uptime.so",
+    "stylesheet": "archbadge.css",
     "anchor": "bottom-center",
     "layer": "bottom",
     "margin": { "bottom": 5 },
@@ -38,8 +38,8 @@
   },
   {
     "name": "cheatsheet",
-    "plugin": "./build/widgets/cheatsheet/cheatsheet.so",
-     "stylesheet": "{project_root}/templates/cheatsheet/cheatsheet.css",
+    "plugin": "/usr/local/lib/aurora-shell/widgets/cheatsheet.so",
+    "stylesheet": "cheatsheet.css",
     "anchor": "center",
     "layer": "top",
     "visible_on_start": false,
@@ -47,11 +47,11 @@
   },
   {
     "name": "calendar",
-    "plugin": "./build/widgets/calendar/calendar.so",
+    "plugin": "/usr/local/lib/aurora-shell/widgets/calendar.so",
+    "stylesheet": "calendar.css",
     "anchor": "top-center",
     "layer": "top",
     "visible_on_start": false,
-    "stylesheet": "/home/meismeric/VS Code Projects/C-projects/aurora-shell/templates/calendar/calendar.css",
     "margin": { "top": 5 },
     "animation": {
       "property": "margin-top",
@@ -61,56 +61,54 @@
     },
     "interactive": true
   },
-    {
+  {
     "name": "control-center",
-    "plugin": "./build/widgets/control-center/control-center.so",
+    "plugin": "/usr/local/lib/aurora-shell/widgets/control-center.so",
+    "stylesheet": "controlcenter.css",
     "anchor": "top-center",
     "layer": "overlay",
     "margin": { "top": 10 },
     "visible_on_start": false,
-    "stylesheet": "/home/meismeric/VS Code Projects/C-projects/aurora-shell/templates/controlcenter/controlcenter.css",
-      "size": {
-    "width": 600,
-    "height": 200
-  },
-  "interactive": true
+    "size": {
+      "width": 600,
+      "height": 200
+    },
+    "interactive": true
   },
   {
-  "name": "mpris-player",
-  "plugin": "./build/widgets/mpris_player/libmpris_player.so",
-  "anchor": "center-left",
-  "layer": "top",
-  "margin": { "left": 5 },
-  "visible_on_start": false,
-  "stylesheet": "/home/meismeric/VS Code Projects/C-projects/aurora-shell/templates/mpris_player/style.css",
-   "size": {
-    "width": 700,
-    "height": 450
-   },
-   "interactive": true
-},
-{
+    "name": "mpris-player",
+    "plugin": "/usr/local/lib/aurora-shell/widgets/mpris_player.so",
+    "stylesheet": "mpris-player.css",
+    "anchor": "center-left",
+    "layer": "top",
+    "margin": { "left": 5 },
+    "visible_on_start": false,
+    "size": {
+      "width": 275,
+      "height": 450
+    },
+    "interactive": true
+  },
+  {
     "name": "launcher",
-    "plugin": "./build/widgets/launcher/launcher.so",
-    "stylesheet": "{project_root}/templates/launcher/launcher.css",
+    "plugin": "/usr/local/lib/aurora-shell/widgets/launcher.so",
+    "stylesheet": "launcher.css",
     "layer": "overlay",
     "anchor": "center",
     "visible_on_start": false,
     "interactive": true
   },
-{
-    "name": "cachy-selector-wallpapers",
-    "plugin_type": "executable",
-    "path": "./build/widgets/cachy-selector/cachy-selector",
+  {
+    "name": "cachy-selector",
+    "visible_on_start": false,
     "config": {
-      "stylesheet": "{project_root}/templates/cachy-selector/cachy-selector.css",
-      "interactive": true,
-      "margins": {
-        "top": 50
-      },
+      "stylesheet": "cachy-selector.css",
       "size": {
         "width": 800,
-        "height": 175
+        "height": 210
+      },
+      "margins": {
+        "top": 50
       }
     }
   }

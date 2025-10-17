@@ -1,4 +1,4 @@
-# aurora-shell/widgets/launcher/meson.build
+# widgets/launcher/meson.build
 
 launcher_sources = [
   'launcher.c',
@@ -15,6 +15,8 @@ launcher_deps = [
 shared_library('launcher',
   launcher_sources,
   dependencies: launcher_deps,
+  name_prefix: '',
+  # THE FIX IS HERE:
   install: true,
-  name_prefix: '', # This prevents 'lib' prefix, making it 'launcher.so'
+  install_dir: get_option('libdir') / 'aurora-shell' / 'widgets'
 )

@@ -7,7 +7,6 @@
 #include <string.h>
 #include <json-glib/json-glib.h>
 
-// --- Data Structures ---
 typedef struct {
     GtkApplication *gtk_app;
     GtkWindow *window;
@@ -18,18 +17,21 @@ typedef struct {
     GCancellable *cancellable;
 } Application;
 
-// --- Forward Declarations ---
 static void app_update_view(Application *app);
 static void app_select_and_quit(GtkWidget *preview_widget, Application *app);
 static void on_image_loaded_cb(GObject *source_object, GAsyncResult *res, gpointer user_data);
 static void load_image_thread_func(GTask *task, gpointer source_object, gpointer task_data, GCancellable *cancellable);
 static GtkWidget* ui_create_wallpaper_preview(Application *app, const char* path_str, int index);
 static void app_populate_from_list(Application *app, GList *paths);
-
+static void free_string_list(gpointer data);
 
 // ===================================================================
-//  Core Application Logic (Largely Unchanged)
+//  Core Application Logic
 // ===================================================================
+
+static void free_string_list(gpointer data) {
+    g_list_free_full((GList *)data, g_free);
+}
 
 static void app_select_and_quit(GtkWidget *preview_widget, Application *app) {
     const char* path = g_object_get_data(G_OBJECT(preview_widget), "wallpaper-path");
@@ -92,6 +94,9 @@ static void on_item_clicked(GtkGestureClick *gesture, int n, double x, double y,
     app_select_and_quit(w, app);
 }
 
+// ===================================================================
+// THIS IS THE ORIGINAL, WORKING IMAGE LOADING LOGIC
+// ===================================================================
 static void on_image_loaded_cb(GObject *s, GAsyncResult *res, gpointer user_data) {
     (void)s; 
     GtkPicture *pic = GTK_PICTURE(user_data); 
@@ -117,47 +122,31 @@ static void load_image_thread_func(GTask *t, gpointer s, gpointer d, GCancellabl
     g_task_return_pointer(t,final,g_object_unref);
 }
 
-static gchar* expand_path(const char* path, const char* project_root) {
-    if (!path) { return NULL; } GString *s = g_string_new(path);
-    if (g_str_has_prefix(s->str, "~/")) { g_string_erase(s, 0, 1); g_string_prepend(s, g_get_home_dir()); }
-    if (project_root && g_str_has_prefix(s->str, "{project_root}")) { g_string_erase(s, 0, strlen("{project_root}")); g_string_prepend(s, project_root); }
-    return g_string_free(s, FALSE);
-}
-
 // ===================================================================
-//  UI Construction - Using the Correct GtkPicture Widget
+//  UI Construction
 // ===================================================================
-
 static GtkWidget* ui_create_wallpaper_preview(Application *app, const char* path_str, int index) {
-    // Step 1: Use a GtkPicture, the correct widget for scalable images.
     GtkWidget *pic = gtk_picture_new();
     gtk_widget_add_css_class(pic, "preview-image");
+    gtk_picture_set_can_shrink(GTK_PICTURE(pic), FALSE);
+    gtk_picture_set_keep_aspect_ratio(GTK_PICTURE(pic), TRUE); // Reverted to old working function
+    gtk_widget_set_vexpand(pic, TRUE);
+    gtk_widget_set_valign(pic, GTK_ALIGN_FILL);
 
-    // Step 2: Configure the GtkPicture for our desired layout.
-    gtk_picture_set_can_shrink(GTK_PICTURE(pic), FALSE); // Don't shrink smaller than the content
-    gtk_picture_set_keep_aspect_ratio(GTK_PICTURE(pic), TRUE);
-    gtk_widget_set_vexpand(pic, TRUE); // Allow it to expand vertically
-    gtk_widget_set_valign(pic, GTK_ALIGN_FILL); // Fill the space it gets
-
-    // Asynchronously load the image data
     GTask *t = g_task_new(NULL, app->cancellable, on_image_loaded_cb, pic);
     g_task_set_task_data(t, g_strdup(path_str), g_free);
     g_task_run_in_thread(t, (GTaskThreadFunc)load_image_thread_func);
     g_object_unref(t);
 
-    // Create the label
     GtkWidget *lbl = gtk_label_new(g_path_get_basename(path_str));
     gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
     gtk_widget_add_css_class(lbl, "filename-label");
 
-    // Create the vertical box to hold the picture and label
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_box_append(GTK_BOX(vbox), pic);
     gtk_box_append(GTK_BOX(vbox), lbl);
     
-    // Create the outer container
     GtkWidget *container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    // Set a fixed width on the container, let the height be natural.
     gtk_widget_set_size_request(container, 220, -1);
     gtk_box_append(GTK_BOX(container), vbox);
     gtk_widget_set_can_focus(container, TRUE);
@@ -166,7 +155,6 @@ static GtkWidget* ui_create_wallpaper_preview(Application *app, const char* path
     g_object_set_data_full(G_OBJECT(container), "wallpaper-path", g_strdup(path_str), g_free);
     g_object_set_data(G_OBJECT(container), "widget-index", GINT_TO_POINTER(index));
 
-    // Use a modern GtkGesture for click handling
     GtkGesture *click = gtk_gesture_click_new();
     g_signal_connect(click, "pressed", G_CALLBACK(on_item_clicked), app);
     gtk_widget_add_controller(container, GTK_EVENT_CONTROLLER(click));
@@ -187,14 +175,16 @@ static void app_populate_from_list(Application *app, GList *paths) {
 // ===================================================================
 //  Application Activation and Main Loop
 // ===================================================================
-
 static void activate(GtkApplication *gtk_app, JsonObject *config_obj) {
     Application *app = g_object_get_data(G_OBJECT(gtk_app), "app-data");
     GList *paths = g_object_get_data(G_OBJECT(gtk_app), "paths-data");
-    
-    g_autofree gchar *project_root = g_object_get_data(G_OBJECT(gtk_app), "project-root");
-    const char *css_raw = json_object_get_string_member_with_default(config_obj, "stylesheet", NULL);
-    g_autofree gchar *css_path = expand_path(css_raw, project_root);
+    const char *config_name = g_object_get_data(G_OBJECT(gtk_app), "config-name");
+
+    const char *css_filename = json_object_get_string_member_with_default(config_obj, "stylesheet", NULL);
+    g_autofree gchar *css_path = NULL;
+    if (css_filename) {
+        css_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "templates", config_name, css_filename, NULL);
+    }
 
     JsonObject *size_obj = json_object_has_member(config_obj, "size") ? json_object_get_object_member(config_obj, "size") : NULL;
     int width = size_obj ? json_object_get_int_member_with_default(size_obj, "width", 800) : 800;
@@ -267,24 +257,16 @@ int main(int argc, char *argv[]) {
     Application *app = g_new0(Application, 1);
     app->selected_index = -1;
     app->cancellable = g_cancellable_new();
-    app->gtk_app = gtk_application_new(NULL, G_APPLICATION_FLAGS_NONE); 
+    app->gtk_app = gtk_application_new(NULL, G_APPLICATION_DEFAULT_FLAGS); 
     
     g_object_set_data(G_OBJECT(app->gtk_app), "app-data", app);
-    g_object_set_data_full(G_OBJECT(app->gtk_app), "paths-data", paths, (GDestroyNotify)g_list_free_full);
+    g_object_set_data_full(G_OBJECT(app->gtk_app), "paths-data", paths, free_string_list);
+    g_object_set_data(G_OBJECT(app->gtk_app), "config-name", (gpointer)config_name);
 
-    g_autofree gchar *project_root = NULL;
-    g_autofree gchar *exe_path = g_file_read_link("/proc/self/exe", NULL);
-    if (exe_path) {
-        g_autofree gchar *exe_dir = g_path_get_dirname(exe_path);
-        g_autofree gchar *widget_dir = g_path_get_dirname(exe_dir);
-        g_autofree gchar *build_dir = g_path_get_dirname(widget_dir);
-        project_root = g_path_get_dirname(build_dir);
-        g_object_set_data_full(G_OBJECT(app->gtk_app), "project-root", g_strdup(project_root), g_free);
-    }
-    
-    g_autofree gchar *main_config_path = g_build_filename(project_root, "config.json", NULL);
+    g_autofree gchar *main_config_path = g_build_filename("/usr/local/share/aurora-shell", "config.json", NULL);
     g_autoptr(JsonParser) parser = json_parser_new();
     JsonObject *config_obj = NULL;
+    
     if (json_parser_load_from_file(parser, main_config_path, NULL)) {
         JsonArray *root_array = json_node_get_array(json_parser_get_root(parser));
         for (guint i = 0; i < json_array_get_length(root_array); i++) {
@@ -299,7 +281,10 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (!config_obj) { g_printerr("Error: Could not find config block named '%s' or its 'config' object.\n", config_name); return 1; }
+    if (!config_obj) { 
+        g_printerr("Error: Could not find config block named '%s' or its 'config' object in %s.\n", config_name, main_config_path); 
+        return 1; 
+    }
     
     g_signal_connect(app->gtk_app, "activate", G_CALLBACK(activate), config_obj);
     int status = g_application_run(G_APPLICATION(app->gtk_app), 0, NULL);

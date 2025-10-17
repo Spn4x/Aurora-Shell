@@ -18,7 +18,7 @@
     border-radius: 16px;
     box-shadow: none;
     /* This padding creates a nice inner margin from the border */
-    padding: 0px;
+    padding: 6px;
 }
 
 /* The scrolled area containing the items */
@@ -30,7 +30,7 @@
 /* The main horizontal box that holds all the previews.
    Useful for adding padding inside the window. */
 #main-hbox {
-    padding: 0px;
+    padding: 10px 15px;
 }
 
 /* The individual preview item (EventBox) */

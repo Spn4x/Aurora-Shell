@@ -24,5 +24,6 @@ shared_library('cheatsheet', 'cheatsheet.c',
 
 # 2. Install the configuration file for this widget
 install_data('keys.conf',
-  install_dir: data_install_dir
+  install_dir: data_install_dir,
+  install_mode: 'rw-r--r--'
 )
