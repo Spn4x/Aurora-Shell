@@ -1,9 +1,9 @@
-/* --- Custom Name Definitions Mapped to Wallust Placeholders --- */
-@define-color custom-primary #EBE6E6;      /* Main text */
-@define-color custom-secondary #DBD3D3;     /* Sub-text */
-@define-color custom-background #0F1214;    /* Main bar background */
-@define-color custom-surface #383A3C;       /* Module background */
-@define-color custom-accent #966166;        /* Primary accent */
+/* --- Wallust Placeholders for Topbar --- */
+@define-color custom-primary {{foreground}};      /* Main text */
+@define-color custom-secondary {{color7}};         /* Sub-text (often lighter grey) */
+@define-color custom-background {{background}};    /* Main bar background */
+@define-color custom-surface {{color0}};         /* Module background */
+@define-color custom-accent {{color4}};        /* Primary accent */
 
 /* Note: 'custom-border' and 'custom-highlight' were defined but not used. */
 /* Note: 'battery-*', 'backlight-*', 'bluetooth-color' were defined but not used. */

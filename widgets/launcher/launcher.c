@@ -108,6 +108,13 @@ static void update_search_results(LauncherState *state, const gchar *search_text
 //  Signal Handlers / Callbacks
 // ===================================================================
 
+static void on_widget_mapped(GtkWidget *widget, gpointer user_data) {
+    (void)widget;
+    LauncherState *state = (LauncherState *)user_data;
+    gtk_editable_set_text(GTK_EDITABLE(state->entry), "");
+    gtk_widget_grab_focus(state->entry);
+}
+
 static void on_entry_changed(GtkEditable *entry, gpointer user_data) {
     LauncherState *state = (LauncherState *)user_data;
     const gchar *search_text = gtk_editable_get_text(entry);
@@ -117,23 +124,18 @@ static void on_entry_changed(GtkEditable *entry, gpointer user_data) {
 static void on_result_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
     (void)user_data;
     guint index = gtk_list_box_row_get_index(row);
+    // <<< THE TYPO WAS HERE >>>
     LauncherState *state = (LauncherState*)g_object_get_data(G_OBJECT(gtk_widget_get_ancestor(GTK_WIDGET(box), GTK_TYPE_BOX)), "launcher-state");
     AuroraResultObject *result = g_list_model_get_item(G_LIST_MODEL(state->results_store), index);
     if (!result) return;
 
     switch (result->type) {
         case AURORA_RESULT_APP: {
-            // <<< START OF FIX >>>
-            // The data payload is now a GAppInfo object.
             GAppInfo *app_info = G_APP_INFO(result->data);
-            
-            // Use g_app_info_launch(), which correctly detaches the new process
-            // from our shell, preventing the D-Bus communication issue.
             g_autoptr(GError) error = NULL;
             if (!g_app_info_launch(app_info, NULL, NULL, &error)) {
                 g_warning("Failed to launch application: %s", error->message);
             }
-            // <<< END OF FIX >>>
             break;
         }
         case AURORA_RESULT_CALCULATOR: {
@@ -153,10 +155,8 @@ static void on_result_activated(GtkListBox *box, GtkListBoxRow *row, gpointer us
 
     g_object_unref(result);
     
-    // Hide the launcher window after an item is activated.
     GtkWidget *toplevel = gtk_widget_get_ancestor(GTK_WIDGET(row), GTK_TYPE_WINDOW);
     if (toplevel) {
-        // Use set_visible instead of close, which is better for a toggleable widget.
         gtk_widget_set_visible(toplevel, FALSE);
     }
 }
@@ -250,6 +250,8 @@ GtkWidget* create_widget(const char *config_string) {
     gtk_widget_add_css_class(state->main_box, "launcher-box");
     g_object_set_data_full(G_OBJECT(state->main_box), "launcher-state", state, free_launcher_state);
 
+    g_signal_connect(state->main_box, "map", G_CALLBACK(on_widget_mapped), state);
+
     state->entry = gtk_entry_new();
     gtk_widget_add_css_class(state->entry, "launcher-entry");
     gtk_entry_set_placeholder_text(GTK_ENTRY(state->entry), "Search Apps, Calculate, or > Run Command");
@@ -281,7 +283,6 @@ GtkWidget* create_widget(const char *config_string) {
     gtk_widget_add_controller(state->main_box, nav_controller);
 
     gtk_widget_set_focusable(state->entry, TRUE);
-    gtk_widget_grab_focus(state->entry);
 
     return state->main_box;
 }

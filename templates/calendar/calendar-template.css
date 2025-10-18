@@ -7,6 +7,7 @@
 
 
 
+
 /* ======================================= */
 /* ---        Main Widget Theme        --- */
 /* ======================================= */
@@ -16,28 +17,27 @@ window {
   background: transparent;
 }
 
-/* THE FIX: Apply ALL styles and animation to your original class name */
-.layer-shell-window {
+#calendar-widget {
+    font-family: @define-color-font-main, monospace;
+    background-color: alpha(@surface, 0.3); /* A nice, semi-solid background */
+    color: @foreground;
+    border: 2px solid alpha(@accent, 0.9);
+    border-radius: 14px;
+    padding: 12px;
+    min-width: 550px;
+}
+
+
+/* --- Main Widget Theme --- */
+.aurora-widget {
     background-color: alpha(@background, 0.3);
     border: 2px solid alpha(@accent, 0.8);
     font-family: "Cantarell", sans-serif;
-
-    /* The animation engine */
-    transition: all 500ms cubic-bezier(0.34, 1.56, 0.64, 1);
-
-    /* Initial pill state */
-    border-radius: 24px;
-    min-width: 160px;
-    min-height: 48px;
-    padding: 0;
-}
-
-/* Define the final, expanded state */
-.layer-shell-window.expanded {
     border-radius: 12px;
     padding: 10px;
-    min-width: 550px;
 }
+
+
 
 /* Style for the "Calendar" text inside the initial pill */
 .pill-label {

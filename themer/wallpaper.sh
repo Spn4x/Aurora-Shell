@@ -1,30 +1,50 @@
 #!/bin/bash
+# shellcheck disable=SC2016,SC2154,SC2034
 
 # --- Configuration ---
 WALLPAPER_DIR="$HOME/Pictures/Wallpapers"
 
 # --- swww Transition Options ---
 TRANSITION_TYPE="grow"
-TRANSITION_STEP=10
-TRANSITION_FPS=60
+TRANSITION_STEP="10"
+TRANSITION_FPS="60"
+TRANSITION_BEZIER="0.7,0.8,2,3"
+
+# --- General File Paths ---
+SCRIPT_COLORS_RAW="$HOME/.cache/wallust/scriptable_colors.txt"
+LOCK_FILE="/tmp/wallpaper.lock"
+NOTIFICATIONS_MUTED=false
 
 # ===================================================================
-# --- FILE PATHS FOR AURORA SHELL INTEGRATION (CORRECTED) ---
+# --- APPLICATION THEME PATHS ---
+# ===================================================================
+
+# --- Hyprland ---
+HYPR_COLORS_OUTPUT="$HOME/.config/hypr/colors-hyprland-generated.conf"
+
+# --- Kitty ---
+KITTY_THEME_OUTPUT="$HOME/.config/kitty/theme-wallust-generated.conf"
+KITTY_LIGHTEN_FACTOR="1.5"
+HELPER_SCRIPT_PATH="$(dirname "$0")/lighten_color.py"
+
+# --- Ironbar ---
+IRONBAR_STYLE_TEMPLATE="$HOME/.config/ironbar/style-wallust-generated.css"
+IRONBAR_STYLE_OUTPUT="$HOME/.config/ironbar/style.css"
+
+# --- SwayNC ---
+SWAYNC_STYLE_BASE="$HOME/.config/swaync/style-base.css"
+SWAYNC_STYLE_OUTPUT="$HOME/.config/swaync/style.css"
+
+# --- Vicinae ---
+VICINAE_THEME_TEMPLATE="$HOME/.config/vicinae/themes/vicinae-template.json"
+VICINAE_THEME_OUTPUT="$HOME/.config/vicinae/themes/wallust-generated.json"
+
+# ===================================================================
+# --- AURORA SHELL INTEGRATION PATHS ---
 # ===================================================================
 AURORA_CONFIG_DIR="$HOME/.config/aurora-shell"
-SCRIPT_COLORS_RAW="$HOME/.cache/wallust/scriptable_colors.txt"
 
-# --- Output paths for Aurora Shell's final CSS files ---
-UPTIME_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/uptime/archbadge.css"
-CALENDAR_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/calendar/calendar.css"
-CHEATSHEET_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/cheatsheet/cheatsheet.css"
-CC_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/control-center/controlcenter.css"
-LAUNCHER_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/launcher/launcher.css"
-MPRIS_PLAYER_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/mpris-player/mpris-player.css"
-TOPBAR_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/topbar/topbar.css"
-CACHY_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/cachy-selector/cachy-selector.css"
-
-# --- Template paths (where we read the base CSS from) ---
+# Template paths (where we read the base CSS from)
 UPTIME_STYLE_TEMPLATE="$AURORA_CONFIG_DIR/templates/uptime/archbadge-template.css"
 CALENDAR_STYLE_TEMPLATE="$AURORA_CONFIG_DIR/templates/calendar/calendar-template.css"
 CHEATSHEET_STYLE_TEMPLATE="$AURORA_CONFIG_DIR/templates/cheatsheet/cheatsheet-template.css"
@@ -33,93 +53,215 @@ LAUNCHER_STYLE_TEMPLATE="$AURORA_CONFIG_DIR/templates/launcher/launcher-template
 MPRIS_PLAYER_STYLE_TEMPLATE="$AURORA_CONFIG_DIR/templates/mpris-player/mpris-player-template.css"
 TOPBAR_STYLE_TEMPLATE="$AURORA_CONFIG_DIR/templates/topbar/topbar-template.css"
 CACHY_STYLE_TEMPLATE="$AURORA_CONFIG_DIR/templates/cachy-selector/cachy-selector-template.css"
+
+# Output paths for Aurora Shell's final CSS files
+UPTIME_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/uptime/archbadge.css"
+CALENDAR_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/calendar/calendar.css"
+CHEATSHEET_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/cheatsheet/cheatsheet.css"
+CC_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/control-center/controlcenter.css"
+LAUNCHER_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/launcher/launcher.css"
+MPRIS_PLAYER_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/mpris-player/mpris-player.css"
+TOPBAR_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/topbar/topbar.css"
+CACHY_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/cachy-selector/cachy-selector.css"
 # ===================================================================
 
-# --- Lock File ---
-LOCK_FILE="/tmp/wallpaper.lock"
+# --- Helper Functions ---
 
-# --- Theme Application Function ---
+send_notification() {
+    if [ "$NOTIFICATIONS_MUTED" = "false" ]; then
+        notify-send "$@"
+    fi
+}
+
+hex_to_rgba() {
+    local hex=${1#\#}
+    local alpha=$2
+    local r=$((16#${hex:0:2}))
+    local g=$((16#${hex:2:2}))
+    local b=$((16#${hex:4:2}))
+    echo "rgba($r, $g, $b, $alpha)"
+}
+
+theme_generic_css() {
+    local template_file="$1"
+    local output_file="$2"
+    local component_name="$3"
+
+    if [ ! -f "$template_file" ]; then
+        echo "Warning: Template for $component_name not found at '$template_file'. Skipping."
+        return
+    fi
+
+    echo "Generating CSS/JSON for $component_name..."
+    local tmp_file
+    tmp_file=$(mktemp)
+    cp "$template_file" "$tmp_file"
+
+    # Replace all placeholders consistently
+    sed -i \
+        -e "s/{{background}}/$background/g" \
+        -e "s/{{foreground}}/$foreground/g" \
+        -e "s/{{cursor}}/$cursor/g" \
+        -e "s/{{color0}}/$color0/g" -e "s/{{color1}}/$color1/g" \
+        -e "s/{{color2}}/$color2/g" -e "s/{{color3}}/$color3/g" \
+        -e "s/{{color4}}/$color4/g" -e "s/{{color5}}/$color5/g" \
+        -e "s/{{color6}}/$color6/g" -e "s/{{color7}}/$color7/g" \
+        -e "s/{{color8}}/$color8/g" -e "s/{{color9}}/$color9/g" \
+        -e "s/{{color10}}/$color10/g" -e "s/{{color11}}/$color11/g" \
+        -e "s/{{color12}}/$color12/g" -e "s/{{color13}}/$color13/g" \
+        -e "s/{{color14}}/$color14/g" -e "s/{{color15}}/$color15/g" \
+        -e "s/{{accent}}/$color4/g" \
+        -e "s/{{surface}}/$color0/g" \
+        "$tmp_file"
+
+    mv "$tmp_file" "$output_file"
+}
+
+# --- Main Theming and Reloading Function ---
 apply_theme_and_reload() {
     local SELECTED_NEW_WALLPAPER_PATH="$1"
 
-    # 1. Set Wallpaper and Generate Palette
     if [ -z "$SELECTED_NEW_WALLPAPER_PATH" ] || [ ! -f "$SELECTED_NEW_WALLPAPER_PATH" ]; then
-        notify-send -u critical "Themer Error" "Invalid wallpaper path."
+        send_notification -u critical "Wallpaper Script Error" "Invalid wallpaper path provided."
         return 1
     fi
-    local random_pos="$(awk -v seed=$RANDOM 'BEGIN{srand(seed); printf "%.2f,%.2f\n", rand(), rand()}')"
-    swww img "$SELECTED_NEW_WALLPAPER_PATH" --transition-type "$TRANSITION_TYPE" --transition-fps "$TRANSITION_FPS" --transition-step "$TRANSITION_STEP" --transition-pos "$random_pos"
-    wallust run "$SELECTED_NEW_WALLPAPER_PATH"
-    
+
+    # 1. Set Wallpaper and Generate Color Palette
+    send_notification -u low "🎨 Generating Palette" "Setting wallpaper and extracting colors..."
+    local random_pos
+    random_pos="$(awk -v seed=$RANDOM 'BEGIN{srand(seed); printf "%.2f,%.2f\n", rand(), rand()}')"
+    swww img "$SELECTED_NEW_WALLPAPER_PATH" \
+        --transition-type "$TRANSITION_TYPE" --transition-fps "$TRANSITION_FPS" \
+        --transition-step "$TRANSITION_STEP" --transition-pos "$random_pos" \
+        ${TRANSITION_BEZIER:+--transition-bezier "$TRANSITION_BEZIER"}
+
+    # --- THIS IS THE CORRECTED LINE ---
+    wallust run --backend wal "$SELECTED_NEW_WALLPAPER_PATH"
+    if [ $? -ne 0 ]; then send_notification -u critical "Wallust Error"; return 1; fi
+
     # 2. Source the new colors
     if [ ! -f "$SCRIPT_COLORS_RAW" ]; then
-        notify-send -u critical "Themer Error" "Wallust did not generate colors."
+        send_notification -u critical "Themer Error" "Wallust did not generate colors."
         return 1
     fi
     set +u
+    # shellcheck source=/dev/null
     source "$SCRIPT_COLORS_RAW"
     set -u
-    notify-send -u low "🎨 Applying Theme to Aurora Shell..."
 
-    # 3. Helper function to theme a widget's CSS
-    theme_aurora_widget() {
-        local template_file="$1"
-        local output_file="$2"
-        local widget_name="$3"
+    send_notification -u low "🖌️ Applying Themes..."
 
-        if [ ! -f "$template_file" ]; then
-            echo "Warning: Template for $widget_name not found at '$template_file'. Skipping."
-            return
-        fi
+    # 3. Theme Aurora Shell Widgets
+    theme_generic_css "$UPTIME_STYLE_TEMPLATE" "$UPTIME_STYLE_OUTPUT" "Uptime"
+    theme_generic_css "$CALENDAR_STYLE_TEMPLATE" "$CALENDAR_STYLE_OUTPUT" "Calendar"
+    theme_generic_css "$CHEATSHEET_STYLE_TEMPLATE" "$CHEATSHEET_STYLE_OUTPUT" "Cheatsheet"
+    theme_generic_css "$CC_STYLE_TEMPLATE" "$CC_STYLE_OUTPUT" "Control Center"
+    theme_generic_css "$LAUNCHER_STYLE_TEMPLATE" "$LAUNCHER_STYLE_OUTPUT" "Launcher"
+    theme_generic_css "$MPRIS_PLAYER_STYLE_TEMPLATE" "$MPRIS_PLAYER_STYLE_OUTPUT" "MPRIS Player"
+    theme_generic_css "$TOPBAR_STYLE_TEMPLATE" "$TOPBAR_STYLE_OUTPUT" "Topbar"
+    theme_generic_css "$CACHY_STYLE_TEMPLATE" "$CACHY_STYLE_OUTPUT" "Cachy Selector"
 
-        echo "Generating CSS for $widget_name..."
-        local tmp_css=$(mktemp)
-        cp "$template_file" "$tmp_css"
-        
-        # Replace all placeholders
-        sed -i "s/{{color0}}/$color0/g" "$tmp_css"
-        sed -i "s/{{color1}}/$color1/g" "$tmp_css"
-        sed -i "s/{{color2}}/$color2/g" "$tmp_css"
-        sed -i "s/{{color3}}/$color3/g" "$tmp_css"
-        sed -i "s/{{color4}}/$color4/g" "$tmp_css"
-        sed -i "s/{{color5}}/$color5/g" "$tmp_css"
-        sed -i "s/{{color6}}/$color6/g" "$tmp_css"
-        sed -i "s/{{color7}}/$color7/g" "$tmp_css"
-        sed -i "s/{{color8}}/$color8/g" "$tmp_css"
-        sed -i "s/{{color9}}/$color9/g" "$tmp_css"
-        sed -i "s/{{color10}}/$color10/g" "$tmp_css"
-        sed -i "s/{{color11}}/$color11/g" "$tmp_css"
-        sed -i "s/{{color12}}/$color12/g" "$tmp_css"
-        sed -i "s/{{color13}}/$color13/g" "$tmp_css"
-        sed -i "s/{{color14}}/$color14/g" "$tmp_css"
-        sed -i "s/{{color15}}/$color15/g" "$tmp_css"
-        sed -i "s/{{background}}/$background/g" "$tmp_css"
-        sed -i "s/{{foreground}}/$foreground/g" "$tmp_css"
-        sed -i "s/{{accent}}/$color4/g" "$tmp_css"
-        sed -i "s/{{surface}}/$color0/g" "$tmp_css"
+    # 4. Theme Other Applications
+    # --- Hyprland ---
+    echo "Generating Hyprland colors..."
+    local active_border_col1_hex=${color4#\#}
+    local active_border_col2_hex=${color6#\#}
+    local inactive_border_col_hex=${color0#\#}
+    cat > "$HYPR_COLORS_OUTPUT" << EOF
+# Hyprland colors generated by wallpaper.sh
+\$wallust_background = $background
+\$wallust_foreground = $foreground
+\$wallust_cursor = $cursor
+\$wallust_color0 = $color0; \$wallust_color1 = $color1; \$wallust_color2 = $color2; \$wallust_color3 = $color3
+\$wallust_color4 = $color4; \$wallust_color5 = $color5; \$wallust_color6 = $color6; \$wallust_color7 = $color7
+\$wallust_color8 = $color8; \$wallust_color9 = $color9; \$wallust_color10 = $color10; \$wallust_color11 = $color11
+\$wallust_color12 = $color12; \$wallust_color13 = $color13; \$wallust_color14 = $color14; \$wallust_color15 = $color15
+general {
+    col.active_border = rgba(${active_border_col1_hex}ff) rgba(${active_border_col2_hex}ff) 45deg
+    col.inactive_border = rgba(${inactive_border_col_hex}aa)
+}
+EOF
 
-        mv "$tmp_css" "$output_file"
-    }
+    # --- Kitty (Lighter Variant) ---
+    if [ -x "$HELPER_SCRIPT_PATH" ]; then
+        echo "Generating lighter Kitty theme..."
+        cat > "$KITTY_THEME_OUTPUT" << EOF
+# Kitty colors generated by wallpaper.sh (Lighter Variant)
+foreground          $("$HELPER_SCRIPT_PATH" "$foreground" "$KITTY_LIGHTEN_FACTOR")
+cursor              $("$HELPER_SCRIPT_PATH" "$cursor" "$KITTY_LIGHTEN_FACTOR")
+color8              $("$HELPER_SCRIPT_PATH" "$color8" "$KITTY_LIGHTEN_FACTOR")
+color1              $("$HELPER_SCRIPT_PATH" "$color1" "$KITTY_LIGHTEN_FACTOR")
+color9              $("$HELPER_SCRIPT_PATH" "$color9" "$KITTY_LIGHTEN_FACTOR")
+color2              $("$HELPER_SCRIPT_PATH" "$color2" "$KITTY_LIGHTEN_FACTOR")
+color10             $("$HELPER_SCRIPT_PATH" "$color10" "$KITTY_LIGHTEN_FACTOR")
+color3              $("$HELPER_SCRIPT_PATH" "$color3" "$KITTY_LIGHTEN_FACTOR")
+color11             $("$HELPER_SCRIPT_PATH" "$color11" "$KITTY_LIGHTEN_FACTOR")
+color4              $("$HELPER_SCRIPT_PATH" "$color4" "$KITTY_LIGHTEN_FACTOR")
+color12             $("$HELPER_SCRIPT_PATH" "$color12" "$KITTY_LIGHTEN_FACTOR")
+color5              $("$HELPER_SCRIPT_PATH" "$color5" "$KITTY_LIGHTEN_FACTOR")
+color13             $("$HELPER_SCRIPT_PATH" "$color13" "$KITTY_LIGHTEN_FACTOR")
+color6              $("$HELPER_SCRIPT_PATH" "$color6" "$KITTY_LIGHTEN_FACTOR")
+color14             $("$HELPER_SCRIPT_PATH" "$color14" "$KITTY_LIGHTEN_FACTOR")
+color7              $("$HELPER_SCRIPT_PATH" "$color7" "$KITTY_LIGHTEN_FACTOR")
+color15             $("$HELPER_SCRIPT_PATH" "$color15" "$KITTY_LIGHTEN_FACTOR")
+EOF
+    fi
 
-    # 4. Theme all Aurora widgets that have templates
-    theme_aurora_widget "$UPTIME_STYLE_TEMPLATE" "$UPTIME_STYLE_OUTPUT" "Uptime"
-    theme_aurora_widget "$CALENDAR_STYLE_TEMPLATE" "$CALENDAR_STYLE_OUTPUT" "Calendar"
-    theme_aurora_widget "$CHEATSHEET_STYLE_TEMPLATE" "$CHEATSHEET_STYLE_OUTPUT" "Cheatsheet"
-    theme_aurora_widget "$CC_STYLE_TEMPLATE" "$CC_STYLE_OUTPUT" "Control Center"
-    theme_aurora_widget "$LAUNCHER_STYLE_TEMPLATE" "$LAUNCHER_STYLE_OUTPUT" "Launcher"
-    theme_aurora_widget "$MPRIS_PLAYER_STYLE_TEMPLATE" "$MPRIS_PLAYER_STYLE_OUTPUT" "MPRIS Player"
-    theme_aurora_widget "$TOPBAR_STYLE_TEMPLATE" "$TOPBAR_STYLE_OUTPUT" "Topbar"
-    theme_aurora_widget "$CACHY_STYLE_TEMPLATE" "$CACHY_STYLE_OUTPUT" "Cachy Selector"
+    # --- Ironbar and Vicinae (use the generic theming function) ---
+    theme_generic_css "$IRONBAR_STYLE_TEMPLATE" "$IRONBAR_STYLE_OUTPUT" "Ironbar"
+    theme_generic_css "$VICINAE_THEME_TEMPLATE" "$VICINAE_THEME_OUTPUT" "Vicinae"
 
-    notify-send -i "$SELECTED_NEW_WALLPAPER_PATH" "✅ Aurora Theme Applied"
+    # --- SwayNC (special handling for RGBA values) ---
+    if [ -f "$SWAYNC_STYLE_BASE" ]; then
+        echo "Generating SwayNC CSS..."
+        local tmp_swaync_css
+        tmp_swaync_css=$(mktemp)
+        cp "$SWAYNC_STYLE_BASE" "$tmp_swaync_css"
+
+        # Replace standard color placeholders
+        sed -i "s|%%BACKGROUND%%|$background|g" "$tmp_swaync_css"
+        sed -i "s|%%FOREGROUND%%|$foreground|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR0%%|$color0|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR1%%|$color1|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR4%%|$color4|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR7%%|$color7|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR15%%|$color15|g" "$tmp_swaync_css"
+
+        # Replace RGBA placeholders by calling the helper function
+        sed -i "s|%%BACKGROUND_RGBA_30%%|$(hex_to_rgba "$background" "0.3")|g" "$tmp_swaync_css"
+        sed -i "s|%%BACKGROUND_RGBA_60%%|$(hex_to_rgba "$background" "0.6")|g" "$tmp_swaync_css"
+        sed -i "s|%%BACKGROUND_RGBA_90%%|$(hex_to_rgba "$background" "0.9")|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR0_RGBA_30%%|$(hex_to_rgba "$color0" "0.3")|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR0_RGBA_50%%|$(hex_to_rgba "$color0" "0.5")|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR1_RGBA_50%%|$(hex_to_rgba "$color1" "0.5")|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR4_RGBA_50%%|$(hex_to_rgba "$color4" "0.5")|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR7_RGBA_50%%|$(hex_to_rgba "$color7" "0.5")|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR8_RGBA_50%%|$(hex_to_rgba "$color8" "0.5")|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR12_RGBA_50%%|$(hex_to_rgba "$color12" "0.5")|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR13_RGBA_50%%|$(hex_to_rgba "$color13" "0.5")|g" "$tmp_swaync_css"
+        sed -i "s|%%COLOR14_RGBA_50%%|$(hex_to_rgba "$color14" "0.5")|g" "$tmp_swaync_css"
+
+        mv "$tmp_swaync_css" "$SWAYNC_STYLE_OUTPUT"
+    fi
+
+    # 5. Reload Services
+    echo "Reloading applications..."
+    hyprctl reload > /dev/null 2>&1 &
+    # Add other reload commands as needed, e.g.:
+    # pgrep -x "kitty" && killall -SIGUSR1 kitty
+    if pgrep -x "swaync" > /dev/null; then swaync-client -rs > /dev/null 2>&1; echo "Reloaded SwayNC style."; fi
+
+    send_notification -i "$SELECTED_NEW_WALLPAPER_PATH" "✅ Theme Applied" "Your new desktop theme is now active!"
     return 0
 }
 
 # --- Function to ensure swww-daemon is running ---
 ensure_swww_daemon() {
     if ! pgrep -x "swww-daemon" > /dev/null; then
+        echo "swww-daemon not running, attempting to initialize..."
         swww init >/dev/null 2>&1 && sleep 0.5
         if ! pgrep -x "swww-daemon" > /dev/null; then return 1; fi
+        echo "swww-daemon initialized."
     fi
     return 0
 }
@@ -127,37 +269,79 @@ ensure_swww_daemon() {
 # ===================================================================
 # --- SCRIPT EXECUTION STARTS HERE ---
 # ===================================================================
+
+# Argument parsing for --mute flag
+for arg in "$@"; do
+    if [[ "$arg" == "--mute" ]]; then
+        NOTIFICATIONS_MUTED=true
+        echo "Notifications are muted."
+    fi
+done
+
+# Lock file mechanism to prevent multiple instances
 trap 'rm -f "$LOCK_FILE"' EXIT
-if [ -e "$LOCK_FILE" ]; then exit 1; else touch "$LOCK_FILE"; fi
+if [ -e "$LOCK_FILE" ]; then
+    echo "Script is already running. Exiting."
+    exit 1
+else
+    touch "$LOCK_FILE"
+fi
 
+# --- Startup Mode ---
+if [[ "$1" == "--startup" ]]; then
+    echo "Startup mode: Ensuring swww-daemon is running."
+    if ! ensure_swww_daemon; then
+        echo "Error: Failed to start swww-daemon on startup." >&2; exit 1;
+    fi
+    echo "swww-daemon is running. Startup script finished."; exit 0;
+fi
+
+# --- Check dependencies for all other modes ---
 if ! ensure_swww_daemon; then
-    notify-send -u critical "Themer Error" "Failed to start swww-daemon."
-    exit 1
+    send_notification -u critical "SWWW Error" "Failed to start swww-daemon."; exit 1;
 fi
-
 if [ ! -d "$WALLPAPER_DIR" ]; then
-    notify-send -u critical "Themer Error" "Wallpaper directory '$WALLPAPER_DIR' not found."
-    exit 1
+    send_notification -u critical "Error" "Directory '$WALLPAPER_DIR' not found."; exit 1;
 fi
-
 WALLPAPER_FILES=$(find "$WALLPAPER_DIR" -type f \( -iname '*.png' -o -iname '*.jpeg' -o -iname '*.jpg' -o -iname '*.gif' -o -iname '*.webp' \) | sort)
-
 if [ -z "$WALLPAPER_FILES" ]; then
-    notify-send "Themer Error" "No images found in $WALLPAPER_DIR."
-    exit 1
+    send_notification "Error" "No image files found in $WALLPAPER_DIR."; exit 1;
 fi
 
-# --- Interactive Mode ---
+# --- Cycling Mode (--next/--prev) ---
+if [[ " $@ " =~ " --next " ]] || [[ " $@ " =~ " --prev " ]]; then
+    echo "Cycling mode..."
+    mapfile -t wallpaper_array < <(echo "$WALLPAPER_FILES")
+    count=${#wallpaper_array[@]}
+    current_wallpaper=$(swww query | head -n 1 | sed 's/.*: //')
+    current_index=-1
+    for i in "${!wallpaper_array[@]}"; do
+        if [[ "${wallpaper_array[$i]}" == "$current_wallpaper" ]]; then current_index=$i; break; fi
+    done
+    if [[ $current_index -eq -1 ]]; then current_index=0; fi
+
+    if [[ " $@ " =~ " --next " ]]; then
+        new_index=$(( (current_index + 1) % count ))
+    else # --prev
+        new_index=$(( (current_index - 1 + count) % count ))
+    fi
+    SELECTED_NEW_WALLPAPER_PATH="${wallpaper_array[$new_index]}"
+    apply_theme_and_reload "$SELECTED_NEW_WALLPAPER_PATH"
+    exit $?
+fi
+
+# --- Interactive Mode (Default) ---
 echo "Interactive mode: Launching cachy-selector..."
-SELECTOR_PATH="/usr/local/bin/cachy-selector"
-
-if [ ! -x "$SELECTOR_PATH" ]; then
-    notify-send -u critical "Themer Error" "cachy-selector not found at $SELECTOR_PATH"
+# This assumes cachy-selector is in your path or you can specify a full path.
+SELECTOR_EXECUTABLE="cachy-selector" 
+if ! command -v "$SELECTOR_EXECUTABLE" &> /dev/null; then
+    send_notification -u critical "Error" "'$SELECTOR_EXECUTABLE' not found in PATH."
     exit 1
 fi
 
-# The selector is now called with the correct config name "cachy-selector"
-SELECTED_NEW_WALLPAPER_PATH=$(echo "$WALLPAPER_FILES" | "$SELECTOR_PATH" "cachy-selector")
+# We pipe the list of FULL PATHS directly into our app.
+# It will print the selected full path back to us.
+SELECTED_NEW_WALLPAPER_PATH=$(echo "$WALLPAPER_FILES" | "$SELECTOR_EXECUTABLE" "cachy-selector")
 
 if [ -z "$SELECTED_NEW_WALLPAPER_PATH" ]; then
     echo "No wallpaper selected. Exiting."

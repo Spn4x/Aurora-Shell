@@ -6,7 +6,7 @@
 @define-color accent {{color4}};
 @define-color surface {{color0}};
 
-/* --- Main Styles --- */
+* --- Main Styles --- */
 window {
     background-color: transparent;
 }

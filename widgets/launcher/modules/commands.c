@@ -3,7 +3,7 @@
 #include "../launcher.h"
 
 // Define your preferred terminal here
-#define TERMINAL_COMMAND "foot"
+#define TERMINAL_COMMAND "kitty"
 
 GList* get_command_results(const gchar *search_text) {
     if (!g_str_has_prefix(search_text, "> ")) {
