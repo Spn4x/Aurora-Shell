@@ -1,6 +1,7 @@
 # Meson build directory
 build/
 builddir/
+uninstall
 
 # Compiled objects and libraries
 *.o

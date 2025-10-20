@@ -10,7 +10,7 @@ window {
 }
 
 /* Apply all visual styles to our container box */
-.main-container {
+#uptime-widget {
     background-color: alpha(@surface, 0.3);
     border: 2px solid alpha(@accent, 0.8); /* Use the accent color for the border */
     border-radius: 8px;

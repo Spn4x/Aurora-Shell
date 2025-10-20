@@ -10,10 +10,10 @@ window {
 }
 
 /* Apply all visual styles to our container box */
-.main-container {
+#uptime-widget {
     background-color: alpha(@surface, 0.3);
     border: 2px solid alpha(@accent, 0.8); 
-    border-radius: 16px;
+    border-radius: 8px;
     padding: 3px 10px;
     box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
     font-size: 14px;

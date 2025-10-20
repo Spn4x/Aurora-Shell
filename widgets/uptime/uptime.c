@@ -72,10 +72,14 @@ static gboolean update_info(gpointer user_data) {
 // ===================================================================
 //  Plugin Entry Point (Final Version)
 // ===================================================================
+//  Plugin Entry Point (Final, Corrected Version using GtkFrame)
+// ===================================================================
 G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
+    // This part is for managing our widget's data. It stays the same.
     UptimeWidget *widget_data = g_new0(UptimeWidget, 1);
     widget_data->format_string = g_strdup("Uptime: {uptime}"); 
 
+    // This part reads the "text" property from your config.json. It also stays the same.
     if (config_string && *config_string) {
         g_autoptr(JsonParser) parser = json_parser_new();
         if (json_parser_load_from_data(parser, config_string, -1, NULL)) {
@@ -89,25 +93,42 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
         }
     }
 
+    // --- START OF CHANGES ---
+
+    // 1. Create a GtkFrame. This will be our new top-level widget.
+    //    A GtkFrame is designed to be styled with borders, backgrounds, etc.
+    GtkWidget *frame = gtk_frame_new(NULL);
+
+    // 2. Apply your ID to the FRAME. This is the widget your CSS will style.
+    gtk_widget_set_name(frame, "uptime-widget");
+    
+    // 3. Create the GtkBox like before. Its only job is now to arrange the label.
+    //    It no longer needs any styling information.
     widget_data->main_container = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     
-    // ===================================================================
-    // <<< THE FIX IS HERE: Use the original class name your CSS expects. >>>
-    // ===================================================================
-    gtk_widget_add_css_class(widget_data->main_container, "main-container");
+    // 4. Place the box inside the frame.
+    gtk_frame_set_child(GTK_FRAME(frame), widget_data->main_container);
     
+    // 5. Create the label and add its CSS class, just like before.
     widget_data->info_label = gtk_label_new("");
     gtk_widget_add_css_class(widget_data->info_label, "info-label");
     gtk_widget_set_margin_top(widget_data->info_label, 2);
     gtk_widget_set_margin_bottom(widget_data->info_label, 2);
     
+    // 6. Add the label to the box.
     gtk_box_append(GTK_BOX(widget_data->main_container), widget_data->info_label);
     
+    // This logic to update the text stays the same.
     update_info(widget_data);
     g_timeout_add_seconds(60, (GSourceFunc)update_info, widget_data);
     
-    g_signal_connect_swapped(widget_data->main_container, "destroy", G_CALLBACK(g_free), widget_data->format_string);
-    g_signal_connect_swapped(widget_data->main_container, "destroy", G_CALLBACK(g_free), widget_data);
+    // 7. IMPORTANT: Connect the memory cleanup signals to the new top-level widget (the frame).
+    //    This ensures that when the frame is destroyed, our data is freed.
+    g_signal_connect_swapped(frame, "destroy", G_CALLBACK(g_free), widget_data->format_string);
+    g_signal_connect_swapped(frame, "destroy", G_CALLBACK(g_free), widget_data);
     
-    return widget_data->main_container;
+    // 8. Return the FRAME, which is now the complete, styleable widget.
+    return frame;
+
+    // --- END OF CHANGES ---
 }

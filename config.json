@@ -19,7 +19,7 @@
         "left": [ { "name": "workspaces" } ],
         "center": [ { "name": "clock", "on-click": "aurora-shell --toggle calendar" } ],
         "right": [
-          { "name": "sysinfo", "on-click": "kitty -e btop" },
+          { "name": "sysinfo", "on-click": "aurora-shell --toggle control-center" },
           { "name": "audio" },
           { "name": "zen", "on-click-right": "swaync-client --toggle-panel" }
         ]
