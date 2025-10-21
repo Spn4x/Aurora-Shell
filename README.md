@@ -255,6 +255,6 @@ To completely remove Aurora Shell from your system, follow these steps.
 
 ---
 
-    ## License
+## License
 
     This project is licensed under the [GgplV3 License](LICENSE). Feel free to use and modify the code as you see fit.
