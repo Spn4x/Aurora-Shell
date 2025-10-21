@@ -69,6 +69,80 @@ bind = $mainMod, T, exec, aurora-shell --toggle themer
 bind = $mainMod, U, exec, aurora-shell --toggle uptime
 ```
 
+## Configuration
+
+Aurora Shell is configured entirely within the `~/.config/aurora-shell/` directory. This directory is created for you upon first run, but you can also create it manually.
+
+The configuration is split into two main parts:
+*   `config.json`: Defines what widgets to load, their behavior, and their position.
+*   `templates/`: A directory containing CSS files for styling each widget.
+
+### Main Configuration: `config.json`
+
+This file is the brain of your setup. It is a JSON array where each object in the array defines a single widget instance. This allows you to define and customize every component on your screen.
+
+#### Common Widget Properties
+
+Most widgets share a common set of configuration properties:
+
+| Property             | Type          | Description                                                                                              |
+| :------------------- | :------------ | :------------------------------------------------------------------------------------------------------- |
+| `name`               | String        | A unique name for the widget (e.g., "topbar", "launcher").                                               |
+| `plugin`             | String        | The absolute path to the widget's compiled `.so` plugin file.                                            |
+| `stylesheet`         | String        | The name of the CSS file within `~/.config/aurora-shell/templates/<widget>/` to apply.                     |
+| `layer`              | String        | The Wayland layer: `background`, `bottom`, `top`, or `overlay`.                                          |
+| `anchor`             | String        | Where to position the widget on screen (e.g., `top`, `bottom`, `left`, `right`, `center`). Supports combinations like `top-left`. |
+| `visible_on_start`   | Boolean       | If `true`, the widget will be visible when `aurora-shell` starts.                                        |
+| `interactive`        | Boolean       | If `true`, the widget can receive keyboard focus. Set to `false` for informational widgets.            |
+| `margins`            | Object        | Sets space around the widget. Example: `{ "top": 5, "left": 10 }`.                                       |
+| `size`               | Object        | Sets a fixed size for the widget. Example: `{ "width": 500, "height": 300 }`.                             |
+| `animation`          | Object        | (Optional) Defines an entry animation for the widget.                                                    |
+| `config`             | Object        | (Optional) A nested object for widget-specific settings (see Topbar example below).                      |
+
+#### Example Widget Definition (`topbar`)
+
+This example from the default configuration shows how these properties work together to create a feature-rich top bar.
+
+```json
+{
+  "name": "topbar",
+  "plugin": "/usr/local/lib/aurora-shell/widgets/topbar.so",
+  "stylesheet": "topbar.css",
+  "layer": "top",
+  "anchor": "top",
+  "exclusive": true, // This reserves space, so fullscreen windows don't cover it
+  "visible_on_start": true,
+  "interactive": true,
+  "margins": { "top": 5, "left": 5, "right": 5 },
+  // Widget-specific configuration
+  "config": {
+    "modules": {
+      "left": [ { "name": "workspaces" } ],
+      "center": [ { "name": "clock", "on-click": "aurora-shell --toggle calendar" } ],
+      "right": [
+        { "name": "sysinfo", "on-click": "aurora-shell --toggle control-center" },
+        { "name": "audio" },
+        { "name": "zen", "on-click-right": "swaync-client --toggle-panel" }
+      ]
+    }
+  }
+}
+```
+
+### Styling and Theming
+
+All visual styling is handled by CSS. The `~/.config/aurora-shell/templates/` directory contains a subdirectory for each widget's styles.
+
+#### The Template System
+
+The theming workflow is designed to be dynamic:
+
+1.  **Template Files (`*-template.css`):** These are the base stylesheets. They may contain placeholder variables for colors.
+2.  **Themer Script:** When you run the `themer` widget (e.g., via `wallpaper.sh`), it reads a template file, replaces the variables with colors generated from your wallpaper, and saves the result as a new file.
+3.  **Active Files (`*.css`):** This is the final, generated CSS file that is actually loaded by the widget, as specified in your `config.json`.
+
+This means you can edit the `*-template.css` files to change the fundamental structure and style, and then run the themer to apply your color scheme. To apply custom, static styles, you can simply edit the final `.css` files directly.
+
 ### Command Reference
 
 Here is a complete list of the default widget toggle commands:
