@@ -59,7 +59,7 @@
       "to": 15,
       "duration": 500
     },
-    "interactive": true
+    "interactive": false
   },
   {
     "name": "control-center",
@@ -73,7 +73,7 @@
       "width": 600,
       "height": 200
     },
-    "interactive": true
+    "interactive": false
   },
   {
     "name": "mpris-player",

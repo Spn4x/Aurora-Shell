@@ -26,20 +26,19 @@
 /* --- Player Info & Album Art --- */
 .mpris-player-widget .album-art {
   border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  
 }
 .mpris-player-widget .title-label {
   font-size: 1.2em;
   font-weight: bold;
   color: @white;
-  text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.8);
+  
 }
 .mpris-player-widget .artist-label {
   font-size: 1em;
   color: @foreground;
-  text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.8);
+ 
 }
-
 /* --- Media Control Buttons --- */
 .mpris-player-widget .linked button {
   background-color: transparent;
