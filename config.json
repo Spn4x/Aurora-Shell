@@ -8,7 +8,7 @@
     "exclusive": true,
     "visible_on_start": true,
     "interactive": true,
-    "margins": {
+    "margin": {
       "top": 5,
       "bottom": 0,
       "left": 5,
@@ -67,7 +67,7 @@
     "stylesheet": "controlcenter.css",
     "anchor": "top-center",
     "layer": "overlay",
-    "margin": { "top": 10 },
+    "margin": { "top": 5 },
     "visible_on_start": false,
     "size": {
       "width": 600,
@@ -100,39 +100,32 @@
   },
   {
     "name": "cachy-selector",
+    "plugin": "/usr/local/lib/aurora-shell/widgets/cachy-selector.so",
+    "stylesheet": "cachy-selector.css",
     "visible_on_start": false,
-    "config": {
-      "stylesheet": "cachy-selector.css",
-      "size": {
-        "width": 800,
-        "height": 210
-      },
-      "margins": {
-        "top": 50
-      }
-    }
+    "layer": "overlay",
+    "anchor": "center",
+    "size": {
+      "width": 800,
+      "height": 210
+    },
+    "interactive": true
   },
   {
     "name": "insight",
     "plugin": "/usr/local/lib/aurora-shell/widgets/aurora-insight.so",
     "stylesheet": "insight.css",
-    "layer": "overlay",
-    "anchor": "bottom",
+    "layer": "top",
+    "anchor": "top-center",
     "visible_on_start": false,
-    "interactive": true,
-    "margins": {
-      "top": 20,
-      "right": 20
+    "interactive": false,
+    "margin": {
+      "top": -12
     }
   },
    {
     "type": "daemon",
     "name": "aurora-insight-daemon",
     "command": "aurora-insight-daemon"
-  },
-    {
-    "type": "daemon",
-    "name": "aurora-mpris-resetter",
-    "command": "aurora-mpris-resetter"
   }
 ]

@@ -1,6 +1,5 @@
 // ===============================================
 //  Aurora Shell - Main Host Application
-//  (Final, Corrected, Simplified)
 // ===============================================
 
 #include <glib.h>
@@ -15,11 +14,14 @@ typedef struct {
     GtkWindow *window;
     GtkWidget *widget;
     gboolean is_interactive;
+    JsonObject *config_obj; // This is now a non-owning pointer.
 } WidgetState;
 
 typedef struct {
     GtkApplication *app;
     GHashTable *widgets;
+    GFileMonitor *config_monitor;
+    JsonNode *config_root; // The single owner of the entire config tree.
 } AuroraShell;
 
 typedef GtkWidget* (*CreateWidgetFunc)(const char *config_string);
@@ -29,13 +31,15 @@ typedef struct {
     char *path;
 } CssReloadData;
 
-// --- XDG Configuration Management ---
+// Forward declaration
+static void load_all_widgets(AuroraShell *shell);
+
 static void ensure_user_config_exists() {
     g_autofree gchar *user_config_dir_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", NULL);
     g_autofree gchar *user_config_file_path = g_build_filename(user_config_dir_path, "config.json", NULL);
 
     if (g_file_test(user_config_file_path, G_FILE_TEST_EXISTS)) {
-        return; // Config already exists, our job is done.
+        return;
     }
 
     g_print("First run: User config not found. Creating default configuration at %s\n", user_config_dir_path);
@@ -47,14 +51,12 @@ static void ensure_user_config_exists() {
         return;
     }
 
-    // Copy the default config.json
     g_autoptr(GFile) default_config_file = g_file_new_for_path("/usr/local/share/aurora-shell/config.json");
     g_autoptr(GFile) user_config_file = g_file_new_for_path(user_config_file_path);
     if (!g_file_copy(default_config_file, user_config_file, G_FILE_COPY_NONE, NULL, NULL, NULL, &error)) {
         g_warning("Failed to copy default config.json: %s", error->message);
     }
 
-    // Use a simple, robust 'cp' command to recursively copy the templates directory.
     g_autofree gchar *cp_command = g_strdup_printf("cp -r /usr/local/share/aurora-shell/templates %s", user_config_dir_path);
     g_spawn_command_line_sync(cp_command, NULL, NULL, NULL, NULL);
 }
@@ -96,6 +98,35 @@ static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval, 
     return GDK_EVENT_PROPAGATE;
 }
 
+static void unload_all_widgets(AuroraShell *shell) {
+    g_print("Unloading all widgets...\n");
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, shell->widgets);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        WidgetState *state = (WidgetState *)value;
+        if (GTK_IS_WINDOW(state->window)) {
+            gtk_window_destroy(state->window);
+        }
+    }
+    g_hash_table_remove_all(shell->widgets);
+    g_print("All widgets unloaded.\n");
+}
+
+static void on_config_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
+    (void)monitor; (void)file; (void)other_file;
+    if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
+        g_print("Configuration file changed. Reloading shell...\n");
+        AuroraShell *shell = (AuroraShell *)user_data;
+        unload_all_widgets(shell);
+        if (shell->config_root) {
+            json_node_free(shell->config_root);
+            shell->config_root = NULL;
+        }
+        load_all_widgets(shell);
+    }
+}
+
 static GtkLayerShellLayer parse_layer_string(const gchar *layer_str) {
     if (g_strcmp0(layer_str, "bottom") == 0) return GTK_LAYER_SHELL_LAYER_BOTTOM;
     if (g_strcmp0(layer_str, "background") == 0) return GTK_LAYER_SHELL_LAYER_BACKGROUND;
@@ -124,13 +155,8 @@ static void apply_anchor_and_margins(GtkWindow *window, GtkWidget *widget, JsonO
     }
 }
 
-// Place this new helper function right before your existing load_all_widgets function.
 static void launch_daemon_if_needed(const char *command) {
-    // We use `pgrep` to check if the process is already running.
     g_autofree gchar *check_command = g_strdup_printf("pgrep -f %s", command);
-    
-    // g_spawn_command_line_sync returns TRUE on success (exit code 0).
-    // pgrep returns 0 if it finds a process, 1 if not. So if this is TRUE, it's running.
     if (g_spawn_command_line_sync(check_command, NULL, NULL, NULL, NULL)) {
         g_print("Daemon '%s' is already running.\n", command);
         return;
@@ -138,30 +164,16 @@ static void launch_daemon_if_needed(const char *command) {
 
     g_print("Spawning daemon: '%s'\n", command);
     g_autoptr(GError) error = NULL;
-    
-    // Split the command string into an array for g_spawn_async
     gchar **argv = g_strsplit(command, " ", -1);
 
-    g_spawn_async(
-        NULL,             // Use default working directory
-        argv,             // The command and its arguments
-        NULL,             // No environment variables to pass
-        G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH, // Detach the process and find it in PATH
-        NULL,             // No child setup function
-        NULL,             // No user data
-        NULL,             // Don't need the child's PID
-        &error            // Error handling
-    );
-
-    g_strfreev(argv); // Free the array created by g_strsplit
+    g_spawn_async(NULL, argv, NULL, G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &error);
+    g_strfreev(argv);
 
     if (error) {
         g_warning("Failed to spawn daemon '%s': %s", command, error->message);
     }
 }
 
-
-// Replace your entire existing load_all_widgets function with this new version.
 static void load_all_widgets(AuroraShell *shell) {
     g_autoptr(JsonParser) parser = json_parser_new();
     g_autofree gchar *user_config_file_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "config.json", NULL);
@@ -170,11 +182,25 @@ static void load_all_widgets(AuroraShell *shell) {
         return;
     }
 
-    JsonArray *config_array = json_node_get_array(json_parser_get_root(parser));
+    shell->config_root = json_parser_steal_root(parser);
+    if (!shell->config_root || !JSON_NODE_HOLDS_ARRAY(shell->config_root)) {
+        g_warning("Config file root is not a valid JSON array. Nothing to load.");
+        if (shell->config_root) {
+            json_node_free(shell->config_root);
+            shell->config_root = NULL;
+        }
+        return;
+    }
+    
+    JsonArray *config_array = json_node_get_array(shell->config_root);
     for (guint i = 0; i < json_array_get_length(config_array); i++) {
-        JsonObject *item_obj = json_array_get_object_element(config_array, i);
+        // THE FIX: Check for non-object elements (like from a trailing comma) HERE.
+        if (!JSON_NODE_HOLDS_OBJECT(json_array_get_element(config_array, i))) {
+            continue;
+        }
 
-        // --- NEW: Check if this entry is a daemon and handle it ---
+        JsonObject *item_obj = json_array_get_object_element(config_array, i);
+        
         const char *type = json_object_get_string_member_with_default(item_obj, "type", "widget");
 
         if (g_strcmp0(type, "daemon") == 0) {
@@ -182,12 +208,9 @@ static void load_all_widgets(AuroraShell *shell) {
             if (command) {
                 launch_daemon_if_needed(command);
             }
-            continue; // Skip to the next item in the config, as this is not a widget
+            continue;
         }
-        // --- End of daemon handling logic ---
 
-
-        // --- Existing widget loading logic (unchanged) ---
         const char *name = json_object_get_string_member(item_obj, "name");
         if (!name || !json_object_has_member(item_obj, "plugin")) {
             continue;
@@ -227,7 +250,7 @@ static void load_all_widgets(AuroraShell *shell) {
 
         g_autofree gchar *config_string_to_pass = NULL;
         JsonNode *widget_node = json_node_new(JSON_NODE_OBJECT);
-        json_node_set_object(widget_node, json_object_ref(item_obj));
+        json_node_set_object(widget_node, item_obj);
         g_autoptr(JsonGenerator) generator = json_generator_new();
         json_generator_set_root(generator, widget_node);
         config_string_to_pass = json_generator_to_data(generator, NULL);
@@ -246,22 +269,19 @@ static void load_all_widgets(AuroraShell *shell) {
             gtk_layer_auto_exclusive_zone_enable(window);
         }
 
-        // --- NEW, CORRECTED LOGIC ---
-// Any widget that is a pop-up (not exclusive) OR is interactive needs to be able
-// to receive keyboard focus on demand.
-gboolean is_exclusive = json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE);
-gboolean is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
+        gboolean is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
 
-GtkLayerShellKeyboardMode mode = GTK_LAYER_SHELL_KEYBOARD_MODE_NONE;
-if (is_interactive || !is_exclusive) {
-    mode = GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND;
-}
-gtk_layer_set_keyboard_mode(window, mode);
+        if (is_interactive) {
+            gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
+        } else {
+            gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+        }
+
         gtk_layer_set_layer(window, parse_layer_string(json_object_get_string_member_with_default(item_obj, "layer", "top")));
         apply_anchor_and_margins(window, widget, item_obj);
 
-        if (json_object_has_member(item_obj, "margins")) {
-            JsonObject *margins_obj = json_object_get_object_member(item_obj, "margins");
+        if (json_object_has_member(item_obj, "margin")) {
+            JsonObject *margins_obj = json_object_get_object_member(item_obj, "margin");
             gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, json_object_get_int_member_with_default(margins_obj, "top", 0));
             gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_BOTTOM, json_object_get_int_member_with_default(margins_obj, "bottom", 0));
             gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_LEFT, json_object_get_int_member_with_default(margins_obj, "left", 0));
@@ -270,10 +290,8 @@ gtk_layer_set_keyboard_mode(window, mode);
         
         if (json_object_has_member(item_obj, "stylesheet")) {
             const char *stylesheet_name = json_object_get_string_member(item_obj, "stylesheet");
-            g_autofree gchar *stylesheet_path = NULL;
-            
             g_autofree gchar *user_templates_dir = g_build_filename(g_get_user_config_dir(), "aurora-shell", "templates", name, NULL);
-            stylesheet_path = g_build_filename(user_templates_dir, stylesheet_name, NULL);
+            g_autofree gchar *stylesheet_path = g_build_filename(user_templates_dir, stylesheet_name, NULL);
 
             if (stylesheet_path && g_file_test(stylesheet_path, G_FILE_TEST_IS_REGULAR)) {
                 g_print("Loading stylesheet: %s\n", stylesheet_path);
@@ -296,31 +314,23 @@ gtk_layer_set_keyboard_mode(window, mode);
         
         if (json_object_get_boolean_member_with_default(item_obj, "visible_on_start", TRUE)) {
             gtk_window_present(window);
-            // --- THE FIX ---
-            // Also grab focus on startup, but only for non-exclusive (non-panel) widgets.
-            if (!json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE)) {
+            if (is_interactive) {
                 gtk_widget_grab_focus(GTK_WIDGET(window));
             }
         }
         
-      WidgetState *state = g_new0(WidgetState, 1);
+        WidgetState *state = g_new0(WidgetState, 1);
         state->window = window;
         state->widget = widget;
-        state->is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
+        state->is_interactive = is_interactive;
+        state->config_obj = item_obj;
 
-        // --- NEW LOGIC ---
-
-        // Add the Escape key handler to ALL widgets that aren't permanent fixtures.
-        // This makes the UI consistent: if it pops up, Esc closes it.
-        // The "exclusive" flag is a good proxy for "permanent fixture" like a panel.
         if (!json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE)) {
             GtkEventController *key_controller = gtk_event_controller_key_new();
             g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), state);
             gtk_widget_add_controller(GTK_WIDGET(window), key_controller);
         }
 
-        // ONLY add the focus-on-enter behavior for truly interactive widgets
-        // that have input fields (like a launcher or search bar).
         if (state->is_interactive) {
             GtkEventController *motion_controller = gtk_event_controller_motion_new();
             g_signal_connect(motion_controller, "enter", G_CALLBACK(on_mouse_enter), state);
@@ -331,34 +341,40 @@ gtk_layer_set_keyboard_mode(window, mode);
     }
 }
 
-
-
 static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdline, gpointer user_data) {
     AuroraShell *shell = (AuroraShell *)user_data;
     gchar **argv = g_application_command_line_get_arguments(cmdline, NULL);
 
     if (argv[1] && g_strcmp0(argv[1], "--toggle") == 0 && argv[2]) {
         if (g_strcmp0(argv[2], "themer") == 0) {
-            // It's our special command! Execute wallpaper.sh and exit.
             g_spawn_command_line_async("wallpaper.sh", NULL);
         } else {
-            // It's a normal widget toggle.
             WidgetState *state = g_hash_table_lookup(shell->widgets, argv[2]);
-           if (state) {
+            if (state) {
                 gboolean is_visible = gtk_widget_get_visible(GTK_WIDGET(state->window));
                 gtk_widget_set_visible(GTK_WIDGET(state->window), !is_visible);
+                
                 if (!is_visible) {
                     gtk_window_present(state->window);
-                    // --- THE FIX ---
-                    // Explicitly grab focus so the window can receive key events like Esc.
-                    gtk_widget_grab_focus(GTK_WIDGET(state->window));
+                    if (state->is_interactive) {
+                        gtk_widget_grab_focus(GTK_WIDGET(state->window));
+                    }
+                    if (json_object_has_member(state->config_obj, "close")) {
+                        JsonArray *close_array = json_object_get_array_member(state->config_obj, "close");
+                        for (guint i = 0; i < json_array_get_length(close_array); i++) {
+                            const char *widget_to_close_name = json_array_get_string_element(close_array, i);
+                            WidgetState *state_to_close = g_hash_table_lookup(shell->widgets, widget_to_close_name);
+                            if (state_to_close) {
+                                gtk_widget_set_visible(GTK_WIDGET(state_to_close->window), FALSE);
+                            }
+                        }
+                    }
                 }
             } else {
                 g_warning("Command line: No widget named '%s' found.", argv[2]);
             }
         }
     } else {
-        // No arguments were passed, so do the normal startup.
         g_application_activate(app);
     }
     
@@ -366,17 +382,25 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
     return 0;
 }
 
-// THE FIX IS HERE: This logic is now simpler and guaranteed to run.
 static void activate_handler(GApplication *app, gpointer user_data) {
     (void)app;
     AuroraShell *shell = (AuroraShell *)user_data;
     
-    // Always check for user config on startup.
     ensure_user_config_exists();
-
-    // Always load the widgets on startup.
-    // The GApplication logic ensures this only runs once for the main process.
     load_all_widgets(shell);
+
+    g_autofree gchar *user_config_file_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "config.json", NULL);
+    GFile *config_file = g_file_new_for_path(user_config_file_path);
+
+    shell->config_monitor = g_file_monitor_file(config_file, G_FILE_MONITOR_NONE, NULL, NULL);
+    if (shell->config_monitor) {
+        g_print("Monitoring config file for changes: %s\n", user_config_file_path);
+        g_signal_connect(shell->config_monitor, "changed", G_CALLBACK(on_config_changed), shell);
+    } else {
+        g_warning("Could not create file monitor for config file.");
+    }
+
+    g_object_unref(config_file);
 }
 
 static void free_widget_state(gpointer data) {
@@ -389,8 +413,15 @@ int main(int argc, char **argv) {
     shell_data.app = gtk_application_new("com.meismeric.aurora.shell", G_APPLICATION_HANDLES_COMMAND_LINE);
     g_signal_connect(shell_data.app, "activate", G_CALLBACK(activate_handler), &shell_data);
     g_signal_connect(G_APPLICATION(shell_data.app), "command-line", G_CALLBACK(command_line_handler), &shell_data);
-    //g_application_hold(G_APPLICATION(shell_data.app));
+
     int status = g_application_run(G_APPLICATION(shell_data.app), argc, argv);
+    
+    if (shell_data.config_monitor) {
+        g_object_unref(shell_data.config_monitor);
+    }
+    if (shell_data.config_root) {
+        json_node_free(shell_data.config_root);
+    }
     
     g_hash_table_destroy(shell_data.widgets);
     g_object_unref(shell_data.app);
