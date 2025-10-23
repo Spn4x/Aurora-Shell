@@ -11,6 +11,7 @@ aurora_shell_deps = [
   dependency('gtk4-layer-shell-0'),
   dependency('dl'),
   dependency('json-glib-1.0'),
+  dependency('libadwaita-1'),
 ]
 
 executable('aurora-shell',

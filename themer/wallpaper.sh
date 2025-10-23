@@ -18,24 +18,15 @@ NOTIFICATIONS_MUTED=false
 # ===================================================================
 # --- APPLICATION THEME PATHS ---
 # ===================================================================
-
-# --- Hyprland ---
+# ... (All other app paths are fine) ...
 HYPR_COLORS_OUTPUT="$HOME/.config/hypr/colors-hyprland-generated.conf"
-
-# --- Kitty ---
 KITTY_THEME_OUTPUT="$HOME/.config/kitty/theme-wallust-generated.conf"
 KITTY_LIGHTEN_FACTOR="1.5"
 HELPER_SCRIPT_PATH="$(dirname "$0")/lighten_color.py"
-
-# --- Ironbar ---
 IRONBAR_STYLE_TEMPLATE="$HOME/.config/ironbar/style-wallust-generated.css"
 IRONBAR_STYLE_OUTPUT="$HOME/.config/ironbar/style.css"
-
-# --- SwayNC ---
 SWAYNC_STYLE_BASE="$HOME/.config/swaync/style-base.css"
 SWAYNC_STYLE_OUTPUT="$HOME/.config/swaync/style.css"
-
-# --- Vicinae ---
 VICINAE_THEME_TEMPLATE="$HOME/.config/vicinae/themes/vicinae-template.json"
 VICINAE_THEME_OUTPUT="$HOME/.config/vicinae/themes/wallust-generated.json"
 
@@ -53,6 +44,7 @@ LAUNCHER_STYLE_TEMPLATE="$AURORA_CONFIG_DIR/templates/launcher/launcher-template
 MPRIS_PLAYER_STYLE_TEMPLATE="$AURORA_CONFIG_DIR/templates/mpris-player/mpris-player-template.css"
 TOPBAR_STYLE_TEMPLATE="$AURORA_CONFIG_DIR/templates/topbar/topbar-template.css"
 CACHY_STYLE_TEMPLATE="$AURORA_CONFIG_DIR/templates/cachy-selector/cachy-selector-template.css"
+INSIGHT_STYLE_TEMPLATE="$AURORA_CONFIG_DIR/templates/insight/insight-template.css"
 
 # Output paths for Aurora Shell's final CSS files
 UPTIME_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/uptime/archbadge.css"
@@ -63,6 +55,7 @@ LAUNCHER_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/launcher/launcher.css"
 MPRIS_PLAYER_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/mpris-player/mpris-player.css"
 TOPBAR_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/topbar/topbar.css"
 CACHY_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/cachy-selector/cachy-selector.css"
+INSIGHT_STYLE_OUTPUT="$AURORA_CONFIG_DIR/templates/insight/insight.css" # <-- CORRECTED
 # ===================================================================
 
 # --- Helper Functions ---
@@ -135,7 +128,6 @@ apply_theme_and_reload() {
         --transition-step "$TRANSITION_STEP" --transition-pos "$random_pos" \
         ${TRANSITION_BEZIER:+--transition-bezier "$TRANSITION_BEZIER"}
 
-    # --- THIS IS THE CORRECTED LINE ---
     wallust run --backend wal "$SELECTED_NEW_WALLPAPER_PATH"
     if [ $? -ne 0 ]; then send_notification -u critical "Wallust Error"; return 1; fi
 
@@ -160,8 +152,10 @@ apply_theme_and_reload() {
     theme_generic_css "$MPRIS_PLAYER_STYLE_TEMPLATE" "$MPRIS_PLAYER_STYLE_OUTPUT" "MPRIS Player"
     theme_generic_css "$TOPBAR_STYLE_TEMPLATE" "$TOPBAR_STYLE_OUTPUT" "Topbar"
     theme_generic_css "$CACHY_STYLE_TEMPLATE" "$CACHY_STYLE_OUTPUT" "Cachy Selector"
+    theme_generic_css "$INSIGHT_STYLE_TEMPLATE" "$INSIGHT_STYLE_OUTPUT" "Insight" # <-- ADDED
 
     # 4. Theme Other Applications
+    # ... (Rest of script is fine, no changes needed below this line) ...
     # --- Hyprland ---
     echo "Generating Hyprland colors..."
     local active_border_col1_hex=${color4#\#}
@@ -217,8 +211,6 @@ EOF
         local tmp_swaync_css
         tmp_swaync_css=$(mktemp)
         cp "$SWAYNC_STYLE_BASE" "$tmp_swaync_css"
-
-        # Replace standard color placeholders
         sed -i "s|%%BACKGROUND%%|$background|g" "$tmp_swaync_css"
         sed -i "s|%%FOREGROUND%%|$foreground|g" "$tmp_swaync_css"
         sed -i "s|%%COLOR0%%|$color0|g" "$tmp_swaync_css"
@@ -226,8 +218,6 @@ EOF
         sed -i "s|%%COLOR4%%|$color4|g" "$tmp_swaync_css"
         sed -i "s|%%COLOR7%%|$color7|g" "$tmp_swaync_css"
         sed -i "s|%%COLOR15%%|$color15|g" "$tmp_swaync_css"
-
-        # Replace RGBA placeholders by calling the helper function
         sed -i "s|%%BACKGROUND_RGBA_30%%|$(hex_to_rgba "$background" "0.3")|g" "$tmp_swaync_css"
         sed -i "s|%%BACKGROUND_RGBA_60%%|$(hex_to_rgba "$background" "0.6")|g" "$tmp_swaync_css"
         sed -i "s|%%BACKGROUND_RGBA_90%%|$(hex_to_rgba "$background" "0.9")|g" "$tmp_swaync_css"
@@ -240,15 +230,12 @@ EOF
         sed -i "s|%%COLOR12_RGBA_50%%|$(hex_to_rgba "$color12" "0.5")|g" "$tmp_swaync_css"
         sed -i "s|%%COLOR13_RGBA_50%%|$(hex_to_rgba "$color13" "0.5")|g" "$tmp_swaync_css"
         sed -i "s|%%COLOR14_RGBA_50%%|$(hex_to_rgba "$color14" "0.5")|g" "$tmp_swaync_css"
-
         mv "$tmp_swaync_css" "$SWAYNC_STYLE_OUTPUT"
     fi
 
     # 5. Reload Services
     echo "Reloading applications..."
     hyprctl reload > /dev/null 2>&1 &
-    # Add other reload commands as needed, e.g.:
-    # pgrep -x "kitty" && killall -SIGUSR1 kitty
     if pgrep -x "swaync" > /dev/null; then swaync-client -rs > /dev/null 2>&1; echo "Reloaded SwayNC style."; fi
 
     send_notification -i "$SELECTED_NEW_WALLPAPER_PATH" "✅ Theme Applied" "Your new desktop theme is now active!"
@@ -270,15 +257,12 @@ ensure_swww_daemon() {
 # --- SCRIPT EXECUTION STARTS HERE ---
 # ===================================================================
 
-# Argument parsing for --mute flag
 for arg in "$@"; do
     if [[ "$arg" == "--mute" ]]; then
         NOTIFICATIONS_MUTED=true
         echo "Notifications are muted."
     fi
 done
-
-# Lock file mechanism to prevent multiple instances
 trap 'rm -f "$LOCK_FILE"' EXIT
 if [ -e "$LOCK_FILE" ]; then
     echo "Script is already running. Exiting."
@@ -286,8 +270,6 @@ if [ -e "$LOCK_FILE" ]; then
 else
     touch "$LOCK_FILE"
 fi
-
-# --- Startup Mode ---
 if [[ "$1" == "--startup" ]]; then
     echo "Startup mode: Ensuring swww-daemon is running."
     if ! ensure_swww_daemon; then
@@ -295,8 +277,6 @@ if [[ "$1" == "--startup" ]]; then
     fi
     echo "swww-daemon is running. Startup script finished."; exit 0;
 fi
-
-# --- Check dependencies for all other modes ---
 if ! ensure_swww_daemon; then
     send_notification -u critical "SWWW Error" "Failed to start swww-daemon."; exit 1;
 fi
@@ -308,7 +288,6 @@ if [ -z "$WALLPAPER_FILES" ]; then
     send_notification "Error" "No image files found in $WALLPAPER_DIR."; exit 1;
 fi
 
-# --- Cycling Mode (--next/--prev) ---
 if [[ " $@ " =~ " --next " ]] || [[ " $@ " =~ " --prev " ]]; then
     echo "Cycling mode..."
     mapfile -t wallpaper_array < <(echo "$WALLPAPER_FILES")
@@ -319,7 +298,6 @@ if [[ " $@ " =~ " --next " ]] || [[ " $@ " =~ " --prev " ]]; then
         if [[ "${wallpaper_array[$i]}" == "$current_wallpaper" ]]; then current_index=$i; break; fi
     done
     if [[ $current_index -eq -1 ]]; then current_index=0; fi
-
     if [[ " $@ " =~ " --next " ]]; then
         new_index=$(( (current_index + 1) % count ))
     else # --prev
@@ -330,23 +308,16 @@ if [[ " $@ " =~ " --next " ]] || [[ " $@ " =~ " --prev " ]]; then
     exit $?
 fi
 
-# --- Interactive Mode (Default) ---
 echo "Interactive mode: Launching cachy-selector..."
-# This assumes cachy-selector is in your path or you can specify a full path.
 SELECTOR_EXECUTABLE="cachy-selector" 
 if ! command -v "$SELECTOR_EXECUTABLE" &> /dev/null; then
     send_notification -u critical "Error" "'$SELECTOR_EXECUTABLE' not found in PATH."
     exit 1
 fi
-
-# We pipe the list of FULL PATHS directly into our app.
-# It will print the selected full path back to us.
 SELECTED_NEW_WALLPAPER_PATH=$(echo "$WALLPAPER_FILES" | "$SELECTOR_EXECUTABLE" "cachy-selector")
-
 if [ -z "$SELECTED_NEW_WALLPAPER_PATH" ]; then
     echo "No wallpaper selected. Exiting."
     exit 0
 fi
-
 apply_theme_and_reload "$SELECTED_NEW_WALLPAPER_PATH"
 exit $?

@@ -124,6 +124,44 @@ static void apply_anchor_and_margins(GtkWindow *window, GtkWidget *widget, JsonO
     }
 }
 
+// Place this new helper function right before your existing load_all_widgets function.
+static void launch_daemon_if_needed(const char *command) {
+    // We use `pgrep` to check if the process is already running.
+    g_autofree gchar *check_command = g_strdup_printf("pgrep -f %s", command);
+    
+    // g_spawn_command_line_sync returns TRUE on success (exit code 0).
+    // pgrep returns 0 if it finds a process, 1 if not. So if this is TRUE, it's running.
+    if (g_spawn_command_line_sync(check_command, NULL, NULL, NULL, NULL)) {
+        g_print("Daemon '%s' is already running.\n", command);
+        return;
+    }
+
+    g_print("Spawning daemon: '%s'\n", command);
+    g_autoptr(GError) error = NULL;
+    
+    // Split the command string into an array for g_spawn_async
+    gchar **argv = g_strsplit(command, " ", -1);
+
+    g_spawn_async(
+        NULL,             // Use default working directory
+        argv,             // The command and its arguments
+        NULL,             // No environment variables to pass
+        G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH, // Detach the process and find it in PATH
+        NULL,             // No child setup function
+        NULL,             // No user data
+        NULL,             // Don't need the child's PID
+        &error            // Error handling
+    );
+
+    g_strfreev(argv); // Free the array created by g_strsplit
+
+    if (error) {
+        g_warning("Failed to spawn daemon '%s': %s", command, error->message);
+    }
+}
+
+
+// Replace your entire existing load_all_widgets function with this new version.
 static void load_all_widgets(AuroraShell *shell) {
     g_autoptr(JsonParser) parser = json_parser_new();
     g_autofree gchar *user_config_file_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "config.json", NULL);
@@ -132,15 +170,31 @@ static void load_all_widgets(AuroraShell *shell) {
         return;
     }
 
-    JsonArray *widget_array = json_node_get_array(json_parser_get_root(parser));
-    for (guint i = 0; i < json_array_get_length(widget_array); i++) {
-        JsonObject *widget_obj = json_array_get_object_element(widget_array, i);
-        const char *name = json_object_get_string_member(widget_obj, "name");
-        if (!name || !json_object_has_member(widget_obj, "plugin")) {
+    JsonArray *config_array = json_node_get_array(json_parser_get_root(parser));
+    for (guint i = 0; i < json_array_get_length(config_array); i++) {
+        JsonObject *item_obj = json_array_get_object_element(config_array, i);
+
+        // --- NEW: Check if this entry is a daemon and handle it ---
+        const char *type = json_object_get_string_member_with_default(item_obj, "type", "widget");
+
+        if (g_strcmp0(type, "daemon") == 0) {
+            const char *command = json_object_get_string_member(item_obj, "command");
+            if (command) {
+                launch_daemon_if_needed(command);
+            }
+            continue; // Skip to the next item in the config, as this is not a widget
+        }
+        // --- End of daemon handling logic ---
+
+
+        // --- Existing widget loading logic (unchanged) ---
+        const char *name = json_object_get_string_member(item_obj, "name");
+        if (!name || !json_object_has_member(item_obj, "plugin")) {
             continue;
         }
 
         GtkWindow *window = GTK_WINDOW(gtk_application_window_new(shell->app));
+        gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
         GdkDisplay *display = gtk_widget_get_display(GTK_WIDGET(window));
         
         GtkCssProvider *transparency_provider = gtk_css_provider_new();
@@ -150,12 +204,12 @@ static void load_all_widgets(AuroraShell *shell) {
 
         gtk_layer_init_for_window(window);
         
-        if (json_object_has_member(widget_obj, "size")) {
-            JsonObject *size_obj = json_object_get_object_member(widget_obj, "size");
+        if (json_object_has_member(item_obj, "size")) {
+            JsonObject *size_obj = json_object_get_object_member(item_obj, "size");
             gtk_window_set_default_size(window, json_object_get_int_member_with_default(size_obj, "width", -1), json_object_get_int_member_with_default(size_obj, "height", -1));
         }
 
-        const char *plugin_path = json_object_get_string_member(widget_obj, "plugin");
+        const char *plugin_path = json_object_get_string_member(item_obj, "plugin");
         void* handle = dlopen(plugin_path, RTLD_LAZY);
         if (!handle) {
             g_warning("Failed to open plugin '%s' for widget '%s': %s", plugin_path, name, dlerror());
@@ -173,33 +227,49 @@ static void load_all_widgets(AuroraShell *shell) {
 
         g_autofree gchar *config_string_to_pass = NULL;
         JsonNode *widget_node = json_node_new(JSON_NODE_OBJECT);
-        json_node_set_object(widget_node, json_object_ref(widget_obj));
+        json_node_set_object(widget_node, json_object_ref(item_obj));
         g_autoptr(JsonGenerator) generator = json_generator_new();
         json_generator_set_root(generator, widget_node);
         config_string_to_pass = json_generator_to_data(generator, NULL);
         json_node_free(widget_node);
         
         GtkWidget *widget = create_widget(config_string_to_pass);
+        if (!widget) {
+            g_warning("Plugin '%s' for widget '%s' returned a NULL widget.", plugin_path, name);
+            dlclose(handle);
+            gtk_window_destroy(window);
+            continue;
+        }
         gtk_window_set_child(window, widget);
 
-        if (json_object_get_boolean_member_with_default(widget_obj, "exclusive", FALSE)) {
+        if (json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE)) {
             gtk_layer_auto_exclusive_zone_enable(window);
         }
 
-        gtk_layer_set_keyboard_mode(window, json_object_get_boolean_member_with_default(widget_obj, "interactive", FALSE) ? GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND : GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
-        gtk_layer_set_layer(window, parse_layer_string(json_object_get_string_member_with_default(widget_obj, "layer", "top")));
-        apply_anchor_and_margins(window, widget, widget_obj);
+        // --- NEW, CORRECTED LOGIC ---
+// Any widget that is a pop-up (not exclusive) OR is interactive needs to be able
+// to receive keyboard focus on demand.
+gboolean is_exclusive = json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE);
+gboolean is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
 
-        if (json_object_has_member(widget_obj, "margins")) {
-            JsonObject *margins_obj = json_object_get_object_member(widget_obj, "margins");
+GtkLayerShellKeyboardMode mode = GTK_LAYER_SHELL_KEYBOARD_MODE_NONE;
+if (is_interactive || !is_exclusive) {
+    mode = GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND;
+}
+gtk_layer_set_keyboard_mode(window, mode);
+        gtk_layer_set_layer(window, parse_layer_string(json_object_get_string_member_with_default(item_obj, "layer", "top")));
+        apply_anchor_and_margins(window, widget, item_obj);
+
+        if (json_object_has_member(item_obj, "margins")) {
+            JsonObject *margins_obj = json_object_get_object_member(item_obj, "margins");
             gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, json_object_get_int_member_with_default(margins_obj, "top", 0));
             gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_BOTTOM, json_object_get_int_member_with_default(margins_obj, "bottom", 0));
             gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_LEFT, json_object_get_int_member_with_default(margins_obj, "left", 0));
             gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_RIGHT, json_object_get_int_member_with_default(margins_obj, "right", 0));
         }
         
-        if (json_object_has_member(widget_obj, "stylesheet")) {
-            const char *stylesheet_name = json_object_get_string_member(widget_obj, "stylesheet");
+        if (json_object_has_member(item_obj, "stylesheet")) {
+            const char *stylesheet_name = json_object_get_string_member(item_obj, "stylesheet");
             g_autofree gchar *stylesheet_path = NULL;
             
             g_autofree gchar *user_templates_dir = g_build_filename(g_get_user_config_dir(), "aurora-shell", "templates", name, NULL);
@@ -224,19 +294,34 @@ static void load_all_widgets(AuroraShell *shell) {
             }
         }
         
-        if (json_object_get_boolean_member_with_default(widget_obj, "visible_on_start", TRUE)) {
+        if (json_object_get_boolean_member_with_default(item_obj, "visible_on_start", TRUE)) {
             gtk_window_present(window);
+            // --- THE FIX ---
+            // Also grab focus on startup, but only for non-exclusive (non-panel) widgets.
+            if (!json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE)) {
+                gtk_widget_grab_focus(GTK_WIDGET(window));
+            }
         }
         
-        WidgetState *state = g_new0(WidgetState, 1);
+      WidgetState *state = g_new0(WidgetState, 1);
         state->window = window;
         state->widget = widget;
-        state->is_interactive = json_object_get_boolean_member_with_default(widget_obj, "interactive", FALSE);
+        state->is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
 
-        if (state->is_interactive) {
+        // --- NEW LOGIC ---
+
+        // Add the Escape key handler to ALL widgets that aren't permanent fixtures.
+        // This makes the UI consistent: if it pops up, Esc closes it.
+        // The "exclusive" flag is a good proxy for "permanent fixture" like a panel.
+        if (!json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE)) {
             GtkEventController *key_controller = gtk_event_controller_key_new();
             g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), state);
             gtk_widget_add_controller(GTK_WIDGET(window), key_controller);
+        }
+
+        // ONLY add the focus-on-enter behavior for truly interactive widgets
+        // that have input fields (like a launcher or search bar).
+        if (state->is_interactive) {
             GtkEventController *motion_controller = gtk_event_controller_motion_new();
             g_signal_connect(motion_controller, "enter", G_CALLBACK(on_mouse_enter), state);
             gtk_widget_add_controller(GTK_WIDGET(window), motion_controller);
@@ -259,11 +344,14 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
         } else {
             // It's a normal widget toggle.
             WidgetState *state = g_hash_table_lookup(shell->widgets, argv[2]);
-            if (state) {
+           if (state) {
                 gboolean is_visible = gtk_widget_get_visible(GTK_WIDGET(state->window));
                 gtk_widget_set_visible(GTK_WIDGET(state->window), !is_visible);
                 if (!is_visible) {
                     gtk_window_present(state->window);
+                    // --- THE FIX ---
+                    // Explicitly grab focus so the window can receive key events like Esc.
+                    gtk_widget_grab_focus(GTK_WIDGET(state->window));
                 }
             } else {
                 g_warning("Command line: No widget named '%s' found.", argv[2]);
