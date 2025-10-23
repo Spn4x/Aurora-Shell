@@ -14,14 +14,14 @@ typedef struct {
     GtkWindow *window;
     GtkWidget *widget;
     gboolean is_interactive;
-    JsonObject *config_obj; // This is now a non-owning pointer.
+    JsonObject *config_obj;
 } WidgetState;
 
 typedef struct {
     GtkApplication *app;
     GHashTable *widgets;
     GFileMonitor *config_monitor;
-    JsonNode *config_root; // The single owner of the entire config tree.
+    JsonNode *config_root;
 } AuroraShell;
 
 typedef GtkWidget* (*CreateWidgetFunc)(const char *config_string);
@@ -31,7 +31,6 @@ typedef struct {
     char *path;
 } CssReloadData;
 
-// Forward declaration
 static void load_all_widgets(AuroraShell *shell);
 
 static void ensure_user_config_exists() {
@@ -110,6 +109,10 @@ static void unload_all_widgets(AuroraShell *shell) {
         }
     }
     g_hash_table_remove_all(shell->widgets);
+
+    while (g_main_context_pending(NULL)) {
+        g_main_context_iteration(NULL, FALSE);
+    }
     g_print("All widgets unloaded.\n");
 }
 
@@ -270,18 +273,18 @@ static void load_all_widgets(AuroraShell *shell) {
         if (is_exclusive) {
             gtk_layer_auto_exclusive_zone_enable(window);
         }
-
+        
         // ======================================================================
-        // THE FINAL FOCUS LOGIC
+        // THE FINAL, CORRECT FOCUS LOGIC
         // ======================================================================
 
-        // 1. Set keyboard mode: Interactive widgets get it. Non-exclusive popups also get it so they can be escaped. Panels do not.
-        if (is_interactive || !is_exclusive) {
+        // 1. Set keyboard mode: All pop-ups must be able to get focus to be escapable.
+        if (!is_exclusive) {
             gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
         } else {
             gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
         }
-
+        
         gtk_layer_set_layer(window, parse_layer_string(json_object_get_string_member_with_default(item_obj, "layer", "top")));
         apply_anchor_and_margins(window, widget, item_obj);
 
@@ -317,9 +320,9 @@ static void load_all_widgets(AuroraShell *shell) {
             }
         }
         
+        // 2. Grab focus on start: *Only* for pop-ups, so they can be escaped.
         if (json_object_get_boolean_member_with_default(item_obj, "visible_on_start", TRUE)) {
             gtk_window_present(window);
-            // 2. Grab focus on start: Only if it's a pop-up, so it can be escaped.
             if (!is_exclusive) {
                  gtk_widget_grab_focus(GTK_WIDGET(window));
             }
@@ -331,14 +334,14 @@ static void load_all_widgets(AuroraShell *shell) {
         state->is_interactive = is_interactive;
         state->config_obj = item_obj;
 
-        // 3. Attach Escape key handler: To all pop-ups.
+        // 3. Attach Escape key handler to ALL pop-ups.
         if (!is_exclusive) {
             GtkEventController *key_controller = gtk_event_controller_key_new();
             g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), state);
             gtk_widget_add_controller(GTK_WIDGET(window), key_controller);
         }
 
-        // 4. Attach mouse-over focus grab: ONLY to truly interactive widgets. This prevents focus stealing.
+        // 4. Attach mouse-over focus grab: ONLY to truly interactive widgets. This prevents unwanted focus stealing.
         if (state->is_interactive) {
             GtkEventController *motion_controller = gtk_event_controller_motion_new();
             g_signal_connect(motion_controller, "enter", G_CALLBACK(on_mouse_enter), state);
@@ -366,7 +369,7 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
                     gtk_window_present(state->window);
                     
                     gboolean is_exclusive = json_object_get_boolean_member_with_default(state->config_obj, "exclusive", FALSE);
-                    // 5. Grab focus on toggle: Only if it's a pop-up, so it can be escaped.
+                    // 5. Grab focus on toggle: *Only* for pop-ups, so they can be escaped.
                     if (!is_exclusive) {
                         gtk_widget_grab_focus(GTK_WIDGET(state->window));
                     }
@@ -432,7 +435,6 @@ int main(int argc, char **argv) {
         g_object_unref(shell_data.config_monitor);
     }
     if (shell_data.config_root) {
-        // THE FIX: The variable name is shell_data, not shell.
         json_node_free(shell_data.config_root);
     }
     
