@@ -194,7 +194,6 @@ static void load_all_widgets(AuroraShell *shell) {
     
     JsonArray *config_array = json_node_get_array(shell->config_root);
     for (guint i = 0; i < json_array_get_length(config_array); i++) {
-        // THE FIX: Check for non-object elements (like from a trailing comma) HERE.
         if (!JSON_NODE_HOLDS_OBJECT(json_array_get_element(config_array, i))) {
             continue;
         }
@@ -265,16 +264,20 @@ static void load_all_widgets(AuroraShell *shell) {
         }
         gtk_window_set_child(window, widget);
 
-        if (json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE)) {
+        gboolean is_exclusive = json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE);
+        if (is_exclusive) {
             gtk_layer_auto_exclusive_zone_enable(window);
         }
 
-        gboolean is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
-
-        if (is_interactive) {
-            gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
-        } else {
+        // ======================================================================
+        // THE FIX FOR THE ESCAPE KEY REGRESSION
+        // ======================================================================
+        if (is_exclusive) {
+            // Panels should never get keyboard focus this way.
             gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+        } else {
+            // All other pop-up widgets MUST be able to get focus to be closable.
+            gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
         }
 
         gtk_layer_set_layer(window, parse_layer_string(json_object_get_string_member_with_default(item_obj, "layer", "top")));
@@ -312,10 +315,11 @@ static void load_all_widgets(AuroraShell *shell) {
             }
         }
         
+        gboolean is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
         if (json_object_get_boolean_member_with_default(item_obj, "visible_on_start", TRUE)) {
             gtk_window_present(window);
-            if (is_interactive) {
-                gtk_widget_grab_focus(GTK_WIDGET(window));
+            if (!is_exclusive) {
+                 gtk_widget_grab_focus(GTK_WIDGET(window));
             }
         }
         
@@ -325,7 +329,7 @@ static void load_all_widgets(AuroraShell *shell) {
         state->is_interactive = is_interactive;
         state->config_obj = item_obj;
 
-        if (!json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE)) {
+        if (!is_exclusive) {
             GtkEventController *key_controller = gtk_event_controller_key_new();
             g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), state);
             gtk_widget_add_controller(GTK_WIDGET(window), key_controller);
@@ -354,11 +358,18 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
                 gboolean is_visible = gtk_widget_get_visible(GTK_WIDGET(state->window));
                 gtk_widget_set_visible(GTK_WIDGET(state->window), !is_visible);
                 
-                if (!is_visible) {
+                if (!is_visible) { // If we are showing the widget
                     gtk_window_present(state->window);
-                    if (state->is_interactive) {
+                    
+                    // ======================================================================
+                    // THE SECOND PART OF THE FIX
+                    // ======================================================================
+                    gboolean is_exclusive = json_object_get_boolean_member_with_default(state->config_obj, "exclusive", FALSE);
+                    if (!is_exclusive) {
+                        // If it's a pop-up, always grab focus so it can be escaped.
                         gtk_widget_grab_focus(GTK_WIDGET(state->window));
                     }
+
                     if (json_object_has_member(state->config_obj, "close")) {
                         JsonArray *close_array = json_object_get_array_member(state->config_obj, "close");
                         for (guint i = 0; i < json_array_get_length(close_array); i++) {
