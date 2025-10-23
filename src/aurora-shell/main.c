@@ -265,19 +265,21 @@ static void load_all_widgets(AuroraShell *shell) {
         gtk_window_set_child(window, widget);
 
         gboolean is_exclusive = json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE);
+        gboolean is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
+
         if (is_exclusive) {
             gtk_layer_auto_exclusive_zone_enable(window);
         }
 
         // ======================================================================
-        // THE FIX FOR THE ESCAPE KEY REGRESSION
+        // THE FINAL FOCUS LOGIC
         // ======================================================================
-        if (is_exclusive) {
-            // Panels should never get keyboard focus this way.
-            gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
-        } else {
-            // All other pop-up widgets MUST be able to get focus to be closable.
+
+        // 1. Set keyboard mode: Interactive widgets get it. Non-exclusive popups also get it so they can be escaped. Panels do not.
+        if (is_interactive || !is_exclusive) {
             gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
+        } else {
+            gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
         }
 
         gtk_layer_set_layer(window, parse_layer_string(json_object_get_string_member_with_default(item_obj, "layer", "top")));
@@ -315,9 +317,9 @@ static void load_all_widgets(AuroraShell *shell) {
             }
         }
         
-        gboolean is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
         if (json_object_get_boolean_member_with_default(item_obj, "visible_on_start", TRUE)) {
             gtk_window_present(window);
+            // 2. Grab focus on start: Only if it's a pop-up, so it can be escaped.
             if (!is_exclusive) {
                  gtk_widget_grab_focus(GTK_WIDGET(window));
             }
@@ -329,12 +331,14 @@ static void load_all_widgets(AuroraShell *shell) {
         state->is_interactive = is_interactive;
         state->config_obj = item_obj;
 
+        // 3. Attach Escape key handler: To all pop-ups.
         if (!is_exclusive) {
             GtkEventController *key_controller = gtk_event_controller_key_new();
             g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), state);
             gtk_widget_add_controller(GTK_WIDGET(window), key_controller);
         }
 
+        // 4. Attach mouse-over focus grab: ONLY to truly interactive widgets. This prevents focus stealing.
         if (state->is_interactive) {
             GtkEventController *motion_controller = gtk_event_controller_motion_new();
             g_signal_connect(motion_controller, "enter", G_CALLBACK(on_mouse_enter), state);
@@ -358,15 +362,12 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
                 gboolean is_visible = gtk_widget_get_visible(GTK_WIDGET(state->window));
                 gtk_widget_set_visible(GTK_WIDGET(state->window), !is_visible);
                 
-                if (!is_visible) { // If we are showing the widget
+                if (!is_visible) {
                     gtk_window_present(state->window);
                     
-                    // ======================================================================
-                    // THE SECOND PART OF THE FIX
-                    // ======================================================================
                     gboolean is_exclusive = json_object_get_boolean_member_with_default(state->config_obj, "exclusive", FALSE);
+                    // 5. Grab focus on toggle: Only if it's a pop-up, so it can be escaped.
                     if (!is_exclusive) {
-                        // If it's a pop-up, always grab focus so it can be escaped.
                         gtk_widget_grab_focus(GTK_WIDGET(state->window));
                     }
 
@@ -431,6 +432,7 @@ int main(int argc, char **argv) {
         g_object_unref(shell_data.config_monitor);
     }
     if (shell_data.config_root) {
+        // THE FIX: The variable name is shell_data, not shell.
         json_node_free(shell_data.config_root);
     }
     

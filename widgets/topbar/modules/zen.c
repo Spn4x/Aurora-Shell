@@ -12,6 +12,12 @@ typedef struct {
     gboolean current_ui_is_dnd;
 } ZenModule;
 
+// Struct to pass data from background thread to main thread
+typedef struct {
+    ZenModule *module;
+    gboolean is_dnd;
+} ZenUpdateData;
+
 // --- Forward Declarations ---
 static void update_zen_ui(ZenModule *module, gboolean is_dnd);
 static void on_zen_clicked(GtkButton *button, gpointer user_data);
@@ -42,16 +48,28 @@ static void check_zen_state_thread(GTask *task, gpointer source_object, gpointer
     g_task_return_pointer(task, GINT_TO_POINTER(is_dnd), NULL);
 }
 
+// THE FIX: This function runs on the main thread and safely updates the UI
+static gboolean update_zen_ui_safe(gpointer user_data) {
+    ZenUpdateData *data = (ZenUpdateData *)user_data;
+    if (data->module->current_ui_is_dnd != data->is_dnd) {
+        g_print("Zen module out of sync! Correcting UI.\n");
+        update_zen_ui(data->module, data->is_dnd);
+    }
+    g_free(data); // Free the data packet
+    return G_SOURCE_REMOVE;
+}
+
 static void on_check_state_finished(GObject *source_object, GAsyncResult *res, gpointer user_data) {
     (void)source_object;
     ZenModule *module = (ZenModule*)user_data;
     gintptr actual_state_ptr = (gintptr)g_task_propagate_pointer(G_TASK(res), NULL);
     if (actual_state_ptr == -1) return;
-    gboolean actual_is_dnd = (gboolean)actual_state_ptr;
-    if (module->current_ui_is_dnd != actual_is_dnd) {
-        g_print("Zen module out of sync! Correcting UI.\n");
-        update_zen_ui(module, actual_is_dnd);
-    }
+    
+    // THE FIX: Don't update UI directly. Schedule it on the main thread.
+    ZenUpdateData *update_data = g_new(ZenUpdateData, 1);
+    update_data->module = module;
+    update_data->is_dnd = (gboolean)actual_state_ptr;
+    g_idle_add(update_zen_ui_safe, update_data);
 }
 
 static void check_zen_state(gpointer user_data) {
@@ -101,11 +119,7 @@ GtkWidget* create_zen_module() {
     gtk_box_append(GTK_BOX(module->content_box), module->text_label);
     g_signal_connect(module->main_button, "clicked", G_CALLBACK(on_zen_clicked), module);
     
-    // =======================================================================
-    // THE FIX: Corrected the typo from two underscores to one.
     GtkEventController *scroll_controller = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
-    // =======================================================================
-
     g_signal_connect(scroll_controller, "scroll", G_CALLBACK(on_zen_scroll), module);
     gtk_widget_add_controller(module->main_button, scroll_controller);
     check_zen_state(module);

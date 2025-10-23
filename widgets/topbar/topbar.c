@@ -90,10 +90,6 @@ static GtkWidget* create_popover_module(JsonObject *config) {
 
             GtkWidget *item_button = gtk_button_new();
             gtk_widget_add_css_class(item_button, "popover-item");
-            
-            // ======================================================================
-            // THE FIX: Add the .flat class to remove default button styling
-            // ======================================================================
             gtk_widget_add_css_class(item_button, "flat");
 
             GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -126,6 +122,11 @@ static GtkWidget* create_popover_module(JsonObject *config) {
 
 static void load_module(JsonObject *module_config, TopbarState *state, GtkBox *target_box) {
     GtkWidget *module_widget = NULL;
+
+    // THE FIX: Add a check here to prevent the Json-CRITICAL error
+    if (!module_config) {
+        return;
+    }
     
     const char *module_type = json_object_get_string_member(module_config, "type");
     
