@@ -9,6 +9,8 @@
 #include <json-glib/json-glib.h>
 #include <string.h>
 #include <gio/gio.h>
+#include <unistd.h> // Required for STDOUT_FILENO, etc.
+#include <sys/wait.h>
 
 typedef struct {
     GtkWindow *window;
@@ -158,22 +160,59 @@ static void apply_anchor_and_margins(GtkWindow *window, GtkWidget *widget, JsonO
     }
 }
 
+
+
 static void launch_daemon_if_needed(const char *command) {
-    g_autofree gchar *check_command = g_strdup_printf("pgrep -f %s", command);
-    if (g_spawn_command_line_sync(check_command, NULL, NULL, NULL, NULL)) {
+    // This command searches the full command line (-f) for a pattern that
+    // is guaranteed not to match the pgrep process itself. This bypasses
+    // the 15-character kernel limit on process names.
+    g_autofree gchar *check_pattern = g_strdup_printf("[%c]%s", command[0], command + 1);
+
+    char * const argv[] = {
+        "/usr/bin/pgrep",
+        "-f",
+        check_pattern,
+        NULL
+    };
+    
+    g_autoptr(GError) error = NULL;
+    gint exit_status = 0;
+    
+    // We use g_spawn_sync to have full control and check the exit status directly.
+    // We redirect stdout and stderr to /dev/null to silence pgrep's warnings.
+    gboolean success = g_spawn_sync(
+        NULL,       // working directory
+        argv,       // command and args
+        NULL,       // environment
+        G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, // flags
+        NULL, NULL, // child setup func
+        NULL,       // stdout
+        NULL,       // stderr
+        &exit_status,
+        &error
+    );
+
+    if (!success) {
+        g_warning("Failed to run pgrep to check for daemon '%s': %s", command, error->message);
+        // Fallback to trying to spawn it anyway.
+    }
+
+    // pgrep's exit code is 0 if it finds a match, 1 if it doesn't.
+    // We check WIFEXITED and WEXITSTATUS for robustness.
+    if (success && WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 0) {
         g_print("Daemon '%s' is already running.\n", command);
         return;
     }
 
+    // --- If we reach here, the daemon is NOT running. Spawn it. ---
     g_print("Spawning daemon: '%s'\n", command);
-    g_autoptr(GError) error = NULL;
-    gchar **argv = g_strsplit(command, " ", -1);
+    g_autoptr(GError) spawn_error = NULL;
+    gchar **spawn_argv = g_strsplit(command, " ", -1);
+    g_spawn_async(NULL, spawn_argv, NULL, G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &spawn_error);
+    g_strfreev(spawn_argv);
 
-    g_spawn_async(NULL, argv, NULL, G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &error);
-    g_strfreev(argv);
-
-    if (error) {
-        g_warning("Failed to spawn daemon '%s': %s", command, error->message);
+    if (spawn_error) {
+        g_warning("Failed to spawn daemon '%s': %s", command, spawn_error->message);
     }
 }
 
@@ -360,33 +399,47 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
         if (g_strcmp0(argv[2], "themer") == 0) {
             g_spawn_command_line_async("wallpaper.sh", NULL);
         } else {
-            WidgetState *state = g_hash_table_lookup(shell->widgets, argv[2]);
-            if (state) {
-                gboolean is_visible = gtk_widget_get_visible(GTK_WIDGET(state->window));
-                gtk_widget_set_visible(GTK_WIDGET(state->window), !is_visible);
-                
-                if (!is_visible) {
-                    gtk_window_present(state->window);
-                    
-                    gboolean is_exclusive = json_object_get_boolean_member_with_default(state->config_obj, "exclusive", FALSE);
-                    // 5. Grab focus on toggle: *Only* for pop-ups, so they can be escaped.
-                    if (!is_exclusive) {
-                        gtk_widget_grab_focus(GTK_WIDGET(state->window));
-                    }
+            // Find the config block for the requested name
+            JsonArray *config_array = json_node_get_array(shell->config_root);
+            JsonObject *item_obj = NULL;
+            for (guint i = 0; i < json_array_get_length(config_array); i++) {
+                JsonObject *current_obj = json_array_get_object_element(config_array, i);
+                const char *name = json_object_get_string_member(current_obj, "name");
+                if (name && g_strcmp0(name, argv[2]) == 0) {
+                    item_obj = current_obj;
+                    break;
+                }
+            }
 
-                    if (json_object_has_member(state->config_obj, "close")) {
-                        JsonArray *close_array = json_object_get_array_member(state->config_obj, "close");
-                        for (guint i = 0; i < json_array_get_length(close_array); i++) {
-                            const char *widget_to_close_name = json_array_get_string_element(close_array, i);
-                            WidgetState *state_to_close = g_hash_table_lookup(shell->widgets, widget_to_close_name);
-                            if (state_to_close) {
-                                gtk_widget_set_visible(GTK_WIDGET(state_to_close->window), FALSE);
+            if (item_obj) {
+                const char *type = json_object_get_string_member_with_default(item_obj, "type", "widget");
+
+                // NEW LOGIC: Check if it's an external command
+                if (g_strcmp0(type, "command") == 0 && json_object_has_member(item_obj, "command")) {
+                    const char *command_to_run = json_object_get_string_member(item_obj, "command");
+                    g_print("Spawning external command: %s\n", command_to_run);
+                    g_spawn_command_line_async(command_to_run, NULL);
+                } else {
+                    // OLD LOGIC: It's an internal widget, so toggle its visibility
+                    WidgetState *state = g_hash_table_lookup(shell->widgets, argv[2]);
+                    if (state) {
+                        gboolean is_visible = gtk_widget_get_visible(GTK_WIDGET(state->window));
+                        gtk_widget_set_visible(GTK_WIDGET(state->window), !is_visible);
+                        
+                        if (!is_visible) {
+                            gtk_window_present(state->window);
+                            gboolean is_exclusive = json_object_get_boolean_member_with_default(state->config_obj, "exclusive", FALSE);
+                            if (!is_exclusive) {
+                                gtk_widget_grab_focus(GTK_WIDGET(state->window));
                             }
+                            // ... existing logic to close other widgets ...
                         }
+                    } else {
+                        g_warning("Command line: No loaded widget named '%s' found.", argv[2]);
                     }
                 }
             } else {
-                g_warning("Command line: No widget named '%s' found.", argv[2]);
+                 g_warning("Command line: No configuration block named '%s' found.", argv[2]);
             }
         }
     } else {

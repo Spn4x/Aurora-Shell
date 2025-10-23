@@ -15,5 +15,5 @@ cachy_selector_deps = [
 executable('cachy-selector',
   cachy_selector_sources,
   dependencies: cachy_selector_deps,
-  install: true,
+  install: true, # This installs it to /usr/local/bin by default
 )

@@ -98,19 +98,16 @@
     "visible_on_start": false,
     "interactive": true
   },
-  {
+ {
     "name": "cachy-selector",
-    "plugin": "/usr/local/lib/aurora-shell/widgets/cachy-selector.so",
-    "stylesheet": "cachy-selector.css",
-    "visible_on_start": false,
-    "layer": "overlay",
-    "anchor": "center",
-    "size": {
-      "width": 800,
-      "height": 210
-    },
-    "interactive": true
-  },
+    "type": "command",
+    "command": "cachy-selector cachy-selector",
+    "config": {
+        "stylesheet": "cachy-selector.css",
+        "size": { "width": 1000, "height": 210 },
+        "margins": { "top": 50 }
+    }
+},
   {
     "name": "insight",
     "plugin": "/usr/local/lib/aurora-shell/widgets/aurora-insight.so",
