@@ -9,12 +9,14 @@
 @define-color accent #966166;     /* The strong, vibrant accent for highlights */
 @define-color surface #383A3C;    /* The muted, dark color for backgrounds/surfaces */
 
+@define-color gnome-bg #28282C;
+@define-color gnome-highlight #3E3E41;
 
 /* The main application window.
    Styled to match the target's .main-container for a cohesive "glassmorphism" look. */
 #main-window {
-    background-color: alpha(@surface, 0.3);
-    border: 2px solid alpha(@accent, 0.8);
+    background-color: @gnome-bg;
+    border: 2px solid alpha(@accent, 0.2);
     border-radius: 16px;
     box-shadow: none;
     /* This padding creates a nice inner margin from the border */

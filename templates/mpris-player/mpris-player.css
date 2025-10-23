@@ -4,21 +4,24 @@
 ================================================================================
 */
 
-/* --- Color Palette & Font --- */
-@define-color background #0F1214;
-@define-color foreground #EBE6E6;
-@define-color accent     #966166;
-@define-color surface    #383A3C;
-@define-color warning    #02141B;
+/* --- Color Palette & Font (Placeholders) --- */
+@define-color background %%BACKGROUND%%;
+@define-color foreground %%FOREGROUND%%;
+@define-color accent     %%ACCENT%%;
+@define-color surface    %%SURFACE%%;
+@define-color warning    %%WARNING%%;
+
 @define-color-font-main "JetBrainsMono Nerd Font";
-@define-color white #FFFFFF;
+
+@define-color gnome-bg #28282C;
+@define-color gnome-highlight #3E3E41;
 
 /* --- Main Widget Container --- */
 .mpris-player-widget {
     font-family: @define-color-font-main, monospace;
-    background-color: alpha(@surface, 0.3);
+    background-color: @gnome-bg;
     color: @foreground;
-    border: 2px solid alpha(@accent, 0.9);
+    border: 2px solid alpha(@accent, 0.2);
     border-radius: 14px;
     box-shadow: none;
 }

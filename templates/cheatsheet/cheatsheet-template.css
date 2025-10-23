@@ -6,14 +6,18 @@
 @define-color accent {{color4}};
 @define-color surface {{color0}};
 
+
+@define-color gnome-bg #28282C;
+@define-color gnome-highlight #3E3E41;
+
 * --- Main Styles --- */
 window {
     background-color: transparent;
 }
 
 .main-container {
-    background-color: alpha(@surface, 0.3);
-    border: 2px solid alpha(@accent, 0.8);
+    background-color: @gnome-bg;
+    border: 2px solid alpha(@accent, 0.2);
     border-radius: 14px;
     box-shadow: none;
 }

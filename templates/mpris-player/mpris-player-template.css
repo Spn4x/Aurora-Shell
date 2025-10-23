@@ -13,12 +13,15 @@
 
 @define-color-font-main "JetBrainsMono Nerd Font";
 
+@define-color gnome-bg #28282C;
+@define-color gnome-highlight #3E3E41;
+
 /* --- Main Widget Container --- */
 .mpris-player-widget {
     font-family: @define-color-font-main, monospace;
-    background-color: alpha(@surface, 0.3);
+    background-color: @gnome-bg;
     color: @foreground;
-    border: 2px solid alpha(@accent, 0.9);
+    border: 2px solid alpha(@accent, 0.2);
     border-radius: 14px;
     box-shadow: none;
 }

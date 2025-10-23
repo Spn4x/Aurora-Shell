@@ -1,9 +1,12 @@
 /* --- Color Palette Definition --- */
-@define-color background #151514;
-@define-color foreground #E7E9E8;
-@define-color accent     #73888A;
-@define-color surface    #3C3C3C;
-@define-color warning    #161512;
+@define-color background %%BACKGROUND%%;
+@define-color foreground %%FOREGROUND%%;
+@define-color accent     %%ACCENT%%;
+@define-color surface    %%SURFACE%%;
+@define-color warning    %%WARNING%%;
+
+@define-color gnome-bg #28282C;
+@define-color gnome-highlight #3E3E41;
 
 
 
@@ -18,9 +21,9 @@ window {
 
 #calendar-widget {
     font-family: @define-color-font-main, monospace;
-    background-color: alpha(@surface, 0.3); /* A nice, semi-solid background */
+    background-color: @gnome-bg; /* A nice, semi-solid background */
     color: @foreground;
-    border: 2px solid alpha(@accent, 0.9);
+    border: 2px solid alpha(@accent, 0.2);
     border-radius: 14px;
     padding: 12px;
     min-width: 550px;

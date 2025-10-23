@@ -1,34 +1,33 @@
 /* --- Template for the COMPACT Uptime Widget --- */
-@define-color surface #3C3C3C;
-@define-color foreground #E7E9E8;
-@define-color accent #73888A;      /* Using color4 for the accent */
-@define-color text-subtle #D5D7D5;
+@define-color surface #383A3C;
+@define-color foreground #EBE6E6;
+@define-color accent #966166;      /* Using color4 for the accent */
+@define-color text-subtle #DBD3D3;
 
+@define-color gnome-bg #28282C;
+@define-color gnome-highlight #3E3E41;
 /* Make the top-level window itself completely transparent */
-window {
-    background-color: transparent;
-}
+
 
 /* Apply all visual styles to our container box */
 #uptime-widget {
-    background-color: alpha(@surface, 0.3);
-    border: 2px solid alpha(@accent, 0.8); 
+   background-color: @gnome-bg;
+    border: 2px solid alpha(@accent, 0.2); /* Use the accent color for the border */
     border-radius: 8px;
     padding: 3px 10px;
-    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
-    font-size: 14px;
-    font-family: "JetBrainsMono Nerd Font";
+    box-shadow: none;
+      font-size: 14px;
+       font-family: "JetBrainsMono Nerd Font";
     font-weight: normal;
-    color: @text-subtle;
-    opacity: 0.9;
+
   
 }
 
 /* Style the text label inside */
-/* .info-label {
+/*#uptime-widget .info-label {
     font-family: "JetBrainsMono Nerd Font";
     font-weight: normal;
     color: @text-subtle;
-    opacity: 0.9;
+    background-color: @gnome-bg;
   
 } */

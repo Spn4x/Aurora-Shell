@@ -1,19 +1,23 @@
 /* Cheatsheet Template for Wallust */
 
 /* --- Wallust Color Placeholders --- */
-@define-color background #151514;
-@define-color foreground #E7E9E8;
-@define-color accent #73888A;
-@define-color surface #3C3C3C;
+@define-color background #0F1214;
+@define-color foreground #EBE6E6;
+@define-color accent #966166;
+@define-color surface #383A3C;
 
-/* --- Main Styles --- */
+
+@define-color gnome-bg #28282C;
+@define-color gnome-highlight #3E3E41;
+
+* --- Main Styles --- */
 window {
     background-color: transparent;
 }
 
 .main-container {
-    background-color: alpha(@surface, 0.3);
-    border: 2px solid alpha(@accent, 0.8);
+    background-color: @gnome-bg;
+    border: 2px solid alpha(@accent, 0.2);
     border-radius: 14px;
     box-shadow: none;
 }

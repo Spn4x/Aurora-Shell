@@ -4,6 +4,9 @@
 @define-color accent_color {{color4}};
 @define-color surface_color {{color0}};
 
+@define-color gnome-bg #28282C;
+@define-color gnome-highlight #3E3E41;
+
 /* --- Main Window & Background --- */
 .launcher-background {
     background-color: transparent;
@@ -11,8 +14,8 @@
 
 /* --- Main Launcher "Card" --- */
 .launcher-box {
-    background-color: alpha(@bg_color, 0.3);
-    border: 2px solid alpha(@accent_color, 0.7);
+    background-color: @gnome-bg;
+    border: 2px solid alpha(@accent_color, 0.2);
     border-radius: 12px;
     
     /* THE CHANGE: Reduced padding and width */

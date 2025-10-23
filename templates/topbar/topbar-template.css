@@ -4,7 +4,8 @@
 @define-color custom-background {{background}};    /* Main bar background */
 @define-color custom-surface {{color0}};         /* Module background */
 @define-color custom-accent {{color4}};        /* Primary accent */
-
+@define-color gnome-bg #28282C;
+@define-color gnome-highlight #3E3E41;
 /* Note: 'custom-border' and 'custom-highlight' were defined but not used. */
 /* Note: 'battery-*', 'backlight-*', 'bluetooth-color' were defined but not used. */
 
@@ -14,15 +15,14 @@
     font-size: 10.5pt;
     font-weight: normal;
     color: @custom-primary;
-    border: none;
     border-radius: 0px;
     box-shadow: none;
     text-shadow: none;
-    background-color: alpha(@custom-background, 0.3);
+     background-color: @gnome-bg;
+    border: 2px solid alpha(@accent, 0.2);
     padding: 2px 5px;
     border-radius: 12px;
-    border: 2px solid alpha(@custom-accent, 0.8);
-  
+    
 }
 
 /* --- Group Spacing --- */
@@ -35,11 +35,12 @@
     background: none;
     padding: 0;
     margin-left: 2px;
+    margin-right: 6px;
 }
 
 .aurora-topbar-widget .workspace-module .workspace-button {
-    color: @custom-secondary;
-    background-color: alpha(@custom-surface, 0.3);
+   
+   background: @gnome-highlight;
     padding: 4px 9px;
     margin: 1px 2px;
     border-radius: 8px;
@@ -60,17 +61,28 @@
     padding: 3px 7px;
     margin: 0px;
     border-radius: 8px;
-    background-color: alpha(@custom-surface, 0.3);
+    background: @gnome-highlight;
     font-weight: normal;
     min-width: 40px;
 }
 
+.aurora-topbar-widget .clock-module {
+    margin-right: 8px;
+}
 .aurora-topbar-widget .clock-module:hover,
 .aurora-topbar-widget .sysinfo-module:hover,
 .aurora-topbar-widget .audio-module:hover,
 .aurora-topbar-widget .zen-module:hover,
 .aurora-topbar-widget .workspace-module .workspace-button:hover {
-    background-color: alpha(@custom-surface, 0.7);
+    background-color: @accent;
+}
+
+.aurora-topbar-widget .clock-module:active,
+.aurora-topbar-widget .sysinfo-module:active,
+.aurora-topbar-widget .audio-module:active,
+.aurora-topbar-widget .zen-module:checked,
+.aurora-topbar-widget .workspace-module .workspace-button:checked {
+    background-color: @accent;
 }
 
 /* --- Sysinfo Module Internals --- */

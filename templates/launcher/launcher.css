@@ -1,7 +1,11 @@
-@define-color bg_color #313244;
-@define-color text_color #CDD6F4;
-@define-color accent_color #F38BA8;
-@define-color surface_color #45475A;
+/* --- Wallust Placeholders for Launcher --- */
+@define-color bg_color #0F1214;
+@define-color text_color #EBE6E6;
+@define-color accent_color #966166;
+@define-color surface_color #383A3C;
+
+@define-color gnome-bg #28282C;
+@define-color gnome-highlight #3E3E41;
 
 /* --- Main Window & Background --- */
 .launcher-background {
@@ -10,8 +14,8 @@
 
 /* --- Main Launcher "Card" --- */
 .launcher-box {
-    background-color: alpha(@bg_color, 0.3);
-    border: 2px solid alpha(@accent_color, 0.7);
+    background-color: @gnome-bg;
+    border: 2px solid alpha(@accent_color, 0.2);
     border-radius: 12px;
     
     /* THE CHANGE: Reduced padding and width */

@@ -1,34 +1,39 @@
-@define-color accent #46A44D;
-@define-color gnome-bg #28282C;
-@define-color gnome-highlight #3E3E41;
+/*
+ * Aurora Insight - Template
+ * Provides named colors for both GTK widgets and Cairo drawing.
+*/
+@define-color accent {{accent}};
+@define-color background {{background}};
+@define-color foreground {{foreground}}; /* <-- THIS IS THE CRITICAL ADDITION */
 
-window {
-    background: @gnome-bg;
+#aurora-insight {
+    background: @background;
     border-radius: 12px;
     border: 2px solid alpha(@accent, 0.2);
+    padding: 12px;
+    box-shadow: none;
 }
 
-.dim-label {
+#aurora-insight .dim-label {
     opacity: 0.6;
     font-size: small;
 }
 
-frame {
+#aurora-insight frame {
     background-color: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(255, 255, 255, 0.05);
     border-radius: 8px;
     padding: 12px;
 }
 
-separator {
+#aurora-insight separator {
     background-color: rgba(255, 255, 255, 0.1);
     min-height: 1px;
 }
 
-/* --- NEW RULES for Bottom Navigation Buttons --- */
+/* --- Rules for Bottom Navigation Buttons --- */
 
-.bottom-nav button {
-    /* Remove all default button styling */
+#aurora-insight .bottom-nav button {
     background-image: none;
     background-color: transparent;
     border: none;
@@ -36,12 +41,7 @@ separator {
     outline: none;
 }
 
-.bottom-nav button:hover {
-    /* Add a subtle background on hover for feedback */
-    background-color: rgba(255, 255, 255, 0.1);
-}
-
-.bottom-nav button:active {
-    /* Make the click state look the same as hover */
+#aurora-insight .bottom-nav button:hover,
+#aurora-insight .bottom-nav button:active {
     background-color: rgba(255, 255, 255, 0.1);
 }
