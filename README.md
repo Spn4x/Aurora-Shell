@@ -19,7 +19,7 @@ A fully automated and cohesive desktop experience built on Hyprland, made possib
     *   **Control Center:** Manage Wi-Fi, Bluetooth, audio, brightness, and system metrics.
     *   **Event-Aware Calendar:** A full calendar with support for creating, reading, and deleting events.
     *   **MPRIS Media Player:** Displays media info and perfectly **synced lyrics** for any MPRIS-compatible player.
-    *   **Utility Suite:** Includes a fast App Launcher, a system Uptime badge, a hotkey Cheatsheet, and a real-time resource monitor (Insight).
+    *   **Utility Suite:** Includes a fast App Launcher, a system Uptime badge, a hotkey Cheatsheet, and a digital-wellbeing monitor (Insight).
 
 ---
 
@@ -38,6 +38,9 @@ Add the following to your `~/.config/hyprland/hyprland.conf` to integrate the sh
 
 ```ini
 # ~/.config/hyprland/hyprland.conf
+
+# For the color palletes for hyprland itself
+source = ~/.config/hypr/colors-hyprland-generated.conf
 
 # --- Aurora Shell Integration ---
 
