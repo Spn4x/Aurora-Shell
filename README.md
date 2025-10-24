@@ -39,7 +39,7 @@ Add the following to your `~/.config/hyprland/hyprland.conf` to integrate the sh
 ```ini
 # ~/.config/hyprland/hyprland.conf
 
-# For the color palletes for hyprland itself
+# For the color palletes for hyprland itself   
 source = ~/.config/hypr/colors-hyprland-generated.conf
 
 # --- Aurora Shell Integration ---
