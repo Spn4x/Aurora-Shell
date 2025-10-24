@@ -1,7 +1,7 @@
 # Aurora-Shell
 
-![Desktop Showcase](pics/allwidgets.png)
-###### *Song: Euthanasia - Will Wood*
+![Desktop Showcase](pics/intro.png)
+###### *Song: Pressure Bomn?!?! - Jhariah*
 ---
 
 ### An arch user's descent into AI exploitation... And apparently Desktop Shell Development.
@@ -12,37 +12,37 @@ A fully automated and cohesive desktop experience built on Hyprland, made possib
 
 ### Key Features
 
-* **Dynamic Theming:** Leveraging Wallust, a set of color palletes are generated from the wallpaper and applied to the set of default widgets the shell provides.
-*   **Control Center:** Manages Wi-Fi, Bluetooth, audio sinks, brightness, and volume.
-*   **Hyper-Calendar:** A full calendar with CRUD (Create, Read, Update, Delete) functionality for managing events and schedules.
-*   **Side-MPRIS-Player:** A media player widget that displays metadata and features perfectly **synced lyrics** for music playing in any MPRIS-compatible player (including browsers).
-* **App-Launcher:** Launches apps and does math I guess.
+*   **Fully Config-Driven:** Every component—from the bar to pop-up widgets—is defined in a central `config.json`. Add, remove, or reconfigure widgets without touching a line of code.
+*   **Dynamic Theming:** Integrates with `wallust` to generate color palettes directly from your wallpaper. A single command updates the theme across all widgets and supported system applications.
+*   **Modular Topbar:** A feature-rich bar with support for pluggable modules, including workspaces, a system tray, pop-over menus, and clickable elements.
+*   **Powerful Widgets:**
+    *   **Control Center:** Manage Wi-Fi, Bluetooth, audio, brightness, and system metrics.
+    *   **Event-Aware Calendar:** A full calendar with support for creating, reading, and deleting events.
+    *   **MPRIS Media Player:** Displays media info and perfectly **synced lyrics** for any MPRIS-compatible player.
+    *   **Utility Suite:** Includes a fast App Launcher, a system Uptime badge, a hotkey Cheatsheet, and a real-time resource monitor (Insight).
 
 ---
 
-### Usage
+### How It Works
 
-All widgets are controlled through the main `aurora-shell` executable using the `--toggle` flag. This design makes it easy to integrate with any workflow or window manager.
+Aurora Shell runs as a single, persistent background process. It reads your `config.json` and loads each defined item:
+- **Widgets (`.so` plugins):** The visual components of the shell.
+- **Daemons:** Background services required by certain widgets.
+- **Commands:** Aliases to launch external scripts or applications.
+
+You interact with the running shell using the main executable with the `--toggle` flag. This design makes it trivial to bind widgets to hotkeys in any window manager.
 
 ### Integrating with Hyprland
 
-The most common way to use Aurora Shell is by adding entries to your `hyprland.conf`.
-
-1.  **Launching Widgets on Startup:**
-    Add an `exec-once` rule for any widget you want to be visible when you log in, like the topbar.
-
-2.  **Creating Keybindings:**
-    Use `bind` rules to assign a keyboard shortcut to toggle each widget.
-
-Here is a sample configuration to add to your `~/.config/hyprland/hyprland.conf`:
+Add the following to your `~/.config/hyprland/hyprland.conf` to integrate the shell.
 
 ```ini
 # ~/.config/hyprland/hyprland.conf
 
 # --- Aurora Shell Integration ---
 
-# Automatically start the topbar when Hyprland loads
-exec-once = aurora-shell --toggle topbar
+# Automatically start the Aurora Shell host process on login
+exec-once = aurora-shell
 
 # Keybindings to toggle individual widgets
 # (Change $mainMod and keys to your preference)
@@ -62,151 +62,142 @@ bind = $mainMod, K, exec, aurora-shell --toggle cheatsheet
 # MPRIS Media Player ($mainMod + M)
 bind = $mainMod, M, exec, aurora-shell --toggle mpris-player
 
-# Themer / Wallpaper Changer
-bind = $mainMod, T, exec, aurora-shell --toggle themer
+# Wallpaper Changer / Themer ($mainMod + T)
+bind = $mainMod, T, exec, aurora-shell --toggle cachy-selector
 
-# Uptime / System Info
-bind = $mainMod, U, exec, aurora-shell --toggle uptime
+# Insight Resource Monitor ($mainMod + I)
+bind = $mainMod, I, exec, aurora-shell --toggle insight
 ```
 
 ## Configuration
 
-Aurora Shell is configured entirely within the `~/.config/aurora-shell/` directory. This directory is created for you upon first run, but you can also create it manually.
+Aurora Shell is configured entirely within `~/.config/aurora-shell/`. This directory is created for you upon the first run.
 
-The configuration is split into two main parts:
-*   `config.json`: Defines what widgets to load, their behavior, and their position.
-*   `templates/`: A directory containing CSS files for styling each widget.
+-   **`config.json`:** The brain of the shell. Defines which components to load, their properties, and their layout.
+-   **`templates/`:** Contains the CSS stylesheets for all widgets.
 
 ### Main Configuration: `config.json`
 
-This file is the brain of your setup. It is a JSON array where each object in the array defines a single widget instance. This allows you to define and customize every component on your screen.
+This file is a JSON array where each object defines a component. A component can have one of several `type` values: `widget`, `daemon`, `command`, or `themer-config`.
 
-#### Common Widget Properties
+#### Component Types
 
-Most widgets share a common set of configuration properties:
+1.  **`"type": "widget"`** (Default)
+    This is a visual, interactive component loaded from a `.so` plugin file. It uses a common set of properties for positioning and behavior.
 
-| Property             | Type          | Description                                                                                              |
-| :------------------- | :------------ | :------------------------------------------------------------------------------------------------------- |
-| `name`               | String        | A unique name for the widget (e.g., "topbar", "launcher").                                               |
-| `plugin`             | String        | The absolute path to the widget's compiled `.so` plugin file.                                            |
-| `stylesheet`         | String        | The name of the CSS file within `~/.config/aurora-shell/templates/<widget>/` to apply.                     |
-| `layer`              | String        | The Wayland layer: `background`, `bottom`, `top`, or `overlay`.                                          |
-| `anchor`             | String        | Where to position the widget on screen (e.g., `top`, `bottom`, `left`, `right`, `center`). Supports combinations like `top-left`. |
-| `visible_on_start`   | Boolean       | If `true`, the widget will be visible when `aurora-shell` starts.                                        |
-| `interactive`        | Boolean       | If `true`, the widget can receive keyboard focus. Set to `false` for informational widgets.            |
-| `margins`            | Object        | Sets space around the widget. Example: `{ "top": 5, "left": 10 }`.                                       |
-| `size`               | Object        | Sets a fixed size for the widget. Example: `{ "width": 500, "height": 300 }`.                             |
-| `animation`          | Object        | (Optional) Defines an entry animation for the widget.                                                    |
-| `config`             | Object        | (Optional) A nested object for widget-specific settings (see Topbar example below).                      |
+    | Property           | Type    | Description                                                                     |
+    | :----------------- | :------ | :------------------------------------------------------------------------------ |
+    | `name`             | String  | A unique name used for toggling (e.g., "topbar", "launcher").                   |
+    | `plugin`           | String  | Absolute path to the widget's compiled `.so` plugin file.                       |
+    | `stylesheet`       | String  | The name of the CSS file in `~/.config/aurora-shell/templates/<widget>/`.         |
+    | `layer`            | String  | Wayland layer: `background`, `bottom`, `top`, or `overlay`.                     |
+    | `anchor`           | String  | Position on screen: `top`, `bottom`, `left`, `right`, `center` or combinations. |
+    | `visible_on_start` | Boolean | If `true`, the widget is visible when the shell starts.                         |
+    | `interactive`      | Boolean | If `true`, the widget can receive keyboard focus.                               |
+    | `exclusive`        | Boolean | If `true`, reserves space so fullscreen windows don't cover it (for bars).      |
+    | `margin`           | Object  | Sets space around the widget. Example: `{ "top": 5, "left": 10 }`.              |
+    | `size`             | Object  | Sets a fixed size. Example: `{ "width": 500, "height": 300 }`.                  |
+    | `close`            | Array   | An array of other widget `name`s to close when this one is opened.              |
+    | `config`           | Object  | A nested object for widget-specific settings (e.g., topbar modules).            |
 
-#### Example Widget Definition (`topbar`)
-
-This example from the default configuration shows how these properties work together to create a feature-rich top bar.
-
-```json
-{
-  "name": "topbar",
-  "plugin": "/usr/local/lib/aurora-shell/widgets/topbar.so",
-  "stylesheet": "topbar.css",
-  "layer": "top",
-  "anchor": "top",
-  "exclusive": true, // This reserves space, so fullscreen windows don't cover it
-  "visible_on_start": true,
-  "interactive": true,
-  "margins": { "top": 5, "left": 5, "right": 5 },
-  // Widget-specific configuration
-  "config": {
-    "modules": {
-      "left": [ { "name": "workspaces" } ],
-      "center": [ { "name": "clock", "on-click": "aurora-shell --toggle calendar" } ],
-      "right": [
-        { "name": "sysinfo", "on-click": "aurora-shell --toggle control-center" },
-        { "name": "audio" },
-        { "name": "zen", "on-click-right": "swaync-client --toggle-panel" }
-      ]
+    *Example: The Calendar widget, which closes the Control Center when opened.*
+    ```json
+    {
+      "name": "calendar",
+      "plugin": "/usr/local/lib/aurora-shell/widgets/calendar.so",
+      "stylesheet": "calendar.css",
+      "anchor": "top-center",
+      "layer": "top",
+      "margin": { "top": 5 },
+      "close": [ "control-center" ]
     }
-  }
-}
-```
+    ```
+
+2.  **`"type": "command"`**
+    This creates a named alias for an external command or script. Running `aurora-shell --toggle <name>` will execute the specified `command`.
+
+    *Example: The `cachy-selector` entry, which runs a shell script.*
+    ```json
+    {
+      "name": "cachy-selector",
+      "type": "command",
+      "command": "toggle-selector.sh"
+    }
+    ```
+3.  **`"type": "daemon"`**
+    This defines a background process that the shell should ensure is running. The shell will check if the process exists and start it if it doesn't.
+
+    *Example: The daemon for the Insight resource monitor.*
+    ```json
+    {
+      "type": "daemon",
+      "name": "aurora-insight-daemon",
+      "command": "aurora-insight-daemon"
+    }
+    ```
+4.  **`"type": "themer-config"`**
+    A special, non-functional entry that provides configuration values for external scripts, such as the wallpaper themer.
+
+    *Example: Telling `wallpaper.sh` where to find wallpapers.*
+    ```json
+    {
+        "type": "themer-config",
+        "name": "global-themer-settings",
+        "wallpaper_dir": "~/Pictures/Wallpapers"
+    }
+    ```
 
 ### Styling and Theming
 
-All visual styling is handled by CSS. The `~/.config/aurora-shell/templates/` directory contains a subdirectory for each widget's styles.
+All visual styling is handled by CSS located in `~/.config/aurora-shell/templates/`. The theming system uses a template-based approach:
 
-#### The Template System
+1.  **Template Files (`*-template.css`):** These are the base stylesheets containing color placeholders like `{{background}}` and `{{accent}}`.
+2.  **Themer Script (`wallpaper.sh`):** When you change your wallpaper using the selector, this script reads the template, replaces the placeholders with colors generated from the new wallpaper, and saves the result.
+3.  **Active Files (`*.css`):** This is the final, generated CSS file that is loaded by the widget (as specified by the `stylesheet` property in `config.json`).
 
-The theming workflow is designed to be dynamic:
-
-1.  **Template Files (`*-template.css`):** These are the base stylesheets. They may contain placeholder variables for colors.
-2.  **Themer Script:** When you run the `themer` widget (e.g., via `wallpaper.sh`), it reads a template file, replaces the variables with colors generated from your wallpaper, and saves the result as a new file.
-3.  **Active Files (`*.css`):** This is the final, generated CSS file that is actually loaded by the widget, as specified in your `config.json`.
-
-This means you can edit the `*-template.css` files to change the fundamental structure and style, and then run the themer to apply your color scheme. To apply custom, static styles, you can simply edit the final `.css` files directly.
-
-### Command Reference
-
-Here is a complete list of the default widget toggle commands:
-
-| Widget | Command |
-| :--- | :--- |
-| **Topbar** | `aurora-shell --toggle topbar` |
-| **Launcher** | `aurora-shell --toggle launcher` |
-| **Control Center** | `aurora-shell --toggle control-center` |
-| **Calendar** | `aurora-shell --toggle calendar` |
-| **Cheatsheet** | `aurora-shell --toggle cheatsheet` |
-| **MPRIS Player** | `aurora-shell --toggle mpris-player` |
-| **Themer** | `aurora-shell --toggle themer` |
-| **Uptime** | `aurora-shell --toggle uptime` |
+This workflow allows you to customize the structure and layout in the `*-template.css` files while letting the themer automate the color scheme.
 
 ## Dependencies
 
-Before building, you must install the necessary development packages and libraries.
-
 ### Core Build Tools
-
-You will need `meson`, `ninja`, and a C compiler like `gcc`.
+`meson`, `ninja`, and a C compiler (`gcc` or `clang`).
 
 ### Project Libraries
-
-Aurora Shell and its widgets rely on several libraries. The table below lists the required Meson dependency names and the corresponding package names for popular distributions.
-
 | Dependency Name           | Arch Linux          | Debian / Ubuntu          | Fedora                     |
 | :------------------------ | :------------------ | :----------------------- | :------------------------- |
 | `gtk4`                    | `gtk4`              | `libgtk-4-dev`           | `gtk4-devel`               |
 | `libadwaita-1`            | `libadwaita`        | `libadwaita-1-dev`       | `libadwaita-devel`         |
 | `gtk4-layer-shell-0`      | `gtk-layer-shell`   | `libgtk-layer-shell-0-dev` | `gtk-layer-shell-devel`    |
 | `json-glib-1.0`           | `json-glib`         | `libjson-glib-dev`       | `json-glib-devel`          |
-| `gio-2.0` / `gio-unix-2.0`| `glib2`             | `libglib2.0-dev`         | `glib2-devel`              |
 | `libsoup-3.0`             | `libsoup3`          | `libsoup-3.0-dev`        | `libsoup3-devel`           |
-| `dl` / `m`                | `glibc` (base)      | `libc6-dev` (base)       | `glibc-devel` (base)       |
 
 ### Runtime Dependencies
+*   **Theming:** `swww`, `wallust`, `jq`.
+*   **MPRIS Player:** `playerctl`.
+*   **Control Center:** `network-manager`, `bluez` (`bluez-tools`), `pipewire-pulse` (or `pulseaudio`).
 
-Some widgets require external tools to be installed on your system to function correctly.
-
-*   **MPRIS Player:** Requires `playerctl` for media control.
-*   **Control Center:**
-    *   **Audio:** Requires `pulseaudio` or `pipewire-pulse`.
-    *   **Network:** Requires `network-manager`.
-    *   **Bluetooth:** Requires `bluez` and `bluez-tools`.
-
-    ---
+---
 
 ### Install Commands
 
 **On Arch Linux:**
 ```bash
-sudo pacman -S meson ninja gcc gtk4 libadwaita gtk-layer-shell json-glib glib2 libsoup3 playerctl networkmanager bluez bluez-utils
+sudo pacman -S meson ninja gcc gtk4 libadwaita gtk-layer-shell json-glib libsoup3 \
+               playerctl networkmanager bluez bluez-utils pipewire-pulse swww wallust jq
 ```
 
 **On Debian / Ubuntu:**
 ```bash
-sudo apt install meson ninja build-essential libgtk-4-dev libadwaita-1-dev libgtk-layer-shell-0-dev libjson-glib-dev libglib2.0-dev libsoup-3.0-dev playerctl network-manager bluez
+sudo apt install meson ninja build-essential libgtk-4-dev libadwaita-1-dev \
+                 libgtk-layer-shell-0-dev libjson-glib-dev libsoup-3.0-dev playerctl \
+                 network-manager bluez pipewire-audio-client-libraries swww wallust jq
 ```
 
 **On Fedora:**
 ```bash
-sudo dnf install meson ninja gcc gtk4-devel libadwaita-devel gtk-layer-shell-devel json-glib-devel glib2-devel libsoup3-devel playerctl NetworkManager bluez
+sudo dnf install meson ninja gcc gtk4-devel libadwaita-devel gtk-layer-shell-devel \
+                 json-glib-devel libsoup3-devel playerctl NetworkManager bluez \
+                 pipewire-pulseaudio swww wallust jq
 ```
 
 ## Installation

@@ -101,8 +101,10 @@ hex_to_rgba() {
 # Reads the wallpaper directory from the Aurora Shell config file.
 # Falls back to the default if not found or if an error occurs.
 get_wallpaper_dir() {
+    log_info "Attempting to read wallpaper directory from config..."
     if [[ ! -f "$AURORA_CONFIG_FILE" ]]; then
-        log_warn "Aurora config not found at '$AURORA_CONFIG_FILE'. Using default wallpaper directory."
+        log_warn "Aurora config not found at '$AURORA_CONFIG_FILE'."
+        log_warn "FALLBACK: Using default directory: '$WALLPAPER_DIR_DEFAULT'"
         echo "$WALLPAPER_DIR_DEFAULT"
         return
     fi
@@ -110,10 +112,14 @@ get_wallpaper_dir() {
     # Use jq to find the object with type "themer-config" and get its "wallpaper_dir".
     local config_dir
     config_dir=$(jq -r '.[] | select(.type == "themer-config") | .wallpaper_dir' "$AURORA_CONFIG_FILE")
+    
+    # --- DEBUGGING LINE ---
+    log_info "Raw value from jq: '$config_dir'"
 
-    # Check if jq found anything. It will output "null" or be empty if not found.
+    # Check if jq found anything. It will output "null" or be empty if not found or on JSON error.
     if [[ -z "$config_dir" || "$config_dir" == "null" ]]; then
-        log_info "No 'wallpaper_dir' found in config. Using default."
+        log_warn "No 'wallpaper_dir' found in config, or config has a syntax error."
+        log_warn "FALLBACK: Using default directory: '$WALLPAPER_DIR_DEFAULT'"
         echo "$WALLPAPER_DIR_DEFAULT"
         return
     fi
@@ -122,7 +128,7 @@ get_wallpaper_dir() {
     local expanded_dir
     expanded_dir=$(eval echo "$config_dir")
     
-    log_info "Using wallpaper directory from config: $expanded_dir"
+    log_info "SUCCESS: Using wallpaper directory from config: '$expanded_dir'"
     echo "$expanded_dir"
 }
 
