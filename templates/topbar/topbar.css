@@ -1,13 +1,15 @@
 /* --- Wallust Placeholders for Topbar --- */
-@define-color custom-primary #EBE6E6;      /* Main text */
-@define-color custom-secondary #DBD3D3;         /* Sub-text (often lighter grey) */
-@define-color custom-background #0F1214;    /* Main bar background */
-@define-color custom-surface #383A3C;         /* Module background */
-@define-color custom-accent #966166;        /* Primary accent */
+@define-color custom-primary #CDEBD6;      /* Main text */
+@define-color custom-secondary #AFDABC;         /* Sub-text (often lighter grey) */
+@define-color custom-background #16171A;    /* Main bar background */
+@define-color custom-surface #3D3E42;         /* Module background */
+@define-color custom-accent #46A44D;        /* Primary accent */
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
 /* Note: 'custom-border' and 'custom-highlight' were defined but not used. */
 /* Note: 'battery-*', 'backlight-*', 'bluetooth-color' were defined but not used. */
+
+
 
 /* --- Main Bar Container --- */
 .aurora-topbar-widget {
@@ -66,6 +68,15 @@
     min-width: 40px;
 }
 
+.aurora-topbar-widget .popover-module {
+    font-size: 15pt;
+    padding-right: 12px;
+    padding-left: 8px;
+    padding-bottom: 2px;
+    background: @gnome-highlight;
+    border-radius: 8px;
+}
+
 .aurora-topbar-widget .clock-module {
     margin-right: 8px;
 }
@@ -106,69 +117,79 @@
     font-size: 1.1em;
     opacity: 0.8;
 }
-
 /* =======================================================================
-    Audio Module Popover
+    !!! FINAL UNIVERSAL POPOVER STYLES !!!
    ======================================================================= */
 
-.aurora-topbar-widget .audio-module popover {
-    background: transparent;
+/* --- Part 1: Style for ALL Popover Containers --- */
+
+popover {
+    background-color: @gnome-bg;
     border: none;
     box-shadow: none;
     padding: 0;
 }
 
-.aurora-topbar-widget .audio-module popover > contents {
-    background-color: alpha(@custom-surface, 0.6);
-    border: 2px solid alpha(@custom-accent, 0.7);
+popover > contents {
+    background-color: @gnome-bg;
+    border: 2px solid alpha(@custom-accent, 0.2);
     border-radius: 12px;
     padding: 8px;
     min-width: 250px;
 }
 
-.aurora-topbar-widget .audio-module popover arrow {
+popover arrow {
     min-width: 24px;
     min-height: 12px;
     border-color: transparent;
     background: none;
 }
-.aurora-topbar-widget .audio-module popover.top arrow {
+
+popover.top arrow {
     border-bottom: 12px solid alpha(@custom-accent, 0.7);
 }
-.aurora-topbar-widget .audio-module popover.bottom arrow {
+
+popover.bottom arrow {
     border-top: 12px solid alpha(@custom-accent, 0.7);
 }
 
-/* --- Content INSIDE the popover --- */
-.sink-list-popover .sink-button {
+
+/* --- Part 2: Style for ALL Buttons Inside Popovers --- */
+/* This targets the original audio buttons AND your generic .flat buttons */
+
+.sink-list-popover .sink-button,
+popover .flat {
     background-color: transparent;
-    color: @custom-primary; /* FIXED */
+    color: @custom-primary;
     border: none;
     box-shadow: none;
     border-radius: 6px;
     padding: 8px 12px;
     font-weight: bold;
 }
-.sink-list-popover .sink-button:hover {
-    background-color: alpha(@custom-accent, 0.5); /* FIXED */
-}
-.sink-list-popover .sink-button.active-sink {
-    background-color: @custom-accent;
-    color: @custom-background; /* FIXED */
+
+.sink-list-popover .sink-button:hover,
+popover .flat:hover {
+    background-color: alpha(@custom-accent, 0.5);
 }
 
+/* This handles the active state for the audio module */
+.sink-list-popover .sink-button.active-sink {
+    background-color: @custom-accent;
+    color: @custom-background;
+}
+
+/* These are helper styles, leave them as they are */
 .sink-list-popover .glyph-label {
     font-size: 1.1em;
     margin-right: 8px;
     opacity: 0.8;
 }
 
-.sink-list-popover .sink-button,
 .sink-list-popover .sink-button box,
 .sink-list-popover .sink-button label {
     background: none;
 }
-
 /* --- Zen (DND) Module --- */
 .aurora-topbar-widget .zen-module .zen-active {
     background-color: @custom-accent; /* FIXED */

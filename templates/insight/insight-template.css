@@ -6,8 +6,12 @@
 @define-color background {{background}};
 @define-color foreground {{foreground}}; /* <-- THIS IS THE CRITICAL ADDITION */
 
+@define-color gnome-bg #28282C;
+@define-color gnome-highlight #3E3E41;
+
+
 #aurora-insight {
-    background: @background;
+    background: @gnome-bg;
     border-radius: 12px;
     border: 2px solid alpha(@accent, 0.2);
     padding: 12px;

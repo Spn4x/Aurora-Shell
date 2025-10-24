@@ -4,10 +4,10 @@
  */
 
 /* --- Wallust Placeholders for Cachy Selector --- */
-@define-color background #0F1214;
-@define-color foreground #EBE6E6;
-@define-color accent #966166;
-@define-color surface #383A3C;
+@define-color background #16171A;
+@define-color foreground #CDEBD6;
+@define-color accent #46A44D;
+@define-color surface #3D3E42;
 
 
 @define-color gnome-bg #28282C;
