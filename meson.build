@@ -27,11 +27,12 @@ install_data(
   install_mode: 'rw-r--r--'
 )
 
-# Install the themer helper scripts to the binary directory (e.g., /usr/local/bin)
 install_data(
-  ['themer/wallpaper.sh', 'themer/lighten_color.py'],
-  install_dir: get_option('bindir'),
-  install_mode: 'rwxr-xr-x'  # Make them executable
+  'themer/wallpaper.sh',
+  'themer/toggle-selector.sh',   
+  'themer/lighten_color.py',       
+  install_dir: get_option('bindir'), 
+  install_mode: 'rwxr-xr-x'          
 )
 
 # Install the MPRIS resetter daemon script to the binary directory
