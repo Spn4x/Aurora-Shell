@@ -13,7 +13,6 @@
 
 // ===================================================================
 //  GObject Definition: AuroraResultObject
-//  (The data model for a single search result)
 // ===================================================================
 
 #define AURORA_RESULT_OBJECT_TYPE (aurora_result_object_get_type())
@@ -25,7 +24,7 @@ struct _AuroraResultObject {
     gchar *icon_name;
     gpointer data;
     GDestroyNotify data_free_func;
-    gint score; // <<< ADDED: To store the relevance score for sorting.
+    gint score;
 };
 G_DEFINE_TYPE(AuroraResultObject, aurora_result_object, G_TYPE_OBJECT)
 
@@ -49,7 +48,6 @@ static void aurora_result_object_class_init(AuroraResultObjectClass *klass) {
     object_class->finalize = aurora_result_object_finalize;
 }
 
-// <<< CHANGED: Added `score` parameter to the constructor.
 AuroraResultObject* aurora_result_object_new(AuroraResultType type, const gchar *name, const gchar *description, const gchar *icon_name, gpointer data, GDestroyNotify data_free_func, gint score) {
     AuroraResultObject *self = g_object_new(AURORA_RESULT_OBJECT_TYPE, NULL);
     self->type = type;
@@ -58,7 +56,7 @@ AuroraResultObject* aurora_result_object_new(AuroraResultType type, const gchar 
     self->icon_name = g_strdup(icon_name);
     self->data = data;
     self->data_free_func = data_free_func;
-    self->score = score; // <<< ADDED: Set the score.
+    self->score = score;
     return self;
 }
 
@@ -84,15 +82,12 @@ static void free_launcher_state(gpointer data) {
 //  Core Logic & Data Handling
 // ===================================================================
 
-// <<< ADDED: Comparison function for sorting results by score (descending).
 static gint compare_results_by_score(gconstpointer a, gconstpointer b) {
     const AuroraResultObject *result_a = a;
     const AuroraResultObject *result_b = b;
-    // A higher score is better, so we sort in descending order.
     return result_b->score - result_a->score;
 }
 
-// <<< CHANGED: Reworked to sort results before displaying.
 static void update_search_results(LauncherState *state, const gchar *search_text) {
     g_list_store_remove_all(state->results_store);
 
@@ -100,13 +95,9 @@ static void update_search_results(LauncherState *state, const gchar *search_text
     GList *app_results = get_app_results(search_text);
     GList *calc_results = get_calculator_results(search_text);
     
-    // First, concatenate all results into a single list.
     GList *all_results = g_list_concat(command_results, g_list_concat(calc_results, app_results));
-
-    // Next, sort the combined list by relevance score.
     all_results = g_list_sort(all_results, compare_results_by_score);
 
-    // Finally, add the sorted items to the list store for display.
     for (GList *l = all_results; l != NULL; l = l->next) {
         g_list_store_append(state->results_store, l->data);
         g_object_unref(l->data);
@@ -132,7 +123,9 @@ static void on_widget_mapped(GtkWidget *widget, gpointer user_data) {
     gtk_widget_grab_focus(state->entry);
 }
 
+// <<< THIS FUNCTION IS NOW FIXED >>>
 static void on_entry_changed(GtkEditable *entry, gpointer user_data) {
+    // The variable passed to the function is named `user_data`.
     LauncherState *state = (LauncherState *)user_data;
     const gchar *search_text = gtk_editable_get_text(entry);
     update_search_results(state, search_text);
@@ -210,7 +203,6 @@ static gboolean on_key_pressed_nav(GtkEventControllerKey *controller, guint keyv
         GtkListBoxRow *row_to_select = gtk_list_box_get_row_at_index(listbox, new_index);
         gtk_list_box_select_row(listbox, row_to_select);
         
-        // This is the scrolling fix from before.
         if (row_to_select) {
             gtk_widget_grab_focus(GTK_WIDGET(row_to_select));
         }
@@ -271,6 +263,12 @@ GtkWidget* create_widget(const char *config_string) {
     gtk_widget_add_css_class(state->main_box, "launcher-box");
     g_object_set_data_full(G_OBJECT(state->main_box), "launcher-state", state, free_launcher_state);
 
+    // --- The Correct Layout Fix ---
+    // The main_box is the child of the window. By setting its vertical alignment,
+    // we stop IT from stretching to fill the window. This forces the window
+    // to shrink-to-fit the box's natural, compact size. Using CENTER looks best.
+    gtk_widget_set_valign(state->main_box, GTK_ALIGN_CENTER);
+    
     g_signal_connect(state->main_box, "map", G_CALLBACK(on_widget_mapped), state);
 
     state->entry = gtk_entry_new();
@@ -285,6 +283,10 @@ GtkWidget* create_widget(const char *config_string) {
     GtkWidget *scrolled_win = gtk_scrolled_window_new();
     gtk_widget_add_css_class(scrolled_win, "results-scroller");
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_win), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    
+    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(scrolled_win), TRUE);
+    gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(scrolled_win), 350);
+    
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled_win), state->listbox);
 
     state->results_revealer = gtk_revealer_new();

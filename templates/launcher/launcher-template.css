@@ -54,7 +54,7 @@
 .results-scroller viewport {
     background: transparent;
     border: none;
-    min-height: 240px;
+  
 }
 
 /* This now targets our GtkListBox directly using the class we added.
