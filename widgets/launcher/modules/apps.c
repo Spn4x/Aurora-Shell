@@ -42,47 +42,53 @@ static gboolean fuzzy_match(const gchar *str, const gchar *search) {
 // Public function to get application results based on a search term.
 GList* get_app_results(const gchar *search_text) {
     GList *results = NULL;
-
     if (!search_text || *search_text == '\0') {
         return NULL;
     }
 
-    // Use GIO to get a list of all applications known to the system.
+    g_autofree gchar *search_lower = g_ascii_strdown(search_text, -1);
     GList *all_apps = g_app_info_get_all();
 
     for (GList *l = all_apps; l != NULL; l = l->next) {
         GAppInfo *app_info = G_APP_INFO(l->data);
-
-        // Skip applications that are marked as hidden (e.g., system services).
         if (!g_app_info_should_show(app_info)) {
             continue;
         }
 
         const gchar *app_name = g_app_info_get_name(app_info);
-        if (fuzzy_match(app_name, search_text)) {
-            // Get the GIcon and convert it to a string (either a name or a path).
+        g_autofree gchar *app_name_lower = g_ascii_strdown(app_name, -1);
+        
+        gint score = 0;
+
+        if (g_strcmp0(app_name_lower, search_lower) == 0) {
+            score = 100; // Perfect match
+        } else if (g_str_has_prefix(app_name_lower, search_lower)) {
+            score = 80;  // Starts-with match
+        } else if (fuzzy_match(app_name, search_text)) {
+            score = 60;  // Generic fuzzy match
+        }
+        
+        // Only create a result if there was a match (score > 0)
+        if (score > 0) {
             g_autofree gchar *icon_str = NULL;
             GIcon *icon = g_app_info_get_icon(app_info);
             if (icon) {
                 icon_str = g_icon_to_string(icon);
             }
 
-            // Create a result object. We pass the GAppInfo object itself as the data payload.
-            // We must g_object_ref it so the result object owns it.
             results = g_list_prepend(results, aurora_result_object_new(
                 AURORA_RESULT_APP,
                 app_name,
                 g_app_info_get_description(app_info),
                 icon_str ? icon_str : "application-x-executable",
-                g_object_ref(app_info), // Pass the GAppInfo object
-                g_object_unref          // Provide its free function
+                g_object_ref(app_info),
+                g_object_unref,
+                score 
             ));
         }
     }
     
-    // We're done with the list provided by GIO. Free the list structure.
-    // The GAppInfo objects inside are managed by GLib, we don't unref them here.
     g_list_free(all_apps);
-
-    return g_list_reverse(results);
+    // Don't g_list_reverse() anymore, sorting will handle the order.
+    return results;
 }

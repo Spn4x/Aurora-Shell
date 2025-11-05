@@ -17,16 +17,18 @@ typedef enum {
 
 // --- PUBLIC FUNCTION DECLARATIONS ---
 
-GtkWidget* create_launcher_widget();
+// The function in your plugin's main .c file that creates the widget
+GtkWidget* create_widget(const char *config_string);
 
-// This is the NEW public declaration. Now other files can see this function.
+// The constructor for the result objects, used by your modules (apps.c, etc.)
 AuroraResultObject* aurora_result_object_new(
     AuroraResultType type,
     const gchar *name,
     const gchar *description,
     const gchar *icon_name,
     gpointer data,
-    GDestroyNotify data_free_func
+    GDestroyNotify data_free_func,
+    gint score // <<< FIX IS HERE: Add the new score parameter
 );
 
 #endif // LAUNCHER_H

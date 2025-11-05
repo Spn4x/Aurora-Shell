@@ -64,17 +64,14 @@ GList* get_calculator_results(const gchar *query) {
     GList *results_list = NULL;
     g_autofree gchar *description = g_strdup_printf("Copy '%s' to clipboard", result_str);
 
-    // ========================================================================
-    // <<< THE FIX IS HERE
-    // Create the proper AuroraResultObject GObject.
-    // ========================================================================
     results_list = g_list_prepend(results_list, aurora_result_object_new(
         AURORA_RESULT_CALCULATOR,
         result_str,
         description,
         "accessories-calculator-symbolic", // A more standard icon name
         g_strdup(result_str),              // The data is the result string itself
-        g_free                             // Provide the function to free the data
+        g_free,                            // Provide the function to free the data
+        120                                // <<< FIX IS HERE: Added the score parameter
     ));
 
     return results_list;

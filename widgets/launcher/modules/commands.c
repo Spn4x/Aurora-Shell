@@ -25,7 +25,8 @@ GList* get_command_results(const gchar *search_text) {
         description,
         "utilities-terminal-symbolic",
         g_strdup(command),
-        g_free
+        g_free,
+        70 // <<< FIX IS HERE: Added the score parameter
     ));
 
     return results;

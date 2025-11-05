@@ -1,5 +1,5 @@
 // ===================================================================
-//  Aurora Launcher Widget (Corrected)
+//  Aurora Launcher Widget
 // ===================================================================
 // A searchable, keyboard-driven application launcher and command runner,
 // integrated as a dynamic plugin for the Aurora Shell.
@@ -25,6 +25,7 @@ struct _AuroraResultObject {
     gchar *icon_name;
     gpointer data;
     GDestroyNotify data_free_func;
+    gint score; // <<< ADDED: To store the relevance score for sorting.
 };
 G_DEFINE_TYPE(AuroraResultObject, aurora_result_object, G_TYPE_OBJECT)
 
@@ -48,7 +49,8 @@ static void aurora_result_object_class_init(AuroraResultObjectClass *klass) {
     object_class->finalize = aurora_result_object_finalize;
 }
 
-AuroraResultObject* aurora_result_object_new(AuroraResultType type, const gchar *name, const gchar *description, const gchar *icon_name, gpointer data, GDestroyNotify data_free_func) {
+// <<< CHANGED: Added `score` parameter to the constructor.
+AuroraResultObject* aurora_result_object_new(AuroraResultType type, const gchar *name, const gchar *description, const gchar *icon_name, gpointer data, GDestroyNotify data_free_func, gint score) {
     AuroraResultObject *self = g_object_new(AURORA_RESULT_OBJECT_TYPE, NULL);
     self->type = type;
     self->name = g_strdup(name);
@@ -56,6 +58,7 @@ AuroraResultObject* aurora_result_object_new(AuroraResultType type, const gchar 
     self->icon_name = g_strdup(icon_name);
     self->data = data;
     self->data_free_func = data_free_func;
+    self->score = score; // <<< ADDED: Set the score.
     return self;
 }
 
@@ -81,6 +84,15 @@ static void free_launcher_state(gpointer data) {
 //  Core Logic & Data Handling
 // ===================================================================
 
+// <<< ADDED: Comparison function for sorting results by score (descending).
+static gint compare_results_by_score(gconstpointer a, gconstpointer b) {
+    const AuroraResultObject *result_a = a;
+    const AuroraResultObject *result_b = b;
+    // A higher score is better, so we sort in descending order.
+    return result_b->score - result_a->score;
+}
+
+// <<< CHANGED: Reworked to sort results before displaying.
 static void update_search_results(LauncherState *state, const gchar *search_text) {
     g_list_store_remove_all(state->results_store);
 
@@ -88,8 +100,13 @@ static void update_search_results(LauncherState *state, const gchar *search_text
     GList *app_results = get_app_results(search_text);
     GList *calc_results = get_calculator_results(search_text);
     
+    // First, concatenate all results into a single list.
     GList *all_results = g_list_concat(command_results, g_list_concat(calc_results, app_results));
 
+    // Next, sort the combined list by relevance score.
+    all_results = g_list_sort(all_results, compare_results_by_score);
+
+    // Finally, add the sorted items to the list store for display.
     for (GList *l = all_results; l != NULL; l = l->next) {
         g_list_store_append(state->results_store, l->data);
         g_object_unref(l->data);
@@ -124,7 +141,6 @@ static void on_entry_changed(GtkEditable *entry, gpointer user_data) {
 static void on_result_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
     (void)user_data;
     guint index = gtk_list_box_row_get_index(row);
-    // <<< THE TYPO WAS HERE >>>
     LauncherState *state = (LauncherState*)g_object_get_data(G_OBJECT(gtk_widget_get_ancestor(GTK_WIDGET(box), GTK_TYPE_BOX)), "launcher-state");
     AuroraResultObject *result = g_list_model_get_item(G_LIST_MODEL(state->results_store), index);
     if (!result) return;
@@ -193,13 +209,11 @@ static gboolean on_key_pressed_nav(GtkEventControllerKey *controller, guint keyv
 
         GtkListBoxRow *row_to_select = gtk_list_box_get_row_at_index(listbox, new_index);
         gtk_list_box_select_row(listbox, row_to_select);
-
-        // --- FIX IS HERE ---
-        // This tells the parent GtkScrolledWindow to scroll and make this widget visible.
+        
+        // This is the scrolling fix from before.
         if (row_to_select) {
             gtk_widget_grab_focus(GTK_WIDGET(row_to_select));
         }
-        // --- END FIX ---
 
         return GDK_EVENT_STOP;
     }
