@@ -15,7 +15,7 @@ typedef struct {
     double daily_hours[7];
     GDate *today_date;
     GDate *selected_date;
-    GDate *reference_date;
+    GDate *reference_date; // A date within the week we want to display
     guint timer_id;
 } AppData;
 
@@ -26,7 +26,6 @@ typedef struct { double fraction; } CustomBarData;
 // --- Forward Declarations ---
 static gboolean update_data_and_ui(gpointer user_data);
 static void draw_chart(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data);
-// ADD THIS FORWARD DECLARATION
 static void on_db_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data);
 
 
@@ -70,27 +69,62 @@ static void draw_custom_app_bar(GtkDrawingArea *area, cairo_t *cr, int width, in
     }
 }
 
-// --- Main Data & UI Update Function (Your code, unchanged) ---
+// --- Main Data & UI Update Function ---
 static gboolean update_data_and_ui(gpointer user_data) {
     AppData *data = (AppData *)user_data;
     sqlite3 *db;
     sqlite3_stmt *stmt;
     for (int i=0; i<7; i++) data->daily_hours[i] = 0.0;
     long week_total_seconds = 0;
-    char ref_date_str[11];
-    g_date_strftime(ref_date_str, sizeof(ref_date_str), "%Y-%m-%d", data->reference_date);
+    
+    // ==============================================================================
+    // === FIX BLOCK 1: Establish a single, unambiguous definition of the week. ===
+    // ==============================================================================
+    
+    // Calculate the start of the week (Sunday) based on the reference_date.
+    GDate *week_start_date = g_date_copy(data->reference_date);
+    // GLib weekday: Mon=1, Tue=2, ..., Sun=7. `g_date_get_weekday() % 7` maps Sun to 0.
+    g_date_subtract_days(week_start_date, g_date_get_weekday(week_start_date) % 7);
+
+    // Calculate the end of the week (Saturday).
+    GDate *week_end_date = g_date_copy(week_start_date);
+    g_date_add_days(week_end_date, 6);
+
+    // Prepare date strings for the SQL query.
+    char week_start_str[11];
+    char week_end_str[11];
+    g_date_strftime(week_start_str, sizeof(week_start_str), "%Y-%m-%d", week_start_date);
+    g_date_strftime(week_end_str, sizeof(week_end_str), "%Y-%m-%d", week_end_date);
+    
+    // --- Now, use these exact dates for the query. ---
     g_autofree gchar *db_path = g_build_filename(g_get_home_dir(), ".local", "share", "aurora-insight.db", NULL);
-    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) { return G_SOURCE_CONTINUE; }
-    const char *sql_week = "SELECT CAST(strftime('%w', date) AS INTEGER), SUM(usage_seconds) FROM app_usage WHERE date BETWEEN date(?, 'weekday 0', '-6 days') AND date(?, 'weekday 0') GROUP BY date;";
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) { 
+        g_date_free(week_start_date);
+        g_date_free(week_end_date);
+        return G_SOURCE_CONTINUE; 
+    }
+    
+    // The new, unambiguous SQL query. It no longer does its own date math.
+    const char *sql_week = "SELECT CAST(strftime('%w', date) AS INTEGER), SUM(usage_seconds) FROM app_usage WHERE date BETWEEN ? AND ? GROUP BY date;";
+    
     if (sqlite3_prepare_v2(db, sql_week, -1, &stmt, 0) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, ref_date_str, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, ref_date_str, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 1, week_start_str, -1, SQLITE_STATIC); // Bind start date
+        sqlite3_bind_text(stmt, 2, week_end_str, -1, SQLITE_STATIC);   // Bind end date
         while (sqlite3_step(stmt) == SQLITE_ROW) {
-            int day_of_week = sqlite3_column_int(stmt, 0); long seconds = sqlite3_column_int(stmt, 1);
-            if (day_of_week >= 0 && day_of_week <= 6) { data->daily_hours[day_of_week] = (double)seconds / 3600.0; week_total_seconds += seconds; }
+            int day_of_week = sqlite3_column_int(stmt, 0); // Sunday=0, Monday=1, etc.
+            long seconds = sqlite3_column_int(stmt, 1);
+            if (day_of_week >= 0 && day_of_week <= 6) { 
+                data->daily_hours[day_of_week] = (double)seconds / 3600.0; 
+                week_total_seconds += seconds; 
+            }
         }
     }
     sqlite3_finalize(stmt);
+    
+    // ==============================================================================
+    // === END FIX BLOCK 1 ===
+    // ==============================================================================
+
     char selected_date_str[11];
     g_date_strftime(selected_date_str, sizeof(selected_date_str), "%Y-%m-%d", data->selected_date);
     long selected_day_total_seconds = 0;
@@ -105,12 +139,33 @@ static gboolean update_data_and_ui(gpointer user_data) {
     gtk_label_set_markup(GTK_LABEL(data->today_time_label), time_str);
     snprintf(time_str, sizeof(time_str), "<span size='x-large' weight='bold'>%ldh %ldm</span>", week_total_seconds / 3600, (week_total_seconds % 3600) / 60);
     gtk_label_set_markup(GTK_LABEL(data->week_time_label), time_str);
-    gboolean is_current_week = (g_date_get_iso8601_week_of_year(data->today_date) == g_date_get_iso8601_week_of_year(data->reference_date) && g_date_get_year(data->today_date) == g_date_get_year(data->reference_date));
-    if (is_current_week) { gtk_label_set_text(GTK_LABEL(data->week_title_label), "This Week");
-    } else { GDate *ref_copy = g_date_copy(data->reference_date); g_date_add_days(ref_copy, 7); gboolean is_last_week = (g_date_get_iso8601_week_of_year(data->today_date) == g_date_get_iso8601_week_of_year(ref_copy) && g_date_get_year(data->today_date) == g_date_get_year(ref_copy)); g_date_free(ref_copy);
-        if (is_last_week) { gtk_label_set_text(GTK_LABEL(data->week_title_label), "Last Week");
-        } else { char range_str[64]; GDate *start = g_date_copy(data->reference_date); g_date_set_day(start, g_date_get_day(start) - (g_date_get_weekday(start) % 7)); GDate *end = g_date_copy(start); g_date_add_days(end, 6); char start_str[32], end_str[32]; g_date_strftime(start_str, sizeof(start_str), "%b %d", start); g_date_strftime(end_str, sizeof(end_str), "%b %d", end); snprintf(range_str, sizeof(range_str), "%s - %s", start_str, end_str); gtk_label_set_text(GTK_LABEL(data->week_title_label), range_str); g_date_free(start); g_date_free(end); }
+    gboolean is_current_week = (g_date_compare(data->today_date, week_start_date) >= 0 && g_date_compare(data->today_date, week_end_date) <= 0);
+    
+    if (is_current_week) { 
+        gtk_label_set_text(GTK_LABEL(data->week_title_label), "This Week");
+    } else { 
+        GDate *today_week_start = g_date_copy(data->today_date);
+        g_date_subtract_days(today_week_start, g_date_get_weekday(today_week_start) % 7);
+        g_date_subtract_days(today_week_start, 7); // Start of last week
+        gboolean is_last_week = (g_date_compare(week_start_date, today_week_start) == 0);
+        g_date_free(today_week_start);
+        
+        if (is_last_week) { 
+            gtk_label_set_text(GTK_LABEL(data->week_title_label), "Last Week");
+        } else { 
+            char range_str[64]; 
+            char start_str[32], end_str[32]; 
+            g_date_strftime(start_str, sizeof(start_str), "%b %d", week_start_date); 
+            g_date_strftime(end_str, sizeof(end_str), "%b %d", week_end_date); 
+            snprintf(range_str, sizeof(range_str), "%s - %s", start_str, end_str); 
+            gtk_label_set_text(GTK_LABEL(data->week_title_label), range_str); 
+        }
     }
+    
+    // Cleanup GDate objects from the fix block
+    g_date_free(week_start_date);
+    g_date_free(week_end_date);
+    
     gtk_widget_set_sensitive(data->next_week_button, !is_current_week);
     if (g_date_compare(data->selected_date, data->today_date) == 0) { gtk_label_set_text(GTK_LABEL(data->selected_day_title_label), "Today");
     } else { GDate *yesterday = g_date_copy(data->today_date); g_date_subtract_days(yesterday, 1);
@@ -141,16 +196,40 @@ static gboolean update_data_and_ui(gpointer user_data) {
 
 
 // --- UI Callbacks ---
-// ADD THIS NEW CALLBACK FUNCTION
 static void on_db_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
     (void)monitor; (void)file; (void)other_file; (void)event_type;
     update_data_and_ui(user_data);
 }
 static void on_prev_week_clicked(GtkButton *button, gpointer user_data) { (void)button; AppData *data = (AppData *)user_data; g_date_subtract_days(data->reference_date, 7); g_date_free(data->selected_date); data->selected_date = g_date_copy(data->reference_date); update_data_and_ui(data); }
 static void on_next_week_clicked(GtkButton *button, gpointer user_data) { (void)button; AppData *data = (AppData *)user_data; g_date_add_days(data->reference_date, 7); g_date_free(data->selected_date); data->selected_date = g_date_copy(data->reference_date); update_data_and_ui(data); }
-static void on_chart_clicked(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) { (void)gesture; (void)n_press; (void)y; AppData *data = (AppData *)user_data; int width = gtk_widget_get_width(data->chart_area); double bar_width = (width - 6 * 10 - 40) / 7.0; double bar_spacing = 10.0; int clicked_index = -1; for (int i = 0; i < 7; i++) { double x_pos = 10 + i * (bar_width + bar_spacing); if (x >= x_pos && x <= x_pos + bar_width) { clicked_index = i; break; } }
-    if (clicked_index != -1) { GDate *week_start = g_date_copy(data->reference_date); g_date_set_day(week_start, g_date_get_day(week_start) - (g_date_get_weekday(week_start) % 7)); g_date_add_days(week_start, clicked_index); g_date_free(data->selected_date); data->selected_date = week_start; update_data_and_ui(data); }
+
+static void on_chart_clicked(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) { 
+    (void)gesture; (void)n_press; (void)y; 
+    AppData *data = (AppData *)user_data; 
+    int width = gtk_widget_get_width(data->chart_area); 
+    double bar_width = (width - 6 * 10 - 40) / 7.0; 
+    double bar_spacing = 10.0; 
+    int clicked_index = -1; 
+    for (int i = 0; i < 7; i++) { 
+        double x_pos = 10 + i * (bar_width + bar_spacing); 
+        if (x >= x_pos && x <= x_pos + bar_width) { 
+            clicked_index = i; 
+            break; 
+        } 
+    }
+    if (clicked_index != -1) { 
+        // ==============================================================================
+        // === FIX BLOCK 2: Use the same consistent logic to find the clicked day. ===
+        // ==============================================================================
+        GDate *week_start = g_date_copy(data->reference_date); 
+        g_date_subtract_days(week_start, g_date_get_weekday(week_start) % 7);
+        g_date_add_days(week_start, clicked_index); 
+        g_date_free(data->selected_date); 
+        data->selected_date = week_start; 
+        update_data_and_ui(data); 
+    }
 }
+
 static GtkWidget* create_stat_box(const char* title, GtkWidget **title_label_ptr, GtkWidget **time_label_ptr) { GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5); *title_label_ptr = gtk_label_new(title); gtk_widget_set_halign(*title_label_ptr, GTK_ALIGN_START); gtk_box_append(GTK_BOX(vbox), *title_label_ptr); *time_label_ptr = gtk_label_new(NULL); gtk_label_set_markup(GTK_LABEL(*time_label_ptr), "<span size='x-large' weight='bold'>0h 0m</span>"); gtk_widget_set_halign(*time_label_ptr, GTK_ALIGN_START); gtk_box_append(GTK_BOX(vbox), *time_label_ptr); return vbox; }
 static void on_widget_destroy(GtkWidget *widget, gpointer user_data) { (void)widget; AppData *data = (AppData *)user_data; if (data->timer_id > 0) { g_source_remove(data->timer_id); } g_date_free(data->today_date); g_date_free(data->selected_date); g_date_free(data->reference_date); }
 
@@ -171,7 +250,6 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char* config_string) {
     g_signal_connect(root_vbox, "destroy", G_CALLBACK(on_widget_destroy), app_data);
     g_signal_connect_swapped(root_vbox, "destroy", G_CALLBACK(g_free), app_data);
 
-    // --- ADD THIS BLOCK to set up the real-time file monitor ---
     g_autofree gchar *trigger_path = g_build_filename(g_get_home_dir(), ".local", "share", "aurora-insight.trigger", NULL);
     GFile *trigger_file = g_file_new_for_path(trigger_path);
     GFileMonitor *monitor = g_file_monitor_file(trigger_file, G_FILE_MONITOR_NONE, NULL, NULL);
@@ -180,9 +258,7 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char* config_string) {
         g_object_set_data_full(G_OBJECT(root_vbox), "db-monitor", monitor, g_object_unref);
     }
     g_object_unref(trigger_file);
-    // --- END OF NEW BLOCK ---
 
-    // YOUR UI CODE, UNCHANGED
     GtkWidget *main_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 25);
     gtk_widget_set_vexpand(main_hbox, TRUE);
     gtk_box_append(GTK_BOX(root_vbox), main_hbox);
@@ -238,9 +314,7 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char* config_string) {
     gtk_box_append(GTK_BOX(bottom_nav_hbox), app_data->next_week_button);
     
     update_data_and_ui(app_data);
-    
-    // CHANGE THIS LINE to a longer fallback timer
-    app_data->timer_id = g_timeout_add_seconds(300, (GSourceFunc)update_data_and_ui, app_data); // 5 minutes as a backup
+    app_data->timer_id = g_timeout_add_seconds(300, (GSourceFunc)update_data_and_ui, app_data); 
     
     return root_vbox;
 }
@@ -266,18 +340,27 @@ static void draw_chart(GtkDrawingArea *area, cairo_t *cr, int width, int height,
         cairo_move_to(cr, 0, y); cairo_line_to(cr, width - 30, y); cairo_stroke(cr);
     }
     double bar_width = (width - 6 * 10 - 40) / 7.0; double bar_spacing = 10.0;
+
+    // ==============================================================================
+    // === FIX BLOCK 3: Use the same consistent logic to find the date for each bar. ===
+    // ==============================================================================
+    GDate *week_start_for_drawing = g_date_copy(data->reference_date);
+    g_date_subtract_days(week_start_for_drawing, g_date_get_weekday(week_start_for_drawing) % 7);
+
     for (int i = 0; i < 7; i++) {
         double x_pos = 10 + i * (bar_width + bar_spacing);
         double bar_height_pixels = (max_hours > 0) ? (data->daily_hours[i] / max_hours) * chart_height : 0;
-        GDate *bar_date = g_date_copy(data->reference_date);
-        g_date_set_day(bar_date, g_date_get_day(bar_date) - (g_date_get_weekday(bar_date) % 7));
+        
+        GDate *bar_date = g_date_copy(week_start_for_drawing);
         g_date_add_days(bar_date, i);
+
         if (g_date_compare(bar_date, data->today_date) == 0) {
             cairo_set_source_rgba(cr, accent_color.red, accent_color.green, accent_color.blue, accent_color.alpha);
         } else {
             cairo_set_source_rgba(cr, accent_color.red, accent_color.green, accent_color.blue, 0.6);
         }
         g_date_free(bar_date);
+        
         draw_rounded_bar(cr, x_pos, top_padding + chart_height - bar_height_pixels, bar_width, bar_height_pixels, 4.0);
         cairo_fill(cr);
         if (i == selected_wday) {
@@ -290,4 +373,5 @@ static void draw_chart(GtkDrawingArea *area, cairo_t *cr, int width, int height,
         cairo_move_to(cr, x_pos + (bar_width / 2) - 4, height - 5);
         cairo_show_text(cr, day_labels[i]);
     }
+    g_date_free(week_start_for_drawing);
 }

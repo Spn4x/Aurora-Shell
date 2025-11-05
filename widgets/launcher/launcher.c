@@ -194,6 +194,13 @@ static gboolean on_key_pressed_nav(GtkEventControllerKey *controller, guint keyv
         GtkListBoxRow *row_to_select = gtk_list_box_get_row_at_index(listbox, new_index);
         gtk_list_box_select_row(listbox, row_to_select);
 
+        // --- FIX IS HERE ---
+        // This tells the parent GtkScrolledWindow to scroll and make this widget visible.
+        if (row_to_select) {
+            gtk_widget_grab_focus(GTK_WIDGET(row_to_select));
+        }
+        // --- END FIX ---
+
         return GDK_EVENT_STOP;
     }
     return GDK_EVENT_PROPAGATE;
