@@ -46,7 +46,7 @@ readonly AURORA_CONFIG_DIR="$HOME/.config/aurora-shell"
 # Using arrays makes it trivial to add/remove Aurora widgets to theme
 readonly AURORA_WIDGET_NAMES=(
     "Uptime" "Calendar" "Cheatsheet" "Control Center" "Launcher"
-    "MPRIS Player" "Topbar" "Cachy Selector" "Insight"
+    "MPRIS Player" "Topbar" "Cachy Selector" "Insight" "QScreen" 
 )
 readonly AURORA_TEMPLATE_FILES=(
     "$AURORA_CONFIG_DIR/templates/uptime/archbadge-template.css"
@@ -58,6 +58,7 @@ readonly AURORA_TEMPLATE_FILES=(
     "$AURORA_CONFIG_DIR/templates/topbar/topbar-template.css"
     "$AURORA_CONFIG_DIR/templates/cachy-selector/cachy-selector-template.css"
     "$AURORA_CONFIG_DIR/templates/insight/insight-template.css"
+    "$AURORA_CONFIG_DIR/templates/qscreen/qscreen-template.css" 
 )
 readonly AURORA_OUTPUT_FILES=(
     "$AURORA_CONFIG_DIR/templates/uptime/archbadge.css"
@@ -69,6 +70,7 @@ readonly AURORA_OUTPUT_FILES=(
     "$AURORA_CONFIG_DIR/templates/topbar/topbar.css"
     "$AURORA_CONFIG_DIR/templates/cachy-selector/cachy-selector.css"
     "$AURORA_CONFIG_DIR/templates/insight/insight.css"
+    "$AURORA_CONFIG_DIR/templates/qscreen/qscreen.css" 
 )
 
 # --- GLOBAL STATE ---

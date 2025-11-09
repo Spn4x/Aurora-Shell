@@ -3,6 +3,7 @@
 // ===============================================
 
 #include <glib.h>
+#include <glib/gstdio.h> // Needed for g_remove
 #include <gtk/gtk.h>
 #include <gtk4-layer-shell.h>
 #include <dlfcn.h>
@@ -15,71 +16,56 @@
 // ===============================================
 // --- Type Definitions ---
 // ===============================================
-
-// State for a single loaded widget
 typedef struct {
     GtkWindow *window;
     GtkWidget *widget;
     gboolean is_interactive;
-    JsonObject *config_obj; // Non-owning pointer to the config object
+    JsonObject *config_obj;
 } WidgetState;
 
-// State for the entire shell application
 typedef struct {
     GtkApplication *app;
     GHashTable *widgets;
     GFileMonitor *config_monitor;
-    JsonNode *config_root; // The root of the parsed config.json
+    JsonNode *config_root;
 } AuroraShell;
 
-// Function pointer type for the `create_widget` function in plugins
 typedef GtkWidget* (*CreateWidgetFunc)(const char *config_string);
 
-// Data for monitoring and reloading CSS stylesheets
 typedef struct {
     GtkCssProvider *provider;
     char *path;
 } CssReloadData;
 
-// Forward declaration for the main loading function
+// *** NEW: Data for qscreen's "Capture First" logic ***
+typedef struct {
+    AuroraShell *shell;
+    JsonObject *config_obj;
+    gchar *temp_path;
+} QScreenLaunchData;
+
 static void load_all_widgets(AuroraShell *shell);
+static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_obj); // Forward declare
 
 
 // ===============================================
 // --- Helper and Utility Functions ---
 // ===============================================
-
-// Ensures the user's config directory and config.json exist, copying defaults if not.
 static void ensure_user_config_exists() {
     g_autofree gchar *user_config_dir_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", NULL);
     g_autofree gchar *user_config_file_path = g_build_filename(user_config_dir_path, "config.json", NULL);
-
-    if (g_file_test(user_config_file_path, G_FILE_TEST_EXISTS)) {
-        return;
-    }
-
+    if (g_file_test(user_config_file_path, G_FILE_TEST_EXISTS)) { return; }
     g_print("First run: User config not found. Creating default configuration at %s\n", user_config_dir_path);
-
     g_autoptr(GError) error = NULL;
     g_autoptr(GFile) user_config_dir = g_file_new_for_path(user_config_dir_path);
-    if (!g_file_make_directory_with_parents(user_config_dir, NULL, &error)) {
-        g_warning("Failed to create user config directory: %s", error->message);
-        return;
-    }
-
-    // Copy the default config.json
+    if (!g_file_make_directory_with_parents(user_config_dir, NULL, &error)) { g_warning("Failed to create user config directory: %s", error->message); return; }
     g_autoptr(GFile) default_config_file = g_file_new_for_path("/usr/local/share/aurora-shell/config.json");
     g_autoptr(GFile) user_config_file = g_file_new_for_path(user_config_file_path);
-    if (!g_file_copy(default_config_file, user_config_file, G_FILE_COPY_NONE, NULL, NULL, NULL, &error)) {
-        g_warning("Failed to copy default config.json: %s", error->message);
-    }
-
-    // Copy the entire templates directory
+    if (!g_file_copy(default_config_file, user_config_file, G_FILE_COPY_NONE, NULL, NULL, NULL, &error)) { g_warning("Failed to copy default config.json: %s", error->message); }
     g_autofree gchar *cp_command = g_strdup_printf("cp -r /usr/local/share/aurora-shell/templates %s", user_config_dir_path);
     g_spawn_command_line_sync(cp_command, NULL, NULL, NULL, NULL);
 }
 
-// GFileMonitor callback to reload a widget's CSS when it changes on disk.
 static void on_stylesheet_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
     (void)monitor; (void)file; (void)other_file;
     if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
@@ -89,7 +75,6 @@ static void on_stylesheet_changed(GFileMonitor *monitor, GFile *file, GFile *oth
     }
 }
 
-// Destructor for the CssReloadData struct to prevent memory leaks.
 static void free_css_reload_data(gpointer data, GClosure *closure) {
     (void)closure;
     CssReloadData *reload_data = (CssReloadData *)data;
@@ -97,21 +82,18 @@ static void free_css_reload_data(gpointer data, GClosure *closure) {
     g_free(reload_data);
 }
 
-// Hides a widget's window.
 static void hide_widget(WidgetState *state) {
     if (state && gtk_widget_get_visible(GTK_WIDGET(state->window))) {
         gtk_widget_set_visible(GTK_WIDGET(state->window), FALSE);
     }
 }
 
-// Event controller callback to grab focus when the mouse enters a window.
 static void on_mouse_enter(GtkEventControllerMotion *controller, double x, double y, gpointer user_data) {
     (void)controller; (void)x; (void)y;
     WidgetState *state = (WidgetState *)user_data;
     gtk_widget_grab_focus(GTK_WIDGET(state->window));
 }
 
-// Event controller callback to close a widget when the Escape key is pressed.
 static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval, guint keycode, GdkModifierType state, gpointer user_data) {
     (void)controller; (void)keycode; (void)state;
     if (keyval == GDK_KEY_Escape) {
@@ -125,8 +107,6 @@ static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval, 
 // ===============================================
 // --- Core Shell Logic ---
 // ===============================================
-
-// Destroys all widget windows and clears the central hash table.
 static void unload_all_widgets(AuroraShell *shell) {
     g_print("Unloading all widgets...\n");
     GHashTableIter iter;
@@ -134,35 +114,24 @@ static void unload_all_widgets(AuroraShell *shell) {
     g_hash_table_iter_init(&iter, shell->widgets);
     while (g_hash_table_iter_next(&iter, &key, &value)) {
         WidgetState *state = (WidgetState *)value;
-        if (GTK_IS_WINDOW(state->window)) {
-            gtk_window_destroy(state->window);
-        }
+        if (GTK_IS_WINDOW(state->window)) { gtk_window_destroy(state->window); }
     }
     g_hash_table_remove_all(shell->widgets);
-
-    // Process any pending GTK events to ensure windows are fully destroyed.
-    while (g_main_context_pending(NULL)) {
-        g_main_context_iteration(NULL, FALSE);
-    }
+    while (g_main_context_pending(NULL)) { g_main_context_iteration(NULL, FALSE); }
     g_print("All widgets unloaded.\n");
 }
 
-// GFileMonitor callback to reload the entire shell when config.json changes.
 static void on_config_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
     (void)monitor; (void)file; (void)other_file;
     if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
         g_print("Configuration file changed. Reloading shell...\n");
         AuroraShell *shell = (AuroraShell *)user_data;
         unload_all_widgets(shell);
-        if (shell->config_root) {
-            json_node_free(shell->config_root);
-            shell->config_root = NULL;
-        }
+        if (shell->config_root) { json_node_free(shell->config_root); shell->config_root = NULL; }
         load_all_widgets(shell);
     }
 }
 
-// Parses layer string from config ("top", "bottom", etc.) into a GtkLayerShellLayer enum.
 static GtkLayerShellLayer parse_layer_string(const gchar *layer_str) {
     if (g_strcmp0(layer_str, "bottom") == 0) return GTK_LAYER_SHELL_LAYER_BOTTOM;
     if (g_strcmp0(layer_str, "background") == 0) return GTK_LAYER_SHELL_LAYER_BACKGROUND;
@@ -170,23 +139,18 @@ static GtkLayerShellLayer parse_layer_string(const gchar *layer_str) {
     return GTK_LAYER_SHELL_LAYER_TOP;
 }
 
-// Applies layer-shell anchor and margin settings from a widget's JSON config.
 static void apply_anchor_and_margins(GtkWindow *window, GtkWidget *widget, JsonObject *widget_obj) {
     const char *anchor_str = json_object_get_string_member_with_default(widget_obj, "anchor", "center");
     if (strstr(anchor_str, "top"))    gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_TOP, TRUE);
     if (strstr(anchor_str, "bottom")) gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
     if (strstr(anchor_str, "left"))   gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
     if (strstr(anchor_str, "right"))  gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
-
-    // Also set widget alignment for good measure.
     if (strstr(anchor_str, "left"))       gtk_widget_set_halign(widget, GTK_ALIGN_START);
     else if (strstr(anchor_str, "right")) gtk_widget_set_halign(widget, GTK_ALIGN_END);
     else                                  gtk_widget_set_halign(widget, GTK_ALIGN_CENTER);
     if (strstr(anchor_str, "top"))        gtk_widget_set_valign(widget, GTK_ALIGN_START);
     else if (strstr(anchor_str, "bottom"))gtk_widget_set_valign(widget, GTK_ALIGN_END);
     else                                  gtk_widget_set_valign(widget, GTK_ALIGN_CENTER);
-
-    // Set margins for layer-shell positioning.
     if (json_object_has_member(widget_obj, "margin")) {
         JsonObject *margin_obj = json_object_get_object_member(widget_obj, "margin");
         gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, json_object_get_int_member_with_default(margin_obj, "top", 0));
@@ -196,183 +160,126 @@ static void apply_anchor_and_margins(GtkWindow *window, GtkWidget *widget, JsonO
     }
 }
 
-// Checks if a daemon process is running and spawns it if not.
 static void launch_daemon_if_needed(const char *command) {
-    // A robust pgrep pattern that avoids matching the pgrep process itself.
     g_autofree gchar *check_pattern = g_strdup_printf("[%c]%s", command[0], command + 1);
-    char * const argv[] = { "/usr/bin/pgrep", "-f", check_pattern, NULL };
-    g_autoptr(GError) error = NULL;
-    gint exit_status = 0;
-
-    // Use g_spawn_sync to check the exit status directly, silencing output.
-    gboolean success = g_spawn_sync(NULL, argv, NULL, G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, NULL, NULL, &exit_status, &error);
-
-    if (!success) {
-        g_warning("Failed to run pgrep to check for daemon '%s': %s", command, error->message);
-    }
-
-    // pgrep exits 0 on match, 1 on no match.
-    if (success && WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 0) {
-        g_print("Daemon '%s' is already running.\n", command);
-        return;
-    }
-
+    char *argv[] = { "/usr/bin/pgrep", "-f", check_pattern, NULL };
+    g_autoptr(GError) error = NULL; gint exit_status = 0;
+    gboolean success = g_spawn_sync(NULL, (gchar**)argv, NULL, G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, NULL, NULL, &exit_status, &error);
+    if (!success) { g_warning("Failed to run pgrep to check for daemon '%s': %s", command, error->message); }
+    if (success && WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 0) { g_print("Daemon '%s' is already running.\n", command); return; }
     g_print("Spawning daemon: '%s'\n", command);
     g_autoptr(GError) spawn_error = NULL;
-    gchar **spawn_argv = g_strsplit(command, " ", -1);
-    g_spawn_async(NULL, spawn_argv, NULL, G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &spawn_error);
-    g_strfreev(spawn_argv);
-
-    if (spawn_error) {
-        g_warning("Failed to spawn daemon '%s': %s", command, spawn_error->message);
-    }
+    g_spawn_command_line_async(command, &spawn_error);
+    if (spawn_error) { g_warning("Failed to spawn daemon '%s': %s", command, spawn_error->message); }
 }
 
-// The main loop for parsing config.json and creating all widgets.
-static void load_all_widgets(AuroraShell *shell) {
-    g_autoptr(JsonParser) parser = json_parser_new();
-    g_autofree gchar *user_config_file_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "config.json", NULL);
-    if (!json_parser_load_from_file(parser, user_config_file_path, NULL)) {
-        g_warning("Failed to load or parse user config: %s", user_config_file_path);
-        return;
-    }
+// *** NEW: Create a widget from config. This is used by qscreen callback and load_all_widgets. ***
+static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_obj) {
+    const char *name = json_object_get_string_member(item_obj, "name");
+    const char *plugin_path = json_object_get_string_member(item_obj, "plugin");
 
-    shell->config_root = json_parser_steal_root(parser);
-    if (!shell->config_root || !JSON_NODE_HOLDS_ARRAY(shell->config_root)) {
-        g_warning("Config file root is not a valid JSON array. Nothing to load.");
-        if (shell->config_root) json_node_free(shell->config_root);
-        shell->config_root = NULL;
-        return;
+    GtkWindow *window = GTK_WINDOW(gtk_application_window_new(shell->app));
+    gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+    GdkDisplay *display = gtk_widget_get_display(GTK_WIDGET(window));
+    GtkCssProvider *transparency_provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(transparency_provider, "window { background: transparent; }");
+    gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(transparency_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(transparency_provider);
+
+    // *** THIS IS THE CRITICAL LOGIC FOR QSCREEN vs OTHER WIDGETS ***
+    gboolean use_layer_shell = json_object_get_boolean_member_with_default(item_obj, "layer_shell", TRUE);
+    if (use_layer_shell) {
+        gtk_layer_init_for_window(window);
+    } else {
+        // This path is for qscreen: a normal, non-layer-shell fullscreen window.
+        gtk_window_fullscreen(window);
     }
     
-    JsonArray *config_array = json_node_get_array(shell->config_root);
-    for (guint i = 0; i < json_array_get_length(config_array); i++) {
-        if (!JSON_NODE_HOLDS_OBJECT(json_array_get_element(config_array, i))) continue;
+    void* handle = dlopen(plugin_path, RTLD_LAZY);
+    if (!handle) { g_warning("Failed to open plugin '%s' for widget '%s': %s", plugin_path, name, dlerror()); gtk_window_destroy(window); return NULL; }
+    CreateWidgetFunc create_widget = (CreateWidgetFunc)dlsym(handle, "create_widget");
+    if (!create_widget) { g_warning("No 'create_widget' function in plugin '%s' for widget '%s'.", plugin_path, name); dlclose(handle); gtk_window_destroy(window); return NULL; }
+    g_autofree gchar *config_string_to_pass = NULL;
+    JsonNode *widget_node = json_node_new(JSON_NODE_OBJECT);
+    json_node_set_object(widget_node, item_obj);
+    g_autoptr(JsonGenerator) generator = json_generator_new();
+    json_generator_set_root(generator, widget_node);
+    config_string_to_pass = json_generator_to_data(generator, NULL);
+    json_node_free(widget_node);
+    GtkWidget *widget = create_widget(config_string_to_pass);
+    if (!widget) { g_warning("Plugin '%s' for widget '%s' returned a NULL widget.", plugin_path, name); dlclose(handle); gtk_window_destroy(window); return NULL; }
+    gtk_window_set_child(window, widget);
 
-        JsonObject *item_obj = json_array_get_object_element(config_array, i);
-        const char *type = json_object_get_string_member_with_default(item_obj, "type", "widget");
+    gboolean is_exclusive = json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE);
+    gboolean is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
 
-        // Handle special "daemon" entries in the config.
-        if (g_strcmp0(type, "daemon") == 0) {
-            const char *command = json_object_get_string_member(item_obj, "command");
-            if (command) launch_daemon_if_needed(command);
-            continue;
-        }
-        
-        // Skip non-widget, non-daemon entries (like our "themer-config").
-        if (g_strcmp0(type, "widget") != 0) {
-            continue;
-        }
-
-        const char *name = json_object_get_string_member(item_obj, "name");
-        if (!name || !json_object_has_member(item_obj, "plugin")) continue;
-
-        // --- Create Window and Load Plugin ---
-        GtkWindow *window = GTK_WINDOW(gtk_application_window_new(shell->app));
-        gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
-        GdkDisplay *display = gtk_widget_get_display(GTK_WIDGET(window));
-        
-        GtkCssProvider *transparency_provider = gtk_css_provider_new();
-        gtk_css_provider_load_from_string(transparency_provider, "window { background: transparent; }");
-        gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(transparency_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-        g_object_unref(transparency_provider);
-
-        gtk_layer_init_for_window(window);
-        
-        const char *plugin_path = json_object_get_string_member(item_obj, "plugin");
-        void* handle = dlopen(plugin_path, RTLD_LAZY);
-        if (!handle) {
-            g_warning("Failed to open plugin '%s' for widget '%s': %s", plugin_path, name, dlerror());
-            gtk_window_destroy(window);
-            continue;
-        }
-
-        CreateWidgetFunc create_widget = (CreateWidgetFunc)dlsym(handle, "create_widget");
-        if (!create_widget) {
-            g_warning("No 'create_widget' function in plugin '%s' for widget '%s'.", plugin_path, name);
-            dlclose(handle);
-            gtk_window_destroy(window);
-            continue;
-        }
-
-        // --- Create Widget and Pass Config ---
-        g_autofree gchar *config_string_to_pass = NULL;
-        JsonNode *widget_node = json_node_new(JSON_NODE_OBJECT);
-        json_node_set_object(widget_node, item_obj);
-        g_autoptr(JsonGenerator) generator = json_generator_new();
-        json_generator_set_root(generator, widget_node);
-        config_string_to_pass = json_generator_to_data(generator, NULL);
-        json_node_free(widget_node);
-        
-        GtkWidget *widget = create_widget(config_string_to_pass);
-        if (!widget) {
-            g_warning("Plugin '%s' for widget '%s' returned a NULL widget.", plugin_path, name);
-            dlclose(handle);
-            gtk_window_destroy(window);
-            continue;
-        }
-        gtk_window_set_child(window, widget);
-
-        // --- Apply Settings from JSON ---
-        gboolean is_exclusive = json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE);
-        gboolean is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
-
+    if (use_layer_shell) {
         if (is_exclusive) {
             gtk_layer_auto_exclusive_zone_enable(window);
             gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
         } else {
             gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
         }
-        
         gtk_layer_set_layer(window, parse_layer_string(json_object_get_string_member_with_default(item_obj, "layer", "top")));
         apply_anchor_and_margins(window, widget, item_obj);
-        
-        if (json_object_has_member(item_obj, "stylesheet")) {
-            const char *stylesheet_name = json_object_get_string_member(item_obj, "stylesheet");
-            g_autofree gchar *user_templates_dir = g_build_filename(g_get_user_config_dir(), "aurora-shell", "templates", name, NULL);
-            g_autofree gchar *stylesheet_path = g_build_filename(user_templates_dir, stylesheet_name, NULL);
+    }
 
-            if (stylesheet_path && g_file_test(stylesheet_path, G_FILE_TEST_IS_REGULAR)) {
-                g_print("Loading stylesheet: %s\n", stylesheet_path);
-                GtkCssProvider *provider = gtk_css_provider_new();
-                gtk_css_provider_load_from_path(provider, stylesheet_path);
-                gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_USER);
-                
-                GFile *css_file = g_file_new_for_path(stylesheet_path);
-                GFileMonitor *monitor = g_file_monitor_file(css_file, G_FILE_MONITOR_NONE, NULL, NULL);
-                CssReloadData *reload_data = g_new(CssReloadData, 1);
-                reload_data->provider = provider;
-                reload_data->path = g_strdup(stylesheet_path);
-                g_signal_connect_data(monitor, "changed", G_CALLBACK(on_stylesheet_changed), reload_data, (GClosureNotify)free_css_reload_data, 0);
-                g_object_set_data_full(G_OBJECT(window), "css-monitor", monitor, g_object_unref);
-                g_object_unref(css_file);
-            } else {
-                g_warning("Stylesheet not found for '%s'. Searched at: %s", name, stylesheet_path ? stylesheet_path : "(null)");
+    if (json_object_has_member(item_obj, "stylesheet")) {
+        const char *stylesheet_name = json_object_get_string_member(item_obj, "stylesheet");
+        g_autofree gchar *user_templates_dir = g_build_filename(g_get_user_config_dir(), "aurora-shell", "templates", name, NULL);
+        g_autofree gchar *stylesheet_path = g_build_filename(user_templates_dir, stylesheet_name, NULL);
+        if (stylesheet_path && g_file_test(stylesheet_path, G_FILE_TEST_IS_REGULAR)) {
+            g_print("Loading stylesheet: %s\n", stylesheet_path);
+            GtkCssProvider *provider = gtk_css_provider_new();
+            gtk_css_provider_load_from_path(provider, stylesheet_path);
+            gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_USER);
+            GFile *css_file = g_file_new_for_path(stylesheet_path);
+            GFileMonitor *monitor = g_file_monitor_file(css_file, G_FILE_MONITOR_NONE, NULL, NULL);
+            CssReloadData *reload_data = g_new(CssReloadData, 1);
+            reload_data->provider = provider; reload_data->path = g_strdup(stylesheet_path);
+            g_signal_connect_data(monitor, "changed", G_CALLBACK(on_stylesheet_changed), reload_data, (GClosureNotify)free_css_reload_data, 0);
+            g_object_set_data_full(G_OBJECT(window), "css-monitor", monitor, g_object_unref);
+            g_object_unref(css_file);
+        } else { g_warning("Stylesheet not found for '%s'. Searched at: %s", name, stylesheet_path ? stylesheet_path : "(null)"); }
+    }
+    
+    WidgetState *state = g_new0(WidgetState, 1);
+    state->window = window; state->widget = widget; state->is_interactive = is_interactive; state->config_obj = item_obj;
+
+    if (!is_exclusive) {
+        GtkEventController *key_controller = gtk_event_controller_key_new();
+        g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), state);
+        gtk_widget_add_controller(GTK_WIDGET(window), key_controller);
+        GtkEventController *motion_controller = gtk_event_controller_motion_new();
+        g_signal_connect(motion_controller, "enter", G_CALLBACK(on_mouse_enter), state);
+        gtk_widget_add_controller(GTK_WIDGET(window), motion_controller);
+    }
+    return state;
+}
+
+static void load_all_widgets(AuroraShell *shell) {
+    g_autoptr(JsonParser) parser = json_parser_new();
+    g_autofree gchar *user_config_file_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "config.json", NULL);
+    if (!json_parser_load_from_file(parser, user_config_file_path, NULL)) { g_warning("Failed to load or parse user config: %s", user_config_file_path); return; }
+    shell->config_root = json_parser_steal_root(parser);
+    if (!shell->config_root || !JSON_NODE_HOLDS_ARRAY(shell->config_root)) { g_warning("Config file root is not a valid JSON array."); if (shell->config_root) json_node_free(shell->config_root); shell->config_root = NULL; return; }
+    JsonArray *config_array = json_node_get_array(shell->config_root);
+    for (guint i = 0; i < json_array_get_length(config_array); i++) {
+        if (!JSON_NODE_HOLDS_OBJECT(json_array_get_element(config_array, i))) continue;
+        JsonObject *item_obj = json_array_get_object_element(config_array, i);
+        const char *type = json_object_get_string_member_with_default(item_obj, "type", "widget");
+        if (g_strcmp0(type, "daemon") == 0) { const char *command = json_object_get_string_member(item_obj, "command"); if (command) launch_daemon_if_needed(command); continue; }
+        if (g_strcmp0(type, "widget") != 0) { continue; }
+        const char *name = json_object_get_string_member(item_obj, "name");
+        if (!name || !json_object_has_member(item_obj, "plugin")) continue;
+        
+        WidgetState *state = create_single_widget(shell, item_obj);
+        if (state) {
+            if (json_object_get_boolean_member_with_default(item_obj, "visible_on_start", TRUE)) {
+                gtk_window_present(state->window);
             }
+            g_hash_table_insert(shell->widgets, g_strdup(name), state);
         }
-        
-        if (json_object_get_boolean_member_with_default(item_obj, "visible_on_start", TRUE)) {
-            gtk_window_present(window);
-        }
-        
-        // --- Store State and Attach Controllers ---
-        WidgetState *state = g_new0(WidgetState, 1);
-        state->window = window;
-        state->widget = widget;
-        state->is_interactive = is_interactive;
-        state->config_obj = item_obj;
-
-        if (!is_exclusive) {
-            GtkEventController *key_controller = gtk_event_controller_key_new();
-            g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), state);
-            gtk_widget_add_controller(GTK_WIDGET(window), key_controller);
-
-            GtkEventController *motion_controller = gtk_event_controller_motion_new();
-            g_signal_connect(motion_controller, "enter", G_CALLBACK(on_mouse_enter), state);
-            gtk_widget_add_controller(GTK_WIDGET(window), motion_controller);
-        }
-        
-        g_hash_table_insert(shell->widgets, g_strdup(name), state);
     }
 }
 
@@ -380,46 +287,75 @@ static void load_all_widgets(AuroraShell *shell) {
 // ===============================================
 // --- GApplication Signal Handlers ---
 // ===============================================
+// *** NEW: Callback for qscreen after grim finishes ***
+static void on_qscreen_pre_capture_finished(GPid pid, gint status, gpointer user_data) {
+    g_spawn_close_pid(pid);
+    QScreenLaunchData *data = (QScreenLaunchData *)user_data;
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        g_print("qscreen pre-capture successful. Creating window.\n");
+        json_object_set_string_member(data->config_obj, "temp_screenshot_path", data->temp_path);
+        const char *name = json_object_get_string_member(data->config_obj, "name");
+        WidgetState *new_state = create_single_widget(data->shell, data->config_obj);
+        if (new_state) {
+            gtk_window_present(new_state->window);
+            g_hash_table_replace(data->shell->widgets, g_strdup(name), new_state);
+        }
+    } else {
+        g_warning("qscreen pre-capture command (grim) failed. Aborting.");
+        g_remove(data->temp_path);
+    }
+    g_free(data->temp_path);
+    g_free(data);
+}
 
-// Handles command line invocations after the application is already running.
 static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdline, gpointer user_data) {
     AuroraShell *shell = (AuroraShell *)user_data;
     gchar **argv = g_application_command_line_get_arguments(cmdline, NULL);
-
     if (argv[1] && g_strcmp0(argv[1], "--toggle") == 0 && argv[2]) {
-        // Find the config block for the requested widget/command name
+        const char *widget_name = argv[2];
         JsonArray *config_array = json_node_get_array(shell->config_root);
         JsonObject *item_obj = NULL;
         for (guint i = 0; i < json_array_get_length(config_array); i++) {
             JsonObject *current_obj = json_array_get_object_element(config_array, i);
             const char *name = json_object_get_string_member(current_obj, "name");
-            if (name && g_strcmp0(name, argv[2]) == 0) {
-                item_obj = current_obj;
-                break;
+            if (name && g_strcmp0(name, widget_name) == 0) { item_obj = current_obj; break; }
+        }
+        if (!item_obj) { g_warning("Command line: No config for '%s' found.", widget_name); }
+        // *** NEW: Special handling for qscreen ***
+        else if (g_strcmp0(widget_name, "qscreen") == 0) {
+            g_autofree gchar *temp_template = g_build_filename(g_get_tmp_dir(), "aurora-qscreen-XXXXXX.png", NULL);
+            gint fd = g_mkstemp(temp_template);
+            if (fd == -1) { g_warning("Failed to create temp file for qscreen"); g_strfreev(argv); return 1; }
+            close(fd);
+            QScreenLaunchData *launch_data = g_new0(QScreenLaunchData, 1);
+            launch_data->shell = shell;
+            launch_data->config_obj = item_obj;
+            launch_data->temp_path = g_strdup(temp_template);
+            g_autofree gchar *command = g_strdup_printf("grim \"%s\"", launch_data->temp_path);
+            g_autoptr(GError) error = NULL;
+            GPid child_pid;
+            g_spawn_command_line_async(command, &error);
+            // We need to wait for the command to finish. Let's use g_spawn_async_with_pipes and a watch.
+            g_spawn_async(NULL, (gchar*[]){"/bin/sh", "-c", command, NULL}, NULL, G_SPAWN_DO_NOT_REAP_CHILD, NULL, NULL, &child_pid, &error);
+            if (error) {
+                g_warning("Failed to spawn grim: %s", error->message);
+                g_free(launch_data->temp_path); g_free(launch_data);
+            } else {
+                g_child_watch_add(child_pid, on_qscreen_pre_capture_finished, launch_data);
             }
         }
-
-        if (!item_obj) {
-             g_warning("Command line: No configuration block named '%s' found.", argv[2]);
-        } else {
+        else {
             const char *type = json_object_get_string_member_with_default(item_obj, "type", "widget");
-
             if (g_strcmp0(type, "command") == 0 && json_object_has_member(item_obj, "command")) {
                 const char *command_to_run = json_object_get_string_member(item_obj, "command");
-                g_print("Spawning external command: %s\n", command_to_run);
                 g_spawn_command_line_async(command_to_run, NULL);
-            } else { // It's a widget
-                WidgetState *state = g_hash_table_lookup(shell->widgets, argv[2]);
+            } else {
+                WidgetState *state = g_hash_table_lookup(shell->widgets, widget_name);
                 if (state) {
                     gboolean is_visible = gtk_widget_get_visible(GTK_WIDGET(state->window));
                     gtk_widget_set_visible(GTK_WIDGET(state->window), !is_visible);
-                    
-                    if (!is_visible) { // Widget is being opened
-                        if (state->is_interactive) {
-                             gtk_widget_grab_focus(GTK_WIDGET(state->window));
-                        }
-                        
-                        // Handle the "close" property to hide other specified widgets.
+                    if (!is_visible) {
+                        if (state->is_interactive) { gtk_widget_grab_focus(GTK_WIDGET(state->window)); }
                         if (json_object_has_member(item_obj, "close")) {
                             JsonArray *widgets_to_close = json_object_get_array_member(item_obj, "close");
                             for (guint j = 0; j < json_array_get_length(widgets_to_close); j++) {
@@ -429,43 +365,29 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
                             }
                         }
                     }
-                } else {
-                    g_warning("Command line: No loaded widget named '%s' found.", argv[2]);
-                }
+                } else { g_warning("No loaded widget named '%s' found.", widget_name); }
             }
         }
-    } else {
-        // If no valid command, just bring the application to the "front" (no-op for layer shell).
-        g_application_activate(app);
-    }
-    
+    } else { g_application_activate(app); }
     g_strfreev(argv);
     return 0;
 }
 
-// Handles the initial activation of the application (the very first run).
 static void activate_handler(GApplication *app, gpointer user_data) {
     (void)app;
     AuroraShell *shell = (AuroraShell *)user_data;
-    
     ensure_user_config_exists();
     load_all_widgets(shell);
-
-    // Set up monitoring for the main config file.
     g_autofree gchar *user_config_file_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "config.json", NULL);
     GFile *config_file = g_file_new_for_path(user_config_file_path);
     shell->config_monitor = g_file_monitor_file(config_file, G_FILE_MONITOR_NONE, NULL, NULL);
-
     if (shell->config_monitor) {
         g_print("Monitoring config file for changes: %s\n", user_config_file_path);
         g_signal_connect(shell->config_monitor, "changed", G_CALLBACK(on_config_changed), shell);
-    } else {
-        g_warning("Could not create file monitor for config file.");
-    }
+    } else { g_warning("Could not create file monitor for config file."); }
     g_object_unref(config_file);
 }
 
-// Destructor for the WidgetState struct used by the GHashTable.
 static void free_widget_state(gpointer data) {
     g_free(data);
 }
@@ -476,31 +398,15 @@ static void free_widget_state(gpointer data) {
 // ===============================================
 
 int main(int argc, char **argv) {
-    // Initialize the main application state struct.
     AuroraShell shell_data = {0};
     shell_data.widgets = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, free_widget_state);
-    
-    // Create the GtkApplication object. This handles single-instance logic.
     shell_data.app = gtk_application_new("com.meismeric.aurora.shell", G_APPLICATION_HANDLES_COMMAND_LINE);
-    
-    // Connect the signal handlers that drive the application's logic.
     g_signal_connect(shell_data.app, "activate", G_CALLBACK(activate_handler), &shell_data);
     g_signal_connect(G_APPLICATION(shell_data.app), "command-line", G_CALLBACK(command_line_handler), &shell_data);
-
-    // Run the application's main loop and get the exit status.
     int status = g_application_run(G_APPLICATION(shell_data.app), argc, argv);
-    
-    // --- Cleanup ---
-    // This code runs after the GTK main loop has exited.
-    if (shell_data.config_monitor) {
-        g_object_unref(shell_data.config_monitor);
-    }
-    if (shell_data.config_root) {
-        json_node_free(shell_data.config_root);
-    }
-    
+    if (shell_data.config_monitor) { g_object_unref(shell_data.config_monitor); }
+    if (shell_data.config_root) { json_node_free(shell_data.config_root); }
     g_hash_table_destroy(shell_data.widgets);
     g_object_unref(shell_data.app);
-    
     return status;
 }
