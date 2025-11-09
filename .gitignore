@@ -14,3 +14,4 @@ uninstall
 .vscode/
 .idea/
 *.swp
+debug_log.txt
