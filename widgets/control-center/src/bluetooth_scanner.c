@@ -1,6 +1,7 @@
 // ===== src/bluetooth_scanner.c =====
 #include "bluetooth_scanner.h"
 #include "utils.h"
+#include "bluetooth_manager.h"
 
 struct _BluetoothScanner {
     guint timer_id;

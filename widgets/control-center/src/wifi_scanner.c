@@ -1,4 +1,5 @@
 #include "wifi_scanner.h"
+#include "network_manager.h"
 
 struct _WifiScanner {
     guint timer_id;
