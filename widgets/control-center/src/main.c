@@ -331,20 +331,24 @@ static GtkWidget* create_list_entry(const char* icon, const char* label_text, gb
     gtk_widget_set_hexpand(label, TRUE);
     gtk_box_append(GTK_BOX(box), label);
 
+    // --- MODIFICATION IS HERE ---
     if (is_active) {
-        GtkWidget *symbol_label = gtk_label_new("◉");
-        gtk_widget_add_css_class(symbol_label, "active-symbol");
-        gtk_box_append(GTK_BOX(box), symbol_label);
+        // Replace the GtkLabel with a GtkImage using a standard checkmark icon.
+        GtkWidget *check_icon = gtk_image_new_from_icon_name("object-select-symbolic");
+        gtk_widget_add_css_class(check_icon, "active-symbol");
+        gtk_box_append(GTK_BOX(box), check_icon);
     }
+    // --- END MODIFICATION ---
+
     return button;
 }
 
-static const char* get_wifi_icon_name_for_signal(int strength, gboolean is_secure) {
-    if (strength > 80) return is_secure ? "network-wireless-signal-excellent-secure-symbolic" : "network-wireless-signal-excellent-symbolic";
-    if (strength > 55) return is_secure ? "network-wireless-signal-good-secure-symbolic" : "network-wireless-signal-good-symbolic";
-    if (strength > 30) return is_secure ? "network-wireless-signal-ok-secure-symbolic" : "network-wireless-signal-ok-symbolic";
-    if (strength > 5)  return is_secure ? "network-wireless-signal-weak-secure-symbolic" : "network-wireless-signal-weak-symbolic";
-    return is_secure ? "network-wireless-signal-none-secure-symbolic" : "network-wireless-signal-none-symbolic";
+static const char* get_wifi_icon_name_for_signal(int strength) {
+    if (strength > 80) return "network-wireless-signal-excellent-symbolic";
+    if (strength > 55) return "network-wireless-signal-good-symbolic";
+    if (strength > 30) return "network-wireless-signal-ok-symbolic";
+    if (strength > 5)  return "network-wireless-signal-weak-symbolic";
+    return "network-wireless-signal-none-symbolic";
 }
 
 // --- List Update Functions ---
@@ -411,13 +415,36 @@ static void on_wifi_scan_results(GList *networks, gpointer user_data) {
         net_copy->is_secure = net_from_scan->is_secure;
         net_copy->is_active = net_from_scan->is_active;
 
-        const char *icon_name = get_wifi_icon_name_for_signal(net_copy->strength, net_copy->is_secure);
-        GtkWidget *entry_button = create_list_entry(icon_name, net_copy->ssid, net_copy->is_active);
+        GtkWidget *entry_button = gtk_button_new();
+        gtk_widget_add_css_class(entry_button, "list-item-button");
 
-        if (net_copy->is_active) {
-            gtk_widget_add_css_class(entry_button, "active-network");
+        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+        gtk_button_set_child(GTK_BUTTON(entry_button), box);
+
+        const char *icon_name = get_wifi_icon_name_for_signal(net_copy->strength);
+        gtk_box_append(GTK_BOX(box), gtk_image_new_from_icon_name(icon_name));
+
+        GtkWidget *label = gtk_label_new(net_copy->ssid);
+        gtk_widget_set_halign(label, GTK_ALIGN_START);
+        gtk_widget_set_hexpand(label, TRUE);
+        gtk_box_append(GTK_BOX(box), label);
+
+        if (net_copy->is_secure) {
+            GtkWidget *lock_icon = gtk_image_new_from_icon_name("network-wireless-encrypted-symbolic");
+            gtk_widget_add_css_class(lock_icon, "dim-label");
+            gtk_box_append(GTK_BOX(box), lock_icon);
         }
 
+        // --- MODIFICATION IS HERE ---
+        if (net_copy->is_active) {
+            // Replace the GtkLabel with a GtkImage using a standard checkmark icon.
+            GtkWidget *check_icon = gtk_image_new_from_icon_name("object-select-symbolic");
+            gtk_widget_add_css_class(check_icon, "active-symbol");
+            gtk_box_append(GTK_BOX(box), check_icon);
+            gtk_widget_add_css_class(entry_button, "active-network");
+        }
+        // --- END MODIFICATION ---
+        
         g_signal_connect(entry_button, "clicked", G_CALLBACK(on_wifi_network_clicked), net_copy);
         g_signal_connect_swapped(entry_button, "destroy", G_CALLBACK(wifi_network_free), net_copy);
         
