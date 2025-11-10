@@ -1,4 +1,4 @@
-// ===== src/network_manager.h =====
+// ===== widgets/control-center/src/network_manager.h (COMPLETE) =====
 #ifndef NETWORK_MANAGER_H
 #define NETWORK_MANAGER_H
 
@@ -11,12 +11,26 @@ void network_manager_shutdown();
 // --- Type Definitions ---
 typedef void (*NetworkOperationCallback)(gboolean success, gpointer user_data);
 
+// --- ADD THIS NEW ENUM ---
+typedef enum {
+    WIFI_STATE_DISCONNECTED,      // Not connected, but might be known/saved
+    WIFI_STATE_CONNECTING,        // In the process of connecting
+    WIFI_STATE_LIMITED,           // Connected to router, but no internet access
+    WIFI_STATE_CONNECTED          // Fully connected with internet access
+} WifiConnectivityState;
+// --- END NEW ENUM ---
+
 typedef struct {
     gchar *ssid;
     gchar *object_path; // D-Bus object path of the Access Point
     guint8 strength;
     gboolean is_secure;
     gboolean is_active;
+    gboolean is_known; // Is this a saved network profile?
+    
+    // --- ADD THIS NEW FIELD ---
+    WifiConnectivityState connectivity;
+
 } WifiNetwork;
 
 typedef struct {
@@ -38,7 +52,6 @@ gboolean is_airplane_mode_active();
 // --- Network Operations ---
 GList* get_available_wifi_networks();
 
-// CHANGED: This is now an async function
 void get_wifi_network_details_async(const gchar *ap_path, WifiDetailsCallback callback, gpointer user_data);
 
 gchar* find_connection_for_ssid(const gchar *ssid);

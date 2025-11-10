@@ -13,13 +13,13 @@ typedef struct _BluetoothScanner BluetoothScanner;
 // Creates a new BluetoothScanner object.
 BluetoothScanner* bluetooth_scanner_new(BluetoothScanResultCallback callback, gpointer user_data);
 
-// Starts the periodic scanning.
-void bluetooth_scanner_start(BluetoothScanner *scanner, guint interval_seconds);
+// Starts device discovery.
+void bluetooth_scanner_start(BluetoothScanner *scanner);
 
-// Stops the periodic scanning.
+// Stops device discovery.
 void bluetooth_scanner_stop(BluetoothScanner *scanner);
 
-// Triggers an immediate, one-time scan.
+// Triggers an immediate refresh of the UI from the manager's cache.
 void bluetooth_scanner_trigger_scan(BluetoothScanner *scanner);
 
 // Frees the scanner object.
