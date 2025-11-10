@@ -8,6 +8,7 @@
 #include "audio_manager.h"
 #include "brightness_manager.h"
 #include "system_monitor.h"
+#include "qr.h"
 
 const guint WIFI_SCAN_INTERVAL_SECONDS = 10;
 const guint BT_SCAN_INTERVAL_SECONDS = 15;
@@ -45,6 +46,11 @@ typedef struct {
     GtkWidget *bt_header_spinner;
     
 } AppWidgets;
+
+typedef struct {
+    AppWidgets *widgets;
+    GtkWidget *row_widget; // The widget that was clicked to initiate the connection
+} WifiOpContext;
 
 // --- Password Prompt Structs ---
 typedef void (*PasswordCancelCallback)(gpointer user_data);
@@ -100,6 +106,18 @@ static void on_wifi_scan_results(GList *networks, gpointer user_data);
 static void on_bt_scan_results(GList *devices, gpointer user_data);
 
 static gboolean initial_state_update(gpointer user_data);
+
+static void on_qr_button_clicked(GtkButton *button, gpointer user_data);
+static void on_qr_code_received(GdkPixbuf *pixbuf, gpointer user_data);
+
+static void on_qr_button_pressed(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data);
+
+typedef struct {
+    GtkWidget *parent_widget; // The button that was clicked
+    GtkPopover *spinner_popover;
+    gchar *ssid;
+} QRCodeCallbackContext;
+
 
 typedef struct {
     GtkPopover *parent_popover;
@@ -274,17 +292,53 @@ static gboolean rescan_after_delay(gpointer user_data) {
     return G_SOURCE_REMOVE; // Run only once
 }
 
+// NEW HELPER: Updates just the sublabel of a Wi-Fi list row.
+static void update_wifi_row_sublabel(GtkWidget *row_widget, const gchar *text) {
+    if (!row_widget || !GTK_IS_BUTTON(row_widget)) return;
+
+    GtkWidget *box = gtk_button_get_child(GTK_BUTTON(row_widget));
+    if (!box) return;
+
+    // The text container is usually the second widget in the box (after the icon stack).
+    GtkWidget *text_container = gtk_widget_get_next_sibling(gtk_widget_get_first_child(box));
+    if (text_container && GTK_IS_BOX(text_container)) {
+        GtkWidget *sublabel_widget = gtk_widget_get_last_child(text_container);
+        if (sublabel_widget && GTK_IS_LABEL(sublabel_widget) && gtk_widget_has_css_class(sublabel_widget, "connected-sublabel")) {
+            gtk_label_set_text(GTK_LABEL(sublabel_widget), text);
+            gtk_widget_set_visible(sublabel_widget, TRUE);
+        }
+    }
+}
 
 static void on_wifi_operation_finished(gboolean success, gpointer user_data) {
-    (void)success;
-    AppWidgets *widgets = user_data;
-    if (!widgets) {
+    WifiOpContext *context = user_data;
+    g_print("[FORGET DEBUG] 5. Callback 'on_wifi_operation_finished' received. Success: %s\n", success ? "TRUE" : "FALSE");
+    
+    if (!context || !context->widgets) {
+        g_warning("[FORGET DEBUG] Context or widgets are NULL in callback. Aborting.\n");
+        if (context) g_free(context);
         return;
     }
-    
-    // Just schedule a scan. All spinner logic is handled on the row itself now.
-    g_timeout_add(500, rescan_after_delay, widgets);
+
+    if (success) {
+        g_print("[FORGET DEBUG] 6. Success branch: Triggering IMMEDIATE scan.\n");
+        wifi_scanner_trigger_scan(context->widgets->wifi_scanner);
+    } else {
+        g_print("[FORGET DEBUG] 6. Failure branch: Showing error message and scheduling delayed scan.\n");
+        if (context->row_widget) {
+            GtkWidget* box = gtk_button_get_child(GTK_BUTTON(context->row_widget));
+            GtkWidget* icon_stack = gtk_widget_get_first_child(box);
+            if (icon_stack && GTK_IS_STACK(icon_stack)) {
+                gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "icon");
+            }
+            update_wifi_row_sublabel(context->row_widget, "Authentication failed");
+        }
+        g_timeout_add(2500, rescan_after_delay, context->widgets);
+    }
+
+    g_free(context);
 }
+
 // The callback that runs AFTER the background connect/disconnect thread finishes.
 static void on_bt_operation_finished(gboolean success, gpointer user_data) {
     // --- ADD THIS LOG ---
@@ -313,7 +367,10 @@ static void on_password_ready(const gchar *password, gpointer user_data) {
     AppWidgets *widgets = context->widgets;
     WifiNetwork *net = context->network;
     // Pass our new, smarter callback
-    add_and_activate_wifi_connection_async(net->ssid, net->object_path, password, net->is_secure, on_wifi_operation_finished, widgets);
+    WifiOpContext *op_context = g_new0(WifiOpContext, 1);
+    op_context->widgets = widgets;
+    op_context->row_widget = context->connecting_widget;
+    add_and_activate_wifi_connection_async(net->ssid, net->object_path, password, net->is_secure, on_wifi_operation_finished, op_context);
     // The context is freed by the cancel handler on the dialog destroy signal
 }
 
@@ -357,6 +414,17 @@ static void on_details_button_clicked(GtkButton *button, GtkPopover *parent_popo
 }
 
 // --- Click Handlers (Left-Click) ---
+static void on_qr_button_pressed(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) {
+    (void)n_press; (void)x; (void)y; (void)user_data;
+
+    // Use the GTK_GESTURE() macro to cast the GtkGestureClick* to a GtkGesture*
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+
+    g_print("[UI DEBUG] Gesture captured click on QR button!\n");
+    GtkWidget *button = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture));
+    on_qr_button_clicked(GTK_BUTTON(button), NULL);
+}
+
 static void on_wifi_network_clicked(GtkButton *button, gpointer user_data) {
     // The user_data is now unused, we get the data from the button.
     (void)user_data;
@@ -373,9 +441,14 @@ static void on_wifi_network_clicked(GtkButton *button, gpointer user_data) {
         gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "spinner");
     }
     
+    // Create the context for the async operation callback.
+    WifiOpContext *op_context = g_new0(WifiOpContext, 1);
+    op_context->widgets = widgets;
+    op_context->row_widget = GTK_WIDGET(button);
+
     g_autofree gchar *existing_connection_path = find_connection_for_ssid(net->ssid);
     if (existing_connection_path) {
-        activate_wifi_connection_async(existing_connection_path, net->object_path, on_wifi_operation_finished, widgets);
+        activate_wifi_connection_async(existing_connection_path, net->object_path, on_wifi_operation_finished, op_context);
     } else {
         if (net->is_secure) {
             PasswordDialogContext *context = g_new0(PasswordDialogContext, 1);
@@ -384,8 +457,10 @@ static void on_wifi_network_clicked(GtkButton *button, gpointer user_data) {
             context->connecting_widget = GTK_WIDGET(button);
             GtkWindow *parent_window = GTK_WINDOW(gtk_widget_get_root(GTK_WIDGET(button)));
             show_password_prompt(parent_window, net->ssid, on_password_ready, on_password_cancelled, context);
+            // Free the op_context if we are showing a password prompt, as it will be created again in on_password_ready
+            g_free(op_context);
         } else {
-            add_and_activate_wifi_connection_async(net->ssid, net->object_path, NULL, net->is_secure, on_wifi_operation_finished, widgets);
+            add_and_activate_wifi_connection_async(net->ssid, net->object_path, NULL, net->is_secure, on_wifi_operation_finished, op_context);
         }
     }
 }
@@ -454,24 +529,45 @@ static void toggle_airplane_mode(GtkToggleButton *button, AppWidgets *widgets) {
 
 // --- Click Handlers (Right-Click Popover Actions) ---
 static void on_forget_button_clicked(GtkButton *button, GtkPopover *popover) {
-    gtk_popover_popdown(popover);
+    // Get the widgets pointer BEFORE popping down the popover.
     AppWidgets *widgets = get_widgets_from_child(GTK_WIDGET(button));
-    if (!widgets) return;
+    
+    // Now it's safe to popdown.
+    gtk_popover_popdown(popover);
+
+    if (!widgets) {
+        g_warning("FORGET_BTN_CLICK: Could not find AppWidgets from button!");
+        return;
+    }
 
     const char *ssid = g_object_get_data(G_OBJECT(button), "ssid-to-forget");
-    // We can show a spinner on the whole page for this operation if we want,
-    // but for now let's just call the function.
-    forget_wifi_connection_async(ssid, on_wifi_operation_finished, widgets);
+    g_print("\n\n[FORGET DEBUG] 1. 'Forget' button clicked for SSID: '%s'\n", ssid);
+    
+    GtkWidget *row_widget = g_object_get_data(G_OBJECT(button), "parent-widget");
+
+    WifiOpContext *op_context = g_new0(WifiOpContext, 1);
+    op_context->widgets = widgets;
+    op_context->row_widget = row_widget;
+    forget_wifi_connection_async(ssid, on_wifi_operation_finished, op_context);
 }
 
 static void on_disconnect_button_clicked(GtkButton *button, GtkPopover *popover) {
-    gtk_popover_popdown(popover);
+    // Get the widgets pointer BEFORE popping down the popover.
     AppWidgets *widgets = get_widgets_from_child(GTK_WIDGET(button));
-    if (!widgets) return;
 
-    disconnect_wifi_async(on_wifi_operation_finished, widgets);
+    // Now it's safe to popdown.
+    gtk_popover_popdown(popover);
+
+    if (!widgets) {
+        g_warning("DISCONNECT_BTN_CLICK: Could not find AppWidgets from button!");
+        return;
+    }
+
+    WifiOpContext *op_context = g_new0(WifiOpContext, 1);
+    op_context->widgets = widgets;
+    op_context->row_widget = NULL; // No specific row for this operation
+    disconnect_wifi_async(on_wifi_operation_finished, op_context);
 }
-
 
 // The helper function that actually calls the disconnect logic.
 static void on_bt_do_disconnect(const gchar* address, GtkWidget* row_widget, AppWidgets* widgets) {
@@ -544,22 +640,25 @@ static void on_connect_button_clicked(GtkButton *button, GtkPopover *popover) {
     // Retrieve the data we attached to the button
     WifiNetwork *net = g_object_get_data(G_OBJECT(button), "wifi-network-data");
     AppWidgets *widgets = g_object_get_data(G_OBJECT(button), "app-widgets-data");
+    // Get the original row widget that the popover is attached to
+    GtkWidget *row_widget = gtk_widget_get_parent(GTK_WIDGET(popover));
 
     if (!widgets || !net || net->is_active) {
         return;
     }
 
-    // This is the exact same logic from on_wifi_network_clicked()
-  //  gtk_widget_set_sensitive(GTK_WIDGET(widgets->wifi_list_overlay), FALSE);
-   // gtk_spinner_start(GTK_SPINNER(widgets->wifi_list_spinner));
+    // Create context for the callback
+    WifiOpContext *op_context = g_new0(WifiOpContext, 1);
+    op_context->widgets = widgets;
+    op_context->row_widget = row_widget; // Pass the original row widget
 
     g_autofree gchar *existing_connection_path = find_connection_for_ssid(net->ssid);
     if (existing_connection_path) {
-        activate_wifi_connection_async(existing_connection_path, net->object_path, on_wifi_operation_finished, widgets);
+        activate_wifi_connection_async(existing_connection_path, net->object_path, on_wifi_operation_finished, op_context);
     } else {
         // We'll need to add a password prompt here in the future, but for now, it will
         // attempt to connect to open networks or use a previously known password.
-        add_and_activate_wifi_connection_async(net->ssid, net->object_path, NULL, net->is_secure, on_wifi_operation_finished, widgets);
+        add_and_activate_wifi_connection_async(net->ssid, net->object_path, NULL, net->is_secure, on_wifi_operation_finished, op_context);
     }
 }
 
@@ -629,8 +728,8 @@ static WifiNetwork* get_wifi_network_from_widget(GtkWidget *list_item) {
 static void update_wifi_widget_state(GtkWidget *button, WifiNetwork *net) {
     GtkWidget *box = gtk_button_get_child(GTK_BUTTON(button));
     if (!box) return;
-
-    // --- Update the Icon ---
+ 
+    // --- Update the Icon and Spinner ---
     GtkWidget *icon_stack = gtk_widget_get_first_child(box);
     if (icon_stack && GTK_IS_STACK(icon_stack)) {
         GtkWidget *icon = gtk_stack_get_child_by_name(GTK_STACK(icon_stack), "icon");
@@ -638,48 +737,53 @@ static void update_wifi_widget_state(GtkWidget *button, WifiNetwork *net) {
             const char *icon_name = get_wifi_icon_name_for_signal(net->strength);
             gtk_image_set_from_icon_name(GTK_IMAGE(icon), icon_name);
         }
-        // Ensure spinner is hidden
+        // Ensure spinner is always hidden on a refresh. It's only shown on click.
         gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "icon");
     }
-
-    // --- Update the Active Checkmark ---
-    gboolean has_check = FALSE;
-    GtkWidget *child = gtk_widget_get_first_child(box);
-    while(child) {
-        if (gtk_widget_get_name(child) && g_strcmp0(gtk_widget_get_name(child), "active-check") == 0) {
-            has_check = TRUE;
-            break;
+ 
+    // --- Update the Active State ---
+    if (net->is_active) {
+        gtk_widget_add_css_class(button, "active-network");
+    } else {
+        gtk_widget_remove_css_class(button, "active-network");
+    }
+    
+    // --- FIX: Update the sublabel text, which was previously skipped ---
+    const gchar *sublabel_text = NULL;
+    if (net->is_active) {
+        switch (net->connectivity) {
+            case WIFI_STATE_CONNECTED: sublabel_text = "Connected"; break;
+            case WIFI_STATE_LIMITED: sublabel_text = "Connected / No Internet Access"; break;
+            case WIFI_STATE_CONNECTING: sublabel_text = "Connecting..."; break;
+            default: sublabel_text = "Connected"; break;
         }
-        child = gtk_widget_get_next_sibling(child);
+    } else if (net->is_known) {
+        sublabel_text = "Saved";
     }
 
-    if (net->is_active && !has_check) {
-        GtkWidget *check_icon = gtk_image_new_from_icon_name("object-select-symbolic");
-        gtk_widget_add_css_class(check_icon, "active-symbol");
-        gtk_widget_set_name(check_icon, "active-check");
-        gtk_box_append(GTK_BOX(box), check_icon);
-        gtk_widget_add_css_class(button, "active-network");
-    } else if (!net->is_active && has_check) {
-        // Find and remove the checkmark specifically
-        GtkWidget *to_remove = NULL;
-        child = gtk_widget_get_first_child(box);
-         while(child) {
-            if (gtk_widget_get_name(child) && g_strcmp0(gtk_widget_get_name(child), "active-check") == 0) {
-                to_remove = child;
-                break;
+    // Find the container for the text labels (it's the next sibling after the icon_stack)
+    GtkWidget *text_container = icon_stack ? gtk_widget_get_next_sibling(icon_stack) : NULL;
+    
+    // We can only update the sublabel if the widget was created with one (i.e., text_container is a GtkBox).
+    if (text_container && GTK_IS_BOX(text_container)) {
+        GtkWidget *sublabel_widget = gtk_widget_get_last_child(text_container);
+        if (sublabel_widget && GTK_IS_LABEL(sublabel_widget) && gtk_widget_has_css_class(sublabel_widget, "connected-sublabel")) {
+            if (sublabel_text) {
+                gtk_label_set_text(GTK_LABEL(sublabel_widget), sublabel_text);
+                gtk_widget_set_visible(sublabel_widget, TRUE);
+            } else {
+                gtk_widget_set_visible(sublabel_widget, FALSE);
             }
-            child = gtk_widget_get_next_sibling(child);
         }
-        if (to_remove) {
-            gtk_box_remove(GTK_BOX(box), to_remove);
-        }
-        gtk_widget_remove_css_class(button, "active-network");
     }
 }
 
 // --- Gesture Handlers (Right-Click) ---
 static void on_wifi_right_click(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) {
     (void)n_press; (void)x; (void)y; (void)user_data;
+
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+
     GtkWidget *button_widget = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture));
     WifiNetwork *net = get_wifi_network_from_widget(button_widget);
     AppWidgets *widgets = get_widgets_from_child(button_widget);
@@ -691,7 +795,6 @@ static void on_wifi_right_click(GtkGestureClick *gesture, int n_press, double x,
     GtkWidget *menu_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_popover_set_child(popover, menu_box);
 
-    // "Details" button is always available
     GtkWidget *details_button = create_popover_action_button("dialog-information-symbolic", "Details");
     g_object_set_data(G_OBJECT(details_button), "wifi-network-data", net);
     g_object_set_data(G_OBJECT(details_button), "parent-widget", button_widget);
@@ -711,15 +814,14 @@ static void on_wifi_right_click(GtkGestureClick *gesture, int n_press, double x,
         g_signal_connect(connect_button, "clicked", G_CALLBACK(on_connect_button_clicked), popover);
         gtk_box_append(GTK_BOX(menu_box), connect_button);
 
-        // --- THIS IS THE KEY LOGIC CHANGE ---
-        // Only show the "Forget" button if the network is known (saved).
         if (net->is_known) {
-            // Your old is_connection_forgettable check can still be useful here if you want
-            // to prevent forgetting certain types of enterprise connections, but for now
-            // we will rely on the is_known flag.
             GtkWidget *forget_button = create_popover_action_button("edit-delete-symbolic", "Forget");
-            // The data needs to be the SSID string, not the boolean.
             g_object_set_data(G_OBJECT(forget_button), "ssid-to-forget", (gpointer)net->ssid);
+            g_object_set_data(G_OBJECT(forget_button), "parent-widget", button_widget);
+            
+            // *** ADD THIS PRINT STATEMENT ***
+            g_print(">>> DEBUG: Connecting 'clicked' signal for FORGET button.\n");
+
             g_signal_connect(forget_button, "clicked", G_CALLBACK(on_forget_button_clicked), popover);
             gtk_box_append(GTK_BOX(menu_box), forget_button);
         }
@@ -731,17 +833,21 @@ static void on_wifi_right_click(GtkGestureClick *gesture, int n_press, double x,
 
 // The handler for the "Disconnect" button in the right-click popover menu.
 static void on_bt_popover_disconnect_clicked(GtkButton *button, GtkPopover *popover) {
-    gtk_popover_popdown(popover);
+    // Get the widgets pointer BEFORE popping down the popover.
     AppWidgets *widgets = get_widgets_from_child(GTK_WIDGET(button));
-    if (!widgets) return;
+
+    // Now it's safe to popdown.
+    gtk_popover_popdown(popover);
+
+    if (!widgets) {
+        g_warning("BT_DISCONNECT_BTN_CLICK: Could not find AppWidgets from button!");
+        return;
+    }
 
     const char *address = g_object_get_data(G_OBJECT(button), "address-to-disconnect");
     GtkWidget *row_widget = g_object_get_data(G_OBJECT(button), "parent-row-widget");
 
-    // --- ADD THIS LOG ---
     g_print("[UI DEBUG] Popover Disconnect clicked for address: %s\n", address);
-    
-    // --- ADD THIS LOG ---
     g_print("[UI DEBUG] -> Calling on_bt_do_disconnect....\n");
     on_bt_do_disconnect(address, row_widget, widgets);
 }
@@ -887,9 +993,100 @@ static void on_bt_devices_updated(GList *devices, gpointer user_data) {
     on_bt_scan_results(devices, user_data);
 }
 
+// The final callback that displays the QR code
+static void on_qr_code_received(GdkPixbuf *pixbuf, gpointer user_data) {
+    QRCodeCallbackContext *context = user_data;
+    
+    if (context->spinner_popover) {
+        gtk_popover_popdown(context->spinner_popover);
+    }
+
+    GtkPopover *qr_popover = GTK_POPOVER(gtk_popover_new());
+    gtk_widget_add_css_class(GTK_WIDGET(qr_popover), "qr-code-popover"); // Add class to popover
+    g_signal_connect(qr_popover, "closed", G_CALLBACK(on_popover_closed), NULL);
+
+    if (pixbuf) {
+        GtkWidget *popover_content_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+        
+        GdkPaintable *paintable = GDK_PAINTABLE(gdk_texture_new_for_pixbuf(pixbuf));
+        GtkWidget *qr_image = gtk_image_new_from_paintable(paintable);
+        gtk_image_set_pixel_size(GTK_IMAGE(qr_image), 256);
+        
+        g_autofree gchar *label_text = g_strdup_printf("Scan to connect to \"%s\"", context->ssid);
+        GtkWidget *info_label = gtk_label_new(label_text);
+        gtk_label_set_wrap(GTK_LABEL(info_label), TRUE);
+        gtk_widget_add_css_class(info_label, "dim-label"); // Keep for fallback
+        gtk_widget_add_css_class(info_label, "qr-info-label"); // Add our specific class
+
+        gtk_box_append(GTK_BOX(popover_content_box), qr_image);
+        gtk_box_append(GTK_BOX(popover_content_box), info_label);
+
+        gtk_widget_set_margin_top(popover_content_box, 15);
+        gtk_widget_set_margin_bottom(popover_content_box, 15);
+        gtk_widget_set_margin_start(popover_content_box, 15);
+        gtk_widget_set_margin_end(popover_content_box, 15);
+
+        gtk_popover_set_child(qr_popover, popover_content_box);
+
+    } else {
+        GtkWidget *error_label = gtk_label_new("Could not retrieve Wi-Fi password.\nCheck terminal for D-Bus or Polkit errors.");
+        gtk_label_set_wrap(GTK_LABEL(error_label), TRUE);
+        gtk_widget_set_margin_start(error_label, 15);
+        gtk_widget_set_margin_end(error_label, 15);
+        gtk_widget_set_margin_top(error_label, 15);
+        gtk_widget_set_margin_bottom(error_label, 15);
+        gtk_popover_set_child(qr_popover, error_label);
+    }
+
+    gtk_widget_set_parent(GTK_WIDGET(qr_popover), context->parent_widget);
+    gtk_popover_popup(qr_popover);
+    
+    g_free(context->ssid);
+    g_free(context);
+}
+
+
+static void on_qr_button_clicked(GtkButton *button, gpointer user_data) {
+    (void)user_data;
+    WifiNetwork *net = g_object_get_data(G_OBJECT(button), "wifi-network-data");
+    if (!net) return;
+    
+    GtkPopover *spinner_popover = GTK_POPOVER(gtk_popover_new());
+    GtkWidget *spinner = gtk_spinner_new();
+    gtk_spinner_start(GTK_SPINNER(spinner));
+    gtk_widget_set_margin_start(spinner, 15);
+    gtk_widget_set_margin_end(spinner, 15);
+    gtk_widget_set_margin_top(spinner, 15);
+    gtk_widget_set_margin_bottom(spinner, 15);
+    gtk_popover_set_child(spinner_popover, spinner);
+    gtk_widget_set_parent(GTK_WIDGET(spinner_popover), GTK_WIDGET(button));
+    gtk_popover_popup(spinner_popover);
+
+    QRCodeCallbackContext *context = g_new0(QRCodeCallbackContext, 1);
+    context->parent_widget = GTK_WIDGET(button);
+    context->spinner_popover = spinner_popover;
+    context->ssid = g_strdup(net->ssid); 
+    
+    generate_wifi_qr_code_async(net->ssid, on_qr_code_received, context);
+}
+
+
+
+// This helper function makes our icon usage robust.
+static const char* get_best_available_icon(const char **icon_names) {
+    GtkIconTheme *icon_theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
+    for (int i = 0; icon_names[i] != NULL; i++) {
+        if (gtk_icon_theme_has_icon(icon_theme, icon_names[i])) {
+            return icon_names[i];
+        }
+    }
+    // Return the last icon in the list as the ultimate fallback.
+    return icon_names[g_strv_length((gchar**)icon_names) - 1];
+}
+
 static void on_wifi_scan_results(GList *networks, gpointer user_data) {
     AppWidgets *widgets = (AppWidgets*)user_data;
-    if(!widgets || !widgets->wifi_connected_list_box || !widgets->wifi_available_list_box) { 
+    if (!widgets || !widgets->wifi_connected_list_box || !widgets->wifi_available_list_box) { 
         free_wifi_network_list(networks); 
         return; 
     }
@@ -897,117 +1094,164 @@ static void on_wifi_scan_results(GList *networks, gpointer user_data) {
     GtkWidget *connected_list = widgets->wifi_connected_list_box;
     GtkWidget *available_list = widgets->wifi_available_list_box;
 
-    // Clear both lists
-    GtkWidget *child;
-    while ((child = gtk_widget_get_first_child(connected_list))) { gtk_box_remove(GTK_BOX(connected_list), child); }
-    while ((child = gtk_widget_get_first_child(available_list))) { gtk_box_remove(GTK_BOX(available_list), child); }
-    
-    gboolean has_connected = FALSE;
-    gboolean has_available = FALSE;
-
-    // Handle case where Wi-Fi is disabled
-    if (!is_wifi_enabled()) {
-        GtkWidget *label = gtk_label_new("Wi-Fi is turned off");
-        gtk_widget_set_vexpand(label, TRUE);
-        gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
-        gtk_box_append(GTK_BOX(available_list), label);
-        gtk_widget_set_visible(widgets->wifi_connected_header, FALSE);
-        gtk_widget_set_visible(widgets->wifi_available_header, FALSE);
-        free_wifi_network_list(networks);
-        return;
+    GHashTable *existing_widgets = g_hash_table_new(g_str_hash, g_str_equal);
+    for (GtkWidget *child = gtk_widget_get_first_child(connected_list); child != NULL; child = gtk_widget_get_next_sibling(child)) {
+        WifiNetwork *net = get_wifi_network_from_widget(child);
+        if (net && net->ssid) g_hash_table_insert(existing_widgets, (gpointer)net->ssid, child);
+    }
+    for (GtkWidget *child = gtk_widget_get_first_child(available_list); child != NULL; child = gtk_widget_get_next_sibling(child)) {
+        WifiNetwork *net = get_wifi_network_from_widget(child);
+        if (net && net->ssid) g_hash_table_insert(existing_widgets, (gpointer)net->ssid, child);
     }
 
+    GHashTable *seen_ssids = g_hash_table_new(g_str_hash, g_str_equal);
     for (GList *l = networks; l != NULL; l = l->next) {
         WifiNetwork *net_from_scan = l->data;
-        
-        WifiNetwork *net_copy = g_new0(WifiNetwork, 1);
-        *net_copy = *net_from_scan; // Copy all fields at once
-        net_copy->ssid = g_strdup(net_from_scan->ssid);
-        net_copy->object_path = g_strdup(net_from_scan->object_path);
+        if (!net_from_scan || !net_from_scan->ssid) continue;
 
-        GtkWidget *entry_button = gtk_button_new();
-        g_object_set_data_full(G_OBJECT(entry_button), "wifi-network-data", net_copy, (GDestroyNotify)wifi_network_free);
-        gtk_widget_add_css_class(entry_button, "list-item-button");
-        
-        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-        gtk_button_set_child(GTK_BUTTON(entry_button), box);
-        
-        GtkWidget *icon_stack = gtk_stack_new();
-        gtk_widget_set_valign(icon_stack, GTK_ALIGN_CENTER);
-        const char *icon_name = get_wifi_icon_name_for_signal(net_copy->strength);
-        gtk_stack_add_named(GTK_STACK(icon_stack), gtk_image_new_from_icon_name(icon_name), "icon");
-        gtk_stack_add_named(GTK_STACK(icon_stack), gtk_spinner_new(), "spinner");
-        gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "icon");
-        gtk_box_append(GTK_BOX(box), icon_stack);
-        
-        // --- THIS IS THE NEW, CORRECTED LOGIC ---
-        const gchar *sublabel_text = NULL;
-        if (net_copy->is_active) {
-            // For the active connection, use its live connectivity status.
-            switch (net_copy->connectivity) {
-                case WIFI_STATE_CONNECTED:
-                    sublabel_text = "Connected";
-                    break;
-                case WIFI_STATE_LIMITED:
-                    sublabel_text = "Connected / No Internet Access";
-                    break;
-                case WIFI_STATE_CONNECTING:
-                    sublabel_text = "Connecting...";
-                    break;
-                default:
-                     sublabel_text = "Connected"; // Fallback
-                    break;
+        g_hash_table_insert(seen_ssids, (gpointer)net_from_scan->ssid, GINT_TO_POINTER(1));
+        GtkWidget *existing_button = g_hash_table_lookup(existing_widgets, net_from_scan->ssid);
+
+        if (existing_button) {
+            WifiNetwork *net_copy = get_wifi_network_from_widget(existing_button);
+            net_copy->strength = net_from_scan->strength;
+            net_copy->is_active = net_from_scan->is_active;
+            net_copy->connectivity = net_from_scan->connectivity;
+            net_copy->is_known = net_from_scan->is_known;
+            update_wifi_widget_state(existing_button, net_copy);
+            GtkWidget *box = gtk_button_get_child(GTK_BUTTON(existing_button));
+            GtkWidget *last_child = gtk_widget_get_last_child(box);
+            gboolean qr_button_exists = (last_child && gtk_widget_has_css_class(last_child, "wifi-qr-button"));
+            if (net_copy->is_active && !qr_button_exists) {
+                GtkWidget *qr_button = gtk_button_new_from_icon_name("view-grid-symbolic");
+                gtk_widget_add_css_class(qr_button, "wifi-qr-button");
+                gtk_widget_set_tooltip_text(qr_button, "Show QR code to connect");
+                gtk_widget_set_valign(qr_button, GTK_ALIGN_CENTER);
+                g_object_set_data(G_OBJECT(qr_button), "wifi-network-data", net_copy);
+                GtkGesture *qr_click_gesture = gtk_gesture_click_new();
+                g_signal_connect(qr_click_gesture, "pressed", G_CALLBACK(on_qr_button_pressed), NULL);
+                gtk_widget_add_controller(qr_button, GTK_EVENT_CONTROLLER(qr_click_gesture));
+                gtk_box_append(GTK_BOX(box), qr_button);
+            } else if (!net_copy->is_active && qr_button_exists) {
+                gtk_box_remove(GTK_BOX(box), last_child);
             }
-        } else if (net_copy->is_known) {
-            // For any other saved network, just say "Saved".
-            // We no longer guess about its internet status.
-            sublabel_text = "Saved";
-        }
-        // --- END OF NEW LOGIC ---
-
-        if (sublabel_text) {
+            GtkWidget *current_parent = gtk_widget_get_parent(existing_button);
+            if (net_copy->is_active && current_parent != connected_list) {
+                gtk_widget_unparent(existing_button);
+                gtk_box_append(GTK_BOX(connected_list), existing_button);
+            } else if (!net_copy->is_active && current_parent != available_list) {
+                gtk_widget_unparent(existing_button);
+                gtk_box_append(GTK_BOX(available_list), existing_button);
+            }
+        } else {
+            WifiNetwork *net_copy = g_new0(WifiNetwork, 1);
+            *net_copy = *net_from_scan;
+            net_copy->ssid = g_strdup(net_from_scan->ssid);
+            net_copy->object_path = g_strdup(net_from_scan->object_path);
+            GtkWidget *entry_button = gtk_button_new();
+            g_object_set_data_full(G_OBJECT(entry_button), "wifi-network-data", net_copy, (GDestroyNotify)wifi_network_free);
+            gtk_widget_add_css_class(entry_button, "list-item-button");
+            GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+            gtk_button_set_child(GTK_BUTTON(entry_button), box);
+            GtkWidget *icon_stack = gtk_stack_new();
+            gtk_widget_set_valign(icon_stack, GTK_ALIGN_CENTER);
+            const char *icon_name = get_wifi_icon_name_for_signal(net_copy->strength);
+            gtk_stack_add_named(GTK_STACK(icon_stack), gtk_image_new_from_icon_name(icon_name), "icon");
+            gtk_stack_add_named(GTK_STACK(icon_stack), gtk_spinner_new(), "spinner");
+            gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "icon");
+            gtk_box_append(GTK_BOX(box), icon_stack);
             GtkWidget *text_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
             gtk_widget_set_hexpand(text_vbox, TRUE);
             gtk_box_append(GTK_BOX(box), text_vbox);
             GtkWidget *label = gtk_label_new(net_copy->ssid);
             gtk_label_set_xalign(GTK_LABEL(label), 0.0);
             gtk_box_append(GTK_BOX(text_vbox), label);
-            GtkWidget *sublabel = gtk_label_new(sublabel_text);
+            GtkWidget *sublabel = gtk_label_new("");
             gtk_widget_add_css_class(sublabel, "connected-sublabel");
             gtk_label_set_xalign(GTK_LABEL(sublabel), 0.0);
             gtk_box_append(GTK_BOX(text_vbox), sublabel);
-        } else {
-            GtkWidget *label = gtk_label_new(net_copy->ssid);
-            gtk_label_set_xalign(GTK_LABEL(label), 0.0);
-            gtk_widget_set_hexpand(label, TRUE);
-            gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
-            gtk_box_append(GTK_BOX(box), label);
-        }
+            const gchar *sublabel_text = NULL;
+            if (net_copy->is_active) {
+                switch (net_copy->connectivity) {
+                    case WIFI_STATE_CONNECTED: sublabel_text = "Connected"; break;
+                    case WIFI_STATE_LIMITED: sublabel_text = "Connected / No Internet Access"; break;
+                    case WIFI_STATE_CONNECTING: sublabel_text = "Connecting..."; break;
+                    default: sublabel_text = "Connected"; break;
+                }
+            } else if (net_copy->is_known) {
+                sublabel_text = "Saved";
+            }
+            if (sublabel_text) {
+                gtk_label_set_text(GTK_LABEL(sublabel), sublabel_text);
+                gtk_widget_set_visible(sublabel, TRUE);
+            } else {
+                gtk_widget_set_visible(sublabel, FALSE);
+            }
+            if (net_copy->is_secure) {
+                GtkWidget *secure_icon = gtk_image_new_from_icon_name("network-wireless-encrypted-symbolic");
+                gtk_widget_set_valign(secure_icon, GTK_ALIGN_CENTER);
+                gtk_box_append(GTK_BOX(box), secure_icon);
+            }
+            g_signal_connect(entry_button, "clicked", G_CALLBACK(on_wifi_network_clicked), NULL);
 
-        if (net_copy->is_secure) {
-            GtkWidget *secure_icon = gtk_image_new_from_icon_name("network-wireless-encrypted-symbolic");
-            gtk_widget_set_valign(secure_icon, GTK_ALIGN_CENTER);
-            gtk_box_append(GTK_BOX(box), secure_icon);
-        }
-        
-        g_signal_connect(entry_button, "clicked", G_CALLBACK(on_wifi_network_clicked), NULL);
-        GtkGesture *right_click = gtk_gesture_click_new();
-        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right_click), GDK_BUTTON_SECONDARY);
-        g_signal_connect(right_click, "pressed", G_CALLBACK(on_wifi_right_click), NULL);
-        gtk_widget_add_controller(entry_button, GTK_EVENT_CONTROLLER(right_click));
+            // *** THE FIX: Use the "pressed" signal for consistency and reliability. ***
+            GtkGesture *right_click = gtk_gesture_click_new();
+            gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right_click), GDK_BUTTON_SECONDARY);
+            g_signal_connect(right_click, "pressed", G_CALLBACK(on_wifi_right_click), NULL);
+            gtk_widget_add_controller(entry_button, GTK_EVENT_CONTROLLER(right_click));
+            // *** END FIX ***
 
-        if (net_copy->is_active) {
-            gtk_box_append(GTK_BOX(connected_list), entry_button);
-            has_connected = TRUE;
-        } else {
-            gtk_box_append(GTK_BOX(available_list), entry_button);
-            has_available = TRUE;
+            if (net_copy->is_active) {
+                GtkWidget *qr_button = gtk_button_new_from_icon_name("view-grid-symbolic");
+                gtk_widget_add_css_class(qr_button, "wifi-qr-button");
+                gtk_widget_set_tooltip_text(qr_button, "Show QR code to connect");
+                gtk_widget_set_valign(qr_button, GTK_ALIGN_CENTER);
+                g_object_set_data(G_OBJECT(qr_button), "wifi-network-data", net_copy);
+                GtkGesture *qr_click_gesture = gtk_gesture_click_new();
+                g_signal_connect(qr_click_gesture, "pressed", G_CALLBACK(on_qr_button_pressed), NULL);
+                gtk_widget_add_controller(qr_button, GTK_EVENT_CONTROLLER(qr_click_gesture));
+                gtk_box_append(GTK_BOX(box), qr_button);
+                gtk_box_append(GTK_BOX(connected_list), entry_button);
+            } else {
+                gtk_box_append(GTK_BOX(available_list), entry_button);
+            }
         }
     }
 
-    gtk_widget_set_visible(widgets->wifi_connected_header, has_connected);
-    gtk_widget_set_visible(widgets->wifi_available_header, has_available || g_list_length(networks) == 0);
+    GList *widgets_to_remove = NULL;
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, existing_widgets);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        if (!g_hash_table_contains(seen_ssids, key)) {
+            widgets_to_remove = g_list_prepend(widgets_to_remove, value);
+        }
+    }
+    for (GList *l = widgets_to_remove; l != NULL; l = l->next) {
+        GtkWidget *widget_to_remove = l->data;
+        if (GTK_IS_WIDGET(widget_to_remove)) {
+            gtk_widget_unparent(widget_to_remove);
+        }
+    }
+    g_list_free(widgets_to_remove);
+    g_hash_table_destroy(existing_widgets);
+    g_hash_table_destroy(seen_ssids);
 
+    gboolean has_connected = (gtk_widget_get_first_child(connected_list) != NULL);
+    gboolean has_available = (gtk_widget_get_first_child(available_list) != NULL);
+    if (!is_wifi_enabled()) {
+        GtkWidget *child;
+        while ((child = gtk_widget_get_first_child(connected_list))) { gtk_box_remove(GTK_BOX(connected_list), child); }
+        while ((child = gtk_widget_get_first_child(available_list))) { gtk_box_remove(GTK_BOX(available_list), child); }
+        GtkWidget *label = gtk_label_new("Wi-Fi is turned off");
+        gtk_widget_set_vexpand(label, TRUE);
+        gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
+        gtk_box_append(GTK_BOX(available_list), label);
+        has_connected = FALSE;
+        has_available = TRUE;
+    }
+    gtk_widget_set_visible(widgets->wifi_connected_header, has_connected);
+    gtk_widget_set_visible(widgets->wifi_available_header, has_available);
     free_wifi_network_list(networks);
 }
 

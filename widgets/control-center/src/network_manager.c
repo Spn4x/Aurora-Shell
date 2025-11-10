@@ -259,7 +259,37 @@ static void activate_connection_thread_func(GTask *task, gpointer s, gpointer d,
 void add_and_activate_wifi_connection_async(const gchar *ssid, const gchar *ap_path, const gchar *password, gboolean is_secure, NetworkOperationCallback cb, gpointer ud) { AddConnectionTaskData *td = g_new0(AddConnectionTaskData, 1); td->ssid = g_strdup(ssid); td->ap_path = g_strdup(ap_path); td->password = g_strdup(password); td->is_secure = is_secure; OperationFinishData *fd = g_new0(OperationFinishData, 1); fd->user_callback = cb; fd->user_data = ud; GTask *t = g_task_new(NULL, NULL, on_operation_finished, fd); g_task_set_task_data(t, td, add_connection_task_data_free); g_task_run_in_thread(t, add_and_activate_connection_thread_func); g_object_unref(t); }
 static void add_and_activate_connection_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) { (void)s; (void)d; (void)c; AddConnectionTaskData *data = g_task_get_task_data(task); g_autofree gchar *device_path = find_wifi_device_path(); if (!device_path) { g_warning("No Wi-Fi device for new connection."); g_task_return_boolean(task, FALSE); return; } g_autoptr(GError) error = NULL; GPtrArray *entries = g_ptr_array_new_with_free_func((GDestroyNotify) g_variant_unref); GVariantBuilder builder; g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT); g_variant_builder_add(&builder, "{sv}", "type", g_variant_new_string("802-11-wireless")); g_variant_builder_add(&builder, "{sv}", "id", g_variant_new_string(data->ssid)); g_autofree gchar* uuid = g_uuid_string_random(); g_variant_builder_add(&builder, "{sv}", "uuid", g_variant_new_string(uuid)); g_ptr_array_add(entries, g_variant_new_dict_entry(g_variant_new_string("connection"), g_variant_builder_end(&builder))); g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT); g_autoptr(GVariant) ssid_v = g_variant_new_from_data(G_VARIANT_TYPE("ay"), data->ssid, strlen(data->ssid), TRUE, NULL, NULL); g_variant_builder_add(&builder, "{sv}", "ssid", ssid_v); g_variant_builder_add(&builder, "{sv}", "mode", g_variant_new_string("infrastructure")); g_ptr_array_add(entries, g_variant_new_dict_entry(g_variant_new_string("802-11-wireless"), g_variant_builder_end(&builder))); g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT); g_variant_builder_add(&builder, "{sv}", "method", g_variant_new_string("auto")); g_ptr_array_add(entries, g_variant_new_dict_entry(g_variant_new_string("ipv4"), g_variant_builder_end(&builder))); if (data->is_secure) { g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT); g_variant_builder_add(&builder, "{sv}", "key-mgmt", g_variant_new_string("wpa-psk")); if (data->password && data->password[0] != '\0') { g_variant_builder_add(&builder, "{sv}", "psk", g_variant_new_string(data->password)); } g_ptr_array_add(entries, g_variant_new_dict_entry(g_variant_new_string("802-11-wireless-security"), g_variant_builder_end(&builder))); } GVariant *settings = g_variant_new_array(G_VARIANT_TYPE_DICT_ENTRY, (GVariant **)entries->pdata, entries->len); g_ptr_array_free(entries, TRUE); g_dbus_proxy_call_sync(g_context->nm_proxy, "AddAndActivateConnection", g_variant_new("(a{sa{sv}}oo)", settings, device_path, data->ap_path), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error); if (error) { g_warning("Failed to add connection: %s", error->message); g_task_return_boolean(task, FALSE); } else { g_print("D-Bus call successful.\n"); g_task_return_boolean(task, TRUE); } }
 void forget_wifi_connection_async(const gchar *ssid, NetworkOperationCallback cb, gpointer ud) { ForgetTaskData *td = g_new0(ForgetTaskData, 1); td->ssid = g_strdup(ssid); OperationFinishData *fd = g_new0(OperationFinishData, 1); fd->user_callback = cb; fd->user_data = ud; GTask *t = g_task_new(NULL, NULL, on_operation_finished, fd); g_task_set_task_data(t, td, forget_task_data_free); g_task_run_in_thread(t, forget_task_thread_func); g_object_unref(t); }
-static void forget_task_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) { (void)s; (void)d; (void)c; ForgetTaskData *data = g_task_get_task_data(task); gboolean overall_success = TRUE; g_autofree gchar *connection_to_forget = find_connection_for_ssid(data->ssid); if (connection_to_forget) { g_print("==> Found matching profile at %s. Deleting.\n", connection_to_forget); g_autoptr(GDBusProxy) conn_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, connection_to_forget, NM_SETTINGS_CONNECTION_INTERFACE, NULL, NULL); if (conn_proxy) { g_autoptr(GError) delete_error = NULL; g_dbus_proxy_call_sync(conn_proxy, "Delete", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &delete_error); if(delete_error) { g_warning("Failed to delete connection %s: %s", connection_to_forget, delete_error->message); overall_success = FALSE; } } else { overall_success = FALSE; } } g_task_return_boolean(task, overall_success); }
+static void forget_task_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) { 
+    (void)s; (void)d; (void)c; 
+    ForgetTaskData *data = g_task_get_task_data(task); 
+    g_print("[FORGET DEBUG] 2. Background thread started for SSID: '%s'\n", data->ssid);
+    gboolean overall_success = TRUE; 
+    g_autofree gchar *connection_to_forget = find_connection_for_ssid(data->ssid); 
+    
+    if (connection_to_forget) { 
+        g_print("[FORGET DEBUG] 3. Found profile to delete at D-Bus path: %s\n", connection_to_forget); 
+        g_autoptr(GDBusProxy) conn_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, connection_to_forget, NM_SETTINGS_CONNECTION_INTERFACE, NULL, NULL); 
+        if (conn_proxy) { 
+            g_autoptr(GError) delete_error = NULL; 
+            g_dbus_proxy_call_sync(conn_proxy, "Delete", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &delete_error); 
+            if(delete_error) { 
+                g_warning("[FORGET DEBUG] 4. D-Bus 'Delete' call FAILED: %s", delete_error->message); 
+                overall_success = FALSE; 
+            } else {
+                g_print("[FORGET DEBUG] 4. D-Bus 'Delete' call SUCCEEDED.\n");
+            }
+        } else { 
+            g_warning("[FORGET DEBUG] 4. FAILED to create D-Bus proxy for the connection.\n");
+            overall_success = FALSE; 
+        } 
+    } else {
+        g_print("[FORGET DEBUG] 3. No saved profile found for SSID '%s'. Nothing to delete.\n", data->ssid);
+        // If there's nothing to forget, we can consider it a "success" in that the desired state is achieved.
+        overall_success = TRUE;
+    }
+    
+    g_task_return_boolean(task, overall_success); 
+}
 void disconnect_wifi_async(NetworkOperationCallback cb, gpointer ud) { OperationFinishData *fd = g_new0(OperationFinishData, 1); fd->user_callback = cb; fd->user_data = ud; GTask *t = g_task_new(NULL, NULL, on_operation_finished, fd); g_task_run_in_thread(t, disconnect_task_thread_func); g_object_unref(t); }
 static void disconnect_task_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) { (void)s; (void)d; (void)c; g_autofree gchar *device_path = find_wifi_device_path(); if (!device_path) { g_warning("No Wi-Fi device to disconnect."); g_task_return_boolean(task, FALSE); return; } g_autoptr(GError) error = NULL; g_autoptr(GDBusProxy) device_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, device_path, NM_DEVICE_INTERFACE, NULL, &error); if (error) { g_warning("Failed to create device proxy for disconnect: %s", error->message); g_task_return_boolean(task, FALSE); return; } g_dbus_proxy_call_sync(device_proxy, "Disconnect", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error); g_task_return_boolean(task, error == NULL); }
 

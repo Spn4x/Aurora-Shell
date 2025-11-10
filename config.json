@@ -9,7 +9,7 @@
     "visible_on_start": true,
     "interactive": true,
     "margin": {
-      "top": 2,
+      "top": 4,
       "bottom": 0,
       "left": 5,
       "right": 5
@@ -36,17 +36,17 @@
     "name": "popover-module",
    "items": [
  {
-    "label": "MPRIS Player",
+    "label": "  MPRIS Player",
     "glyph": "",
     "on-click": "aurora-shell --toggle mpris-player"
   },
   {
-    "label": "Insight",
+    "label": "  Insight",
     "glyph": "",
     "on-click": "aurora-shell --toggle insight"
   },
   {
-    "label": "Cheatsheet",
+    "label": " Cheatsheet",
     "glyph": "",
     "on-click": "aurora-shell --toggle cheatsheet"
   }
@@ -119,6 +119,7 @@
       "width": 275,
       "height": 450
     },
+    "exclusive": false,
     "interactive": true
   },
   {
@@ -137,8 +138,13 @@
     "config": {
         "stylesheet": "cachy-selector.css",
         "size": { "width": 810, "height": 210 },
-        "margins": { "top": 50 }
+        "margin": { "top": 50 }
     }
+},
+{
+    "type": "themer-config",
+    "name": "global-themer-settings",
+    "wallpaper_dir": "~/Pictures/Wallpapers"
 },
   {
     "name": "insight",
@@ -149,11 +155,20 @@
     "visible_on_start": false,
     "interactive": false,
     "margin": {
-      "top": 0,
-      "bottom": 5
+      "bottom": 0
 
     }
   },
+  {
+  "name": "qscreen",
+  "plugin": "/usr/local/lib/aurora-shell/widgets/qscreen.so",
+  "stylesheet": "qscreen.css",
+  "layer": "overlay",
+  "exclusive": true,
+  "visible_on_start": false,
+  "interactive": true,
+  "layer_shell": false
+},
    {
     "type": "daemon",
     "name": "aurora-insight-daemon",

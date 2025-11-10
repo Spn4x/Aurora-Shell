@@ -1,8 +1,8 @@
 /* --- Wallust Placeholders for Launcher --- */
-@define-color bg_color #16171A;
-@define-color text_color #CDEBD6;
-@define-color accent_color #46A44D;
-@define-color surface_color #3D3E42;
+@define-color bg_color #252322;
+@define-color text_color #E4E3DE;
+@define-color accent_color #9A6426;
+@define-color surface_color #4B4947;
 
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
@@ -54,7 +54,7 @@
 .results-scroller viewport {
     background: transparent;
     border: none;
-    min-height: 240px;
+  
 }
 
 /* This now targets our GtkListBox directly using the class we added.

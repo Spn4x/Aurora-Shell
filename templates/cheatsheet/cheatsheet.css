@@ -1,10 +1,10 @@
 /* Cheatsheet Template for Wallust */
 
 /* --- Wallust Color Placeholders --- */
-@define-color background #16171A;
-@define-color foreground #CDEBD6;
-@define-color accent #46A44D;
-@define-color surface #3D3E42;
+@define-color background #252322;
+@define-color foreground #E4E3DE;
+@define-color accent #9A6426;
+@define-color surface #4B4947;
 
 
 @define-color gnome-bg #28282C;

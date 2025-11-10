@@ -10,6 +10,7 @@ control_center_sources = [
   'src/system_monitor.c',
   'src/utils.c',
   'src/wifi_scanner.c',
+  'src/qr.c', 
 ]
 
 control_center_deps = [
@@ -17,6 +18,7 @@ control_center_deps = [
   dependency('libadwaita-1'),
   dependency('gio-2.0'),
   dependency('gio-unix-2.0'),
+  dependency('libqrencode'),
 ]
 
 # Note: Your config.json looks for 'control-center.so'.

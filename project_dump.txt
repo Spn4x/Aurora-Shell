@@ -104,6 +104,22 @@ void free_bluetooth_device_list(GList *list);
 
 #endif // BLUETOOTH_MANAGER_H
 ======================================================================
+### FILE: ././widgets/control-center/src/qr.h
+======================================================================
+#ifndef QR_H
+#define QR_H
+
+#include <gtk/gtk.h>
+
+// Callback for when the QR code is ready (or has failed)
+// The pixbuf will be NULL on failure. The caller owns the returned pixbuf.
+typedef void (*WifiQRCodeCallback)(GdkPixbuf *qr_code, gpointer user_data);
+
+// Asynchronously fetches credentials and generates a QR code for the given SSID.
+void generate_wifi_qr_code_async(const gchar *ssid, WifiQRCodeCallback callback, gpointer user_data);
+
+#endif // QR_H
+======================================================================
 ### FILE: ././widgets/control-center/src/audio_manager.h
 ======================================================================
 #ifndef AUDIO_MANAGER_H
@@ -379,10 +395,10 @@ void wifi_scanner_stop(WifiScanner *scanner) {
 }
 
 void wifi_scanner_trigger_scan(WifiScanner *scanner) {
-    if (!scanner->callback) {
+    if (!scanner || !scanner->callback) {
         return;
     }
-    g_print("Scanning for Wi-Fi networks...\n");
+    g_print("[FORGET DEBUG] 7. 'wifi_scanner_trigger_scan' is now calling the backend to get fresh network data.\n");
     GList *networks = get_available_wifi_networks();
     scanner->callback(networks, scanner->user_data);
 }
@@ -404,10 +420,11 @@ void wifi_scanner_free(WifiScanner *scanner) {
 #include "audio_manager.h"
 #include "brightness_manager.h"
 #include "system_monitor.h"
+#include "qr.h"
 
 const guint WIFI_SCAN_INTERVAL_SECONDS = 10;
 const guint BT_SCAN_INTERVAL_SECONDS = 15;
-const int LIST_REQUESTED_HEIGHT = 155;
+const int LIST_REQUESTED_HEIGHT = 250;
 
 // --- Main State Struct ---
 typedef struct {
@@ -419,8 +436,10 @@ typedef struct {
     BluetoothScanner *bt_scanner;
     SystemMonitor *system_monitor;
     
-    // --- ADD THESE TWO LINES BACK ---
-    GtkWidget *wifi_list_box, *wifi_list_overlay, *wifi_list_spinner;
+      GtkWidget *wifi_connected_header;
+    GtkWidget *wifi_connected_list_box;
+    GtkWidget *wifi_available_header;
+    GtkWidget *wifi_available_list_box;
     
     GtkWidget *bt_list_box, *bt_list_overlay, *bt_list_spinner;
     GtkWidget *audio_list_box;
@@ -431,8 +450,19 @@ typedef struct {
     gboolean airplane_mode_active;
     gboolean wifi_was_on_before_airplane;
     gboolean bt_was_on_before_airplane;
+
+       GtkWidget *bt_connected_header;
+    GtkWidget *bt_connected_list_box;
+    GtkWidget *bt_available_header;
+    GtkWidget *bt_available_list_box;
+    GtkWidget *bt_header_spinner;
     
 } AppWidgets;
+
+typedef struct {
+    AppWidgets *widgets;
+    GtkWidget *row_widget; // The widget that was clicked to initiate the connection
+} WifiOpContext;
 
 // --- Password Prompt Structs ---
 typedef void (*PasswordCancelCallback)(gpointer user_data);
@@ -488,6 +518,18 @@ static void on_wifi_scan_results(GList *networks, gpointer user_data);
 static void on_bt_scan_results(GList *devices, gpointer user_data);
 
 static gboolean initial_state_update(gpointer user_data);
+
+static void on_qr_button_clicked(GtkButton *button, gpointer user_data);
+static void on_qr_code_received(GdkPixbuf *pixbuf, gpointer user_data);
+
+static void on_qr_button_pressed(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data);
+
+typedef struct {
+    GtkWidget *parent_widget; // The button that was clicked
+    GtkPopover *spinner_popover;
+    gchar *ssid;
+} QRCodeCallbackContext;
+
 
 typedef struct {
     GtkPopover *parent_popover;
@@ -662,35 +704,69 @@ static gboolean rescan_after_delay(gpointer user_data) {
     return G_SOURCE_REMOVE; // Run only once
 }
 
+// NEW HELPER: Updates just the sublabel of a Wi-Fi list row.
+static void update_wifi_row_sublabel(GtkWidget *row_widget, const gchar *text) {
+    if (!row_widget || !GTK_IS_BUTTON(row_widget)) return;
+
+    GtkWidget *box = gtk_button_get_child(GTK_BUTTON(row_widget));
+    if (!box) return;
+
+    // The text container is usually the second widget in the box (after the icon stack).
+    GtkWidget *text_container = gtk_widget_get_next_sibling(gtk_widget_get_first_child(box));
+    if (text_container && GTK_IS_BOX(text_container)) {
+        GtkWidget *sublabel_widget = gtk_widget_get_last_child(text_container);
+        if (sublabel_widget && GTK_IS_LABEL(sublabel_widget) && gtk_widget_has_css_class(sublabel_widget, "connected-sublabel")) {
+            gtk_label_set_text(GTK_LABEL(sublabel_widget), text);
+            gtk_widget_set_visible(sublabel_widget, TRUE);
+        }
+    }
+}
 
 static void on_wifi_operation_finished(gboolean success, gpointer user_data) {
-    (void)success;
-    AppWidgets *widgets = user_data;
-    if (!widgets) {
+    WifiOpContext *context = user_data;
+    g_print("[FORGET DEBUG] 5. Callback 'on_wifi_operation_finished' received. Success: %s\n", success ? "TRUE" : "FALSE");
+    
+    if (!context || !context->widgets) {
+        g_warning("[FORGET DEBUG] Context or widgets are NULL in callback. Aborting.\n");
+        if (context) g_free(context);
         return;
     }
 
-    // Stop the spinner and re-enable the UI immediately
-    gtk_spinner_stop(GTK_SPINNER(widgets->wifi_list_spinner));
-    gtk_widget_set_sensitive(GTK_WIDGET(widgets->wifi_list_overlay), TRUE);
-    
-    // Schedule a single, reliable scan to happen after a short delay.
-    // This gives NetworkManager time to update its state before we query it.
-    g_timeout_add(500, rescan_after_delay, widgets);
+    if (success) {
+        g_print("[FORGET DEBUG] 6. Success branch: Triggering IMMEDIATE scan.\n");
+        wifi_scanner_trigger_scan(context->widgets->wifi_scanner);
+    } else {
+        g_print("[FORGET DEBUG] 6. Failure branch: Showing error message and scheduling delayed scan.\n");
+        if (context->row_widget) {
+            GtkWidget* box = gtk_button_get_child(GTK_BUTTON(context->row_widget));
+            GtkWidget* icon_stack = gtk_widget_get_first_child(box);
+            if (icon_stack && GTK_IS_STACK(icon_stack)) {
+                gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "icon");
+            }
+            update_wifi_row_sublabel(context->row_widget, "Authentication failed");
+        }
+        g_timeout_add(2500, rescan_after_delay, context->widgets);
+    }
+
+    g_free(context);
 }
 
+// The callback that runs AFTER the background connect/disconnect thread finishes.
 static void on_bt_operation_finished(gboolean success, gpointer user_data) {
-    (void)success;
+    // --- ADD THIS LOG ---
+    g_print("[UI DEBUG] on_bt_operation_finished callback received. Success: %s\n", success ? "TRUE" : "FALSE");
+
+    (void)success; // We don't use the success flag here, but it's good to see it.
     AppWidgets *widgets = user_data;
     if(!widgets) return;
 
-    // --- FIX IS HERE: Add back the logic to handle the central spinner ---
     // This is safe to call even if the spinner wasn't started.
     gtk_spinner_stop(GTK_SPINNER(widgets->bt_list_spinner));
     gtk_widget_set_sensitive(gtk_overlay_get_child(GTK_OVERLAY(widgets->bt_list_overlay)), TRUE);
-    // --- END FIX ---
 
     // A refresh is needed for both connect and disconnect to update the list state.
+    // --- ADD THIS LOG ---
+    g_print("[UI DEBUG] Triggering UI refresh from on_bt_operation_finished.\n");
     bluetooth_scanner_trigger_scan(widgets->bt_scanner);
 }
 
@@ -703,7 +779,10 @@ static void on_password_ready(const gchar *password, gpointer user_data) {
     AppWidgets *widgets = context->widgets;
     WifiNetwork *net = context->network;
     // Pass our new, smarter callback
-    add_and_activate_wifi_connection_async(net->ssid, net->object_path, password, net->is_secure, on_wifi_operation_finished, widgets);
+    WifiOpContext *op_context = g_new0(WifiOpContext, 1);
+    op_context->widgets = widgets;
+    op_context->row_widget = context->connecting_widget;
+    add_and_activate_wifi_connection_async(net->ssid, net->object_path, password, net->is_secure, on_wifi_operation_finished, op_context);
     // The context is freed by the cancel handler on the dialog destroy signal
 }
 
@@ -747,6 +826,17 @@ static void on_details_button_clicked(GtkButton *button, GtkPopover *parent_popo
 }
 
 // --- Click Handlers (Left-Click) ---
+static void on_qr_button_pressed(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) {
+    (void)n_press; (void)x; (void)y; (void)user_data;
+
+    // Use the GTK_GESTURE() macro to cast the GtkGestureClick* to a GtkGesture*
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+
+    g_print("[UI DEBUG] Gesture captured click on QR button!\n");
+    GtkWidget *button = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture));
+    on_qr_button_clicked(GTK_BUTTON(button), NULL);
+}
+
 static void on_wifi_network_clicked(GtkButton *button, gpointer user_data) {
     // The user_data is now unused, we get the data from the button.
     (void)user_data;
@@ -763,9 +853,14 @@ static void on_wifi_network_clicked(GtkButton *button, gpointer user_data) {
         gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "spinner");
     }
     
+    // Create the context for the async operation callback.
+    WifiOpContext *op_context = g_new0(WifiOpContext, 1);
+    op_context->widgets = widgets;
+    op_context->row_widget = GTK_WIDGET(button);
+
     g_autofree gchar *existing_connection_path = find_connection_for_ssid(net->ssid);
     if (existing_connection_path) {
-        activate_wifi_connection_async(existing_connection_path, net->object_path, on_wifi_operation_finished, widgets);
+        activate_wifi_connection_async(existing_connection_path, net->object_path, on_wifi_operation_finished, op_context);
     } else {
         if (net->is_secure) {
             PasswordDialogContext *context = g_new0(PasswordDialogContext, 1);
@@ -774,8 +869,10 @@ static void on_wifi_network_clicked(GtkButton *button, gpointer user_data) {
             context->connecting_widget = GTK_WIDGET(button);
             GtkWindow *parent_window = GTK_WINDOW(gtk_widget_get_root(GTK_WIDGET(button)));
             show_password_prompt(parent_window, net->ssid, on_password_ready, on_password_cancelled, context);
+            // Free the op_context if we are showing a password prompt, as it will be created again in on_password_ready
+            g_free(op_context);
         } else {
-            add_and_activate_wifi_connection_async(net->ssid, net->object_path, NULL, net->is_secure, on_wifi_operation_finished, widgets);
+            add_and_activate_wifi_connection_async(net->ssid, net->object_path, NULL, net->is_secure, on_wifi_operation_finished, op_context);
         }
     }
 }
@@ -849,9 +946,14 @@ static void on_forget_button_clicked(GtkButton *button, GtkPopover *popover) {
     if (!widgets) return;
 
     const char *ssid = g_object_get_data(G_OBJECT(button), "ssid-to-forget");
-    gtk_widget_set_sensitive(GTK_WIDGET(widgets->wifi_list_overlay), FALSE);
-    gtk_spinner_start(GTK_SPINNER(widgets->wifi_list_spinner));
-    forget_wifi_connection_async(ssid, on_wifi_operation_finished, widgets);
+    g_print("\n\n[FORGET DEBUG] 1. 'Forget' button clicked for SSID: '%s'\n", ssid);
+    
+    GtkWidget *row_widget = g_object_get_data(G_OBJECT(button), "parent-widget");
+
+    WifiOpContext *op_context = g_new0(WifiOpContext, 1);
+    op_context->widgets = widgets;
+    op_context->row_widget = row_widget;
+    forget_wifi_connection_async(ssid, on_wifi_operation_finished, op_context);
 }
 
 static void on_disconnect_button_clicked(GtkButton *button, GtkPopover *popover) {
@@ -859,29 +961,32 @@ static void on_disconnect_button_clicked(GtkButton *button, GtkPopover *popover)
     AppWidgets *widgets = get_widgets_from_child(GTK_WIDGET(button));
     if (!widgets) return;
 
-    gtk_widget_set_sensitive(GTK_WIDGET(widgets->wifi_list_overlay), FALSE);
-    gtk_spinner_start(GTK_SPINNER(widgets->wifi_list_spinner));
-    disconnect_wifi_async(on_wifi_operation_finished, widgets);
+    WifiOpContext *op_context = g_new0(WifiOpContext, 1);
+    op_context->widgets = widgets;
+    op_context->row_widget = NULL; // No specific row for this operation
+    disconnect_wifi_async(on_wifi_operation_finished, op_context);
 }
 
-
+// The helper function that actually calls the disconnect logic.
 static void on_bt_do_disconnect(const gchar* address, GtkWidget* row_widget, AppWidgets* widgets) {
+    g_print("[UI DEBUG] on_bt_do_disconnect called for address: %s\n", address);
+
     if (!widgets || !row_widget) return;
 
-    // Show spinner on the specific row that was acted upon
-    GtkWidget* box = gtk_button_get_child(GTK_BUTTON(row_widget));
-    GtkWidget* icon_stack = gtk_widget_get_first_child(box);
+    // <<< FIX: The spinner is inside the row_widget (a GtkBox) now.
+    GtkWidget* icon_stack = gtk_widget_get_first_child(row_widget);
     if (icon_stack && GTK_IS_STACK(icon_stack)) {
         GtkWidget* spinner = gtk_stack_get_child_by_name(GTK_STACK(icon_stack), "spinner");
         if(spinner) gtk_spinner_start(GTK_SPINNER(spinner));
         gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "spinner");
     }
 
-    // Since on_bt_operation_finished just refreshes the list, it works for both
-    // connect and disconnect without needing a context. We can pass 'widgets' directly.
+    g_print("[UI DEBUG] -> Calling disconnect_bluetooth_device_async...\n");
     disconnect_bluetooth_device_async(address, on_bt_operation_finished, widgets);
 }
 
+
+// The handler for the small "connect" icon button on a disconnected device row.
 static void on_bt_row_connect_button_clicked(GtkButton *button, gpointer user_data) {
     (void)user_data;
     BluetoothDevice *dev = g_object_get_data(G_OBJECT(button), "device-data");
@@ -889,20 +994,24 @@ static void on_bt_row_connect_button_clicked(GtkButton *button, gpointer user_da
     AppWidgets *widgets = get_widgets_from_child(row_widget);
     
     if (dev && row_widget && widgets && !dev->is_connected) {
-        // Show the spinner on the row
-        GtkWidget* box = gtk_button_get_child(GTK_BUTTON(row_widget));
-        GtkWidget* icon_stack = gtk_widget_get_first_child(box);
+        g_print("[UI DEBUG] Connect button clicked for device: '%s' (%s)\n", dev->name, dev->address);
+        
+        // <<< FIX: The spinner is inside the row_widget (a GtkBox) now.
+        // We find it by getting the first child of the box.
+        GtkWidget* icon_stack = gtk_widget_get_first_child(row_widget);
         if (icon_stack && GTK_IS_STACK(icon_stack)) {
             GtkWidget* spinner = gtk_stack_get_child_by_name(GTK_STACK(icon_stack), "spinner");
             if(spinner) gtk_spinner_start(GTK_SPINNER(spinner));
             gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "spinner");
         }
         
+        g_print("[UI DEBUG] -> Calling connect_to_bluetooth_device_async...\n");
         connect_to_bluetooth_device_async(dev->address, on_bt_operation_finished, widgets);
     }
 }
 
 
+// The handler for the small "disconnect" icon button on a connected device row.
 static void on_bt_row_disconnect_button_clicked(GtkButton *button, gpointer user_data) {
     (void)user_data; // This handler doesn't use the user_data parameter, so we mark it as unused.
 
@@ -913,6 +1022,11 @@ static void on_bt_row_disconnect_button_clicked(GtkButton *button, gpointer user
     
     // Ensure all data was retrieved successfully before proceeding.
     if (dev && row_widget && widgets) {
+        // --- ADD THIS LOG ---
+        g_print("[UI DEBUG] Disconnect ICON button clicked for device: '%s' (%s)\n", dev->name, dev->address);
+        
+        // --- ADD THIS LOG ---
+        g_print("[UI DEBUG] -> Calling on_bt_do_disconnect...\n");
         on_bt_do_disconnect(dev->address, row_widget, widgets);
     }
 }
@@ -924,22 +1038,81 @@ static void on_connect_button_clicked(GtkButton *button, GtkPopover *popover) {
     // Retrieve the data we attached to the button
     WifiNetwork *net = g_object_get_data(G_OBJECT(button), "wifi-network-data");
     AppWidgets *widgets = g_object_get_data(G_OBJECT(button), "app-widgets-data");
+    // Get the original row widget that the popover is attached to
+    GtkWidget *row_widget = gtk_widget_get_parent(GTK_WIDGET(popover));
 
     if (!widgets || !net || net->is_active) {
         return;
     }
 
-    // This is the exact same logic from on_wifi_network_clicked()
-    gtk_widget_set_sensitive(GTK_WIDGET(widgets->wifi_list_overlay), FALSE);
-    gtk_spinner_start(GTK_SPINNER(widgets->wifi_list_spinner));
+    // Create context for the callback
+    WifiOpContext *op_context = g_new0(WifiOpContext, 1);
+    op_context->widgets = widgets;
+    op_context->row_widget = row_widget; // Pass the original row widget
 
     g_autofree gchar *existing_connection_path = find_connection_for_ssid(net->ssid);
     if (existing_connection_path) {
-        activate_wifi_connection_async(existing_connection_path, net->object_path, on_wifi_operation_finished, widgets);
+        activate_wifi_connection_async(existing_connection_path, net->object_path, on_wifi_operation_finished, op_context);
     } else {
         // We'll need to add a password prompt here in the future, but for now, it will
         // attempt to connect to open networks or use a previously known password.
-        add_and_activate_wifi_connection_async(net->ssid, net->object_path, NULL, net->is_secure, on_wifi_operation_finished, widgets);
+        add_and_activate_wifi_connection_async(net->ssid, net->object_path, NULL, net->is_secure, on_wifi_operation_finished, op_context);
+    }
+}
+
+// Helper to get the BluetoothDevice data back from a row widget.
+static BluetoothDevice* get_bluetooth_device_from_widget(GtkWidget *row_widget) {
+    if (!row_widget) return NULL;
+    return g_object_get_data(G_OBJECT(row_widget), "device-data");
+}
+
+// The "smart update" function. Modifies a row in-place without rebuilding it.
+static void update_bt_widget_state(GtkWidget *row_hbox, BluetoothDevice *dev) {
+    GtkWidget* icon_stack = gtk_widget_get_first_child(row_hbox);
+    if (!icon_stack) return;
+
+    // Reset Spinner
+    if (GTK_IS_STACK(icon_stack)) {
+        gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "icon");
+    }
+
+    // Update Active State
+    if (dev->is_connected) {
+        gtk_widget_add_css_class(row_hbox, "active-network");
+    } else {
+        gtk_widget_remove_css_class(row_hbox, "active-network");
+    }
+
+    // --- Update Connect/Disconnect Button ---
+    GtkWidget *button_to_remove = NULL;
+    GtkWidget *child = gtk_widget_get_first_child(row_hbox);
+    while (child) {
+        if (gtk_widget_has_css_class(child, "connect-button") || gtk_widget_has_css_class(child, "disconnect-button")) {
+            button_to_remove = child;
+            break;
+        }
+        child = gtk_widget_get_next_sibling(child);
+    }
+    if (button_to_remove) {
+        gtk_box_remove(GTK_BOX(row_hbox), button_to_remove);
+    }
+
+    if (dev->is_connected) {
+        GtkWidget *disconnect_button = gtk_button_new_from_icon_name("network-wired-disconnected-symbolic");
+        gtk_widget_add_css_class(disconnect_button, "disconnect-button");
+        gtk_widget_set_tooltip_text(disconnect_button, "Disconnect");
+        g_object_set_data(G_OBJECT(disconnect_button), "device-data", dev);
+        g_object_set_data(G_OBJECT(disconnect_button), "parent-row-widget", row_hbox);
+        g_signal_connect(disconnect_button, "clicked", G_CALLBACK(on_bt_row_disconnect_button_clicked), NULL);
+        gtk_box_append(GTK_BOX(row_hbox), disconnect_button);
+    } else {
+        GtkWidget *connect_button = gtk_button_new_from_icon_name("network-wired-symbolic");
+        gtk_widget_add_css_class(connect_button, "connect-button");
+        gtk_widget_set_tooltip_text(connect_button, "Connect");
+        g_object_set_data(G_OBJECT(connect_button), "device-data", dev);
+        g_object_set_data(G_OBJECT(connect_button), "parent-row-widget", row_hbox);
+        g_signal_connect(connect_button, "clicked", G_CALLBACK(on_bt_row_connect_button_clicked), NULL);
+        gtk_box_append(GTK_BOX(row_hbox), connect_button);
     }
 }
 
@@ -953,8 +1126,8 @@ static WifiNetwork* get_wifi_network_from_widget(GtkWidget *list_item) {
 static void update_wifi_widget_state(GtkWidget *button, WifiNetwork *net) {
     GtkWidget *box = gtk_button_get_child(GTK_BUTTON(button));
     if (!box) return;
-
-    // --- Update the Icon ---
+ 
+    // --- Update the Icon and Spinner ---
     GtkWidget *icon_stack = gtk_widget_get_first_child(box);
     if (icon_stack && GTK_IS_STACK(icon_stack)) {
         GtkWidget *icon = gtk_stack_get_child_by_name(GTK_STACK(icon_stack), "icon");
@@ -962,55 +1135,60 @@ static void update_wifi_widget_state(GtkWidget *button, WifiNetwork *net) {
             const char *icon_name = get_wifi_icon_name_for_signal(net->strength);
             gtk_image_set_from_icon_name(GTK_IMAGE(icon), icon_name);
         }
-        // Ensure spinner is hidden
+        // Ensure spinner is always hidden on a refresh. It's only shown on click.
         gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "icon");
     }
-
-    // --- Update the Active Checkmark ---
-    gboolean has_check = FALSE;
-    GtkWidget *child = gtk_widget_get_first_child(box);
-    while(child) {
-        if (gtk_widget_get_name(child) && g_strcmp0(gtk_widget_get_name(child), "active-check") == 0) {
-            has_check = TRUE;
-            break;
+ 
+    // --- Update the Active State ---
+    if (net->is_active) {
+        gtk_widget_add_css_class(button, "active-network");
+    } else {
+        gtk_widget_remove_css_class(button, "active-network");
+    }
+    
+    // --- FIX: Update the sublabel text, which was previously skipped ---
+    const gchar *sublabel_text = NULL;
+    if (net->is_active) {
+        switch (net->connectivity) {
+            case WIFI_STATE_CONNECTED: sublabel_text = "Connected"; break;
+            case WIFI_STATE_LIMITED: sublabel_text = "Connected / No Internet Access"; break;
+            case WIFI_STATE_CONNECTING: sublabel_text = "Connecting..."; break;
+            default: sublabel_text = "Connected"; break;
         }
-        child = gtk_widget_get_next_sibling(child);
+    } else if (net->is_known) {
+        sublabel_text = "Saved";
     }
 
-    if (net->is_active && !has_check) {
-        GtkWidget *check_icon = gtk_image_new_from_icon_name("object-select-symbolic");
-        gtk_widget_add_css_class(check_icon, "active-symbol");
-        gtk_widget_set_name(check_icon, "active-check");
-        gtk_box_append(GTK_BOX(box), check_icon);
-        gtk_widget_add_css_class(button, "active-network");
-    } else if (!net->is_active && has_check) {
-        // Find and remove the checkmark specifically
-        GtkWidget *to_remove = NULL;
-        child = gtk_widget_get_first_child(box);
-         while(child) {
-            if (gtk_widget_get_name(child) && g_strcmp0(gtk_widget_get_name(child), "active-check") == 0) {
-                to_remove = child;
-                break;
+    // Find the container for the text labels (it's the next sibling after the icon_stack)
+    GtkWidget *text_container = icon_stack ? gtk_widget_get_next_sibling(icon_stack) : NULL;
+    
+    // We can only update the sublabel if the widget was created with one (i.e., text_container is a GtkBox).
+    if (text_container && GTK_IS_BOX(text_container)) {
+        GtkWidget *sublabel_widget = gtk_widget_get_last_child(text_container);
+        if (sublabel_widget && GTK_IS_LABEL(sublabel_widget) && gtk_widget_has_css_class(sublabel_widget, "connected-sublabel")) {
+            if (sublabel_text) {
+                gtk_label_set_text(GTK_LABEL(sublabel_widget), sublabel_text);
+                gtk_widget_set_visible(sublabel_widget, TRUE);
+            } else {
+                gtk_widget_set_visible(sublabel_widget, FALSE);
             }
-            child = gtk_widget_get_next_sibling(child);
         }
-        if (to_remove) {
-            gtk_box_remove(GTK_BOX(box), to_remove);
-        }
-        gtk_widget_remove_css_class(button, "active-network");
     }
 }
 
 // --- Gesture Handlers (Right-Click) ---
 static void on_wifi_right_click(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) {
-    (void)n_press; (void)x; (void)y; (void)user_data; // user_data is now unused
+    (void)n_press; (void)x; (void)y; (void)user_data;
+
+    // This tells GTK that the right-click has been handled, allowing subsequent clicks on the popover buttons to work correctly.
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+
     GtkWidget *button_widget = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture));
     WifiNetwork *net = get_wifi_network_from_widget(button_widget);
     AppWidgets *widgets = get_widgets_from_child(button_widget);
-    if (!net) return; // Added !net check
+    if (!net) return;
     
     GtkPopover *popover = GTK_POPOVER(gtk_popover_new());
-    // ... the rest of the function is identical to your existing code ...
     g_signal_connect(popover, "closed", G_CALLBACK(on_popover_closed), NULL);
 
     GtkWidget *menu_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -1035,10 +1213,14 @@ static void on_wifi_right_click(GtkGestureClick *gesture, int n_press, double x,
         g_signal_connect(connect_button, "clicked", G_CALLBACK(on_connect_button_clicked), popover);
         gtk_box_append(GTK_BOX(menu_box), connect_button);
 
-        g_autofree gchar *existing_connection_path = find_connection_for_ssid(net->ssid);
-        if (existing_connection_path && is_connection_forgettable(existing_connection_path, net->is_secure)) {
+        if (net->is_known) {
             GtkWidget *forget_button = create_popover_action_button("edit-delete-symbolic", "Forget");
             g_object_set_data(G_OBJECT(forget_button), "ssid-to-forget", (gpointer)net->ssid);
+            
+            // *** THE FIX WAS HERE ***
+            // The 'parent-widget' data must be set on the 'forget_button' itself, not the details button.
+            g_object_set_data(G_OBJECT(forget_button), "parent-widget", button_widget);
+            
             g_signal_connect(forget_button, "clicked", G_CALLBACK(on_forget_button_clicked), popover);
             gtk_box_append(GTK_BOX(menu_box), forget_button);
         }
@@ -1048,6 +1230,7 @@ static void on_wifi_right_click(GtkGestureClick *gesture, int n_press, double x,
     gtk_popover_popup(popover);
 }
 
+// The handler for the "Disconnect" button in the right-click popover menu.
 static void on_bt_popover_disconnect_clicked(GtkButton *button, GtkPopover *popover) {
     gtk_popover_popdown(popover);
     AppWidgets *widgets = get_widgets_from_child(GTK_WIDGET(button));
@@ -1056,6 +1239,11 @@ static void on_bt_popover_disconnect_clicked(GtkButton *button, GtkPopover *popo
     const char *address = g_object_get_data(G_OBJECT(button), "address-to-disconnect");
     GtkWidget *row_widget = g_object_get_data(G_OBJECT(button), "parent-row-widget");
 
+    // --- ADD THIS LOG ---
+    g_print("[UI DEBUG] Popover Disconnect clicked for address: %s\n", address);
+    
+    // --- ADD THIS LOG ---
+    g_print("[UI DEBUG] -> Calling on_bt_do_disconnect....\n");
     on_bt_do_disconnect(address, row_widget, widgets);
 }
 
@@ -1200,273 +1388,453 @@ static void on_bt_devices_updated(GList *devices, gpointer user_data) {
     on_bt_scan_results(devices, user_data);
 }
 
+// The final callback that displays the QR code
+static void on_qr_code_received(GdkPixbuf *pixbuf, gpointer user_data) {
+    QRCodeCallbackContext *context = user_data;
+    
+    if (context->spinner_popover) {
+        gtk_popover_popdown(context->spinner_popover);
+    }
+
+    GtkPopover *qr_popover = GTK_POPOVER(gtk_popover_new());
+    gtk_widget_add_css_class(GTK_WIDGET(qr_popover), "qr-code-popover"); // Add class to popover
+    g_signal_connect(qr_popover, "closed", G_CALLBACK(on_popover_closed), NULL);
+
+    if (pixbuf) {
+        GtkWidget *popover_content_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+        
+        GdkPaintable *paintable = GDK_PAINTABLE(gdk_texture_new_for_pixbuf(pixbuf));
+        GtkWidget *qr_image = gtk_image_new_from_paintable(paintable);
+        gtk_image_set_pixel_size(GTK_IMAGE(qr_image), 256);
+        
+        g_autofree gchar *label_text = g_strdup_printf("Scan to connect to \"%s\"", context->ssid);
+        GtkWidget *info_label = gtk_label_new(label_text);
+        gtk_label_set_wrap(GTK_LABEL(info_label), TRUE);
+        gtk_widget_add_css_class(info_label, "dim-label"); // Keep for fallback
+        gtk_widget_add_css_class(info_label, "qr-info-label"); // Add our specific class
+
+        gtk_box_append(GTK_BOX(popover_content_box), qr_image);
+        gtk_box_append(GTK_BOX(popover_content_box), info_label);
+
+        gtk_widget_set_margin_top(popover_content_box, 15);
+        gtk_widget_set_margin_bottom(popover_content_box, 15);
+        gtk_widget_set_margin_start(popover_content_box, 15);
+        gtk_widget_set_margin_end(popover_content_box, 15);
+
+        gtk_popover_set_child(qr_popover, popover_content_box);
+
+    } else {
+        GtkWidget *error_label = gtk_label_new("Could not retrieve Wi-Fi password.\nCheck terminal for D-Bus or Polkit errors.");
+        gtk_label_set_wrap(GTK_LABEL(error_label), TRUE);
+        gtk_widget_set_margin_start(error_label, 15);
+        gtk_widget_set_margin_end(error_label, 15);
+        gtk_widget_set_margin_top(error_label, 15);
+        gtk_widget_set_margin_bottom(error_label, 15);
+        gtk_popover_set_child(qr_popover, error_label);
+    }
+
+    gtk_widget_set_parent(GTK_WIDGET(qr_popover), context->parent_widget);
+    gtk_popover_popup(qr_popover);
+    
+    g_free(context->ssid);
+    g_free(context);
+}
+
+
+static void on_qr_button_clicked(GtkButton *button, gpointer user_data) {
+    (void)user_data;
+    WifiNetwork *net = g_object_get_data(G_OBJECT(button), "wifi-network-data");
+    if (!net) return;
+    
+    GtkPopover *spinner_popover = GTK_POPOVER(gtk_popover_new());
+    GtkWidget *spinner = gtk_spinner_new();
+    gtk_spinner_start(GTK_SPINNER(spinner));
+    gtk_widget_set_margin_start(spinner, 15);
+    gtk_widget_set_margin_end(spinner, 15);
+    gtk_widget_set_margin_top(spinner, 15);
+    gtk_widget_set_margin_bottom(spinner, 15);
+    gtk_popover_set_child(spinner_popover, spinner);
+    gtk_widget_set_parent(GTK_WIDGET(spinner_popover), GTK_WIDGET(button));
+    gtk_popover_popup(spinner_popover);
+
+    QRCodeCallbackContext *context = g_new0(QRCodeCallbackContext, 1);
+    context->parent_widget = GTK_WIDGET(button);
+    context->spinner_popover = spinner_popover;
+    context->ssid = g_strdup(net->ssid); 
+    
+    generate_wifi_qr_code_async(net->ssid, on_qr_code_received, context);
+}
+
+
+
+// This helper function makes our icon usage robust.
+static const char* get_best_available_icon(const char **icon_names) {
+    GtkIconTheme *icon_theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
+    for (int i = 0; icon_names[i] != NULL; i++) {
+        if (gtk_icon_theme_has_icon(icon_theme, icon_names[i])) {
+            return icon_names[i];
+        }
+    }
+    // Return the last icon in the list as the ultimate fallback.
+    return icon_names[g_strv_length((gchar**)icon_names) - 1];
+}
+
 static void on_wifi_scan_results(GList *networks, gpointer user_data) {
     AppWidgets *widgets = (AppWidgets*)user_data;
-    if(!widgets) { 
+    if (!widgets || !widgets->wifi_connected_list_box || !widgets->wifi_available_list_box) { 
         free_wifi_network_list(networks); 
         return; 
     }
 
-    GtkWidget *list_box = widgets->wifi_list_box;
+    GtkWidget *connected_list = widgets->wifi_connected_list_box;
+    GtkWidget *available_list = widgets->wifi_available_list_box;
 
-    // Handle case where Wi-Fi is disabled
-    if (!is_wifi_enabled()) {
-        GtkWidget *child;
-        while ((child = gtk_widget_get_first_child(list_box))) { 
-            gtk_box_remove(GTK_BOX(list_box), child); 
-        }
-        GtkWidget *label = gtk_label_new("Wi-Fi is turned off");
-        gtk_widget_set_vexpand(label, TRUE);
-        gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
-        gtk_box_append(GTK_BOX(list_box), label);
-        free_wifi_network_list(networks);
-        return;
+    GHashTable *existing_widgets = g_hash_table_new(g_str_hash, g_str_equal);
+    for (GtkWidget *child = gtk_widget_get_first_child(connected_list); child != NULL; child = gtk_widget_get_next_sibling(child)) {
+        WifiNetwork *net = get_wifi_network_from_widget(child);
+        if (net && net->ssid) g_hash_table_insert(existing_widgets, (gpointer)net->ssid, child);
+    }
+    for (GtkWidget *child = gtk_widget_get_first_child(available_list); child != NULL; child = gtk_widget_get_next_sibling(child)) {
+        WifiNetwork *net = get_wifi_network_from_widget(child);
+        if (net && net->ssid) g_hash_table_insert(existing_widgets, (gpointer)net->ssid, child);
     }
 
-    // --- Smart Refresh / Reconciliation Logic ---
-    GHashTable *new_ssids = g_hash_table_new(g_str_hash, g_str_equal);
-    
-    // 1. First pass: Update existing widgets and identify new ones.
+    GHashTable *seen_ssids = g_hash_table_new(g_str_hash, g_str_equal);
     for (GList *l = networks; l != NULL; l = l->next) {
         WifiNetwork *net_from_scan = l->data;
-        g_hash_table_insert(new_ssids, net_from_scan->ssid, net_from_scan); // Keep track of all SSIDs in the new scan
-        
-        gboolean found_and_updated = FALSE;
-        GtkWidget *child = gtk_widget_get_first_child(list_box);
-        while (child) {
-            WifiNetwork *old_net_data = get_wifi_network_from_widget(child);
-            if (old_net_data && g_strcmp0(old_net_data->ssid, net_from_scan->ssid) == 0) {
-                // Found a match! Update it in place.
-                // Note: We don't need to g_free anything here, just update the data.
-                old_net_data->strength = net_from_scan->strength;
-                old_net_data->is_active = net_from_scan->is_active;
-                // Update the UI state of the existing widget
-                update_wifi_widget_state(child, old_net_data);
-                found_and_updated = TRUE;
-                break;
-            }
-            child = gtk_widget_get_next_sibling(child);
-        }
+        if (!net_from_scan || !net_from_scan->ssid) continue;
 
-        if (!found_and_updated) {
-            // This is a new network, create a new widget for it.
+        g_hash_table_insert(seen_ssids, (gpointer)net_from_scan->ssid, GINT_TO_POINTER(1));
+        GtkWidget *existing_button = g_hash_table_lookup(existing_widgets, net_from_scan->ssid);
+
+        if (existing_button) {
+            WifiNetwork *net_copy = get_wifi_network_from_widget(existing_button);
+            net_copy->strength = net_from_scan->strength;
+            net_copy->is_active = net_from_scan->is_active;
+            net_copy->connectivity = net_from_scan->connectivity;
+            net_copy->is_known = net_from_scan->is_known;
+            update_wifi_widget_state(existing_button, net_copy);
+            GtkWidget *box = gtk_button_get_child(GTK_BUTTON(existing_button));
+            GtkWidget *last_child = gtk_widget_get_last_child(box);
+            gboolean qr_button_exists = (last_child && gtk_widget_has_css_class(last_child, "wifi-qr-button"));
+            if (net_copy->is_active && !qr_button_exists) {
+                GtkWidget *qr_button = gtk_button_new_from_icon_name("view-grid-symbolic");
+                gtk_widget_add_css_class(qr_button, "wifi-qr-button");
+                gtk_widget_set_tooltip_text(qr_button, "Show QR code to connect");
+                gtk_widget_set_valign(qr_button, GTK_ALIGN_CENTER);
+                g_object_set_data(G_OBJECT(qr_button), "wifi-network-data", net_copy);
+                GtkGesture *qr_click_gesture = gtk_gesture_click_new();
+                g_signal_connect(qr_click_gesture, "pressed", G_CALLBACK(on_qr_button_pressed), NULL);
+                gtk_widget_add_controller(qr_button, GTK_EVENT_CONTROLLER(qr_click_gesture));
+                gtk_box_append(GTK_BOX(box), qr_button);
+            } else if (!net_copy->is_active && qr_button_exists) {
+                gtk_box_remove(GTK_BOX(box), last_child);
+            }
+            GtkWidget *current_parent = gtk_widget_get_parent(existing_button);
+            if (net_copy->is_active && current_parent != connected_list) {
+                gtk_widget_unparent(existing_button);
+                gtk_box_append(GTK_BOX(connected_list), existing_button);
+            } else if (!net_copy->is_active && current_parent != available_list) {
+                gtk_widget_unparent(existing_button);
+                gtk_box_append(GTK_BOX(available_list), existing_button);
+            }
+        } else {
             WifiNetwork *net_copy = g_new0(WifiNetwork, 1);
+            *net_copy = *net_from_scan;
             net_copy->ssid = g_strdup(net_from_scan->ssid);
             net_copy->object_path = g_strdup(net_from_scan->object_path);
-            net_copy->strength = net_from_scan->strength;
-            net_copy->is_secure = net_from_scan->is_secure;
-            net_copy->is_active = net_from_scan->is_active;
-
             GtkWidget *entry_button = gtk_button_new();
-            
-            // --- THE CORE FIX ---
-            // Attach the data directly to the button. This also manages its memory.
             g_object_set_data_full(G_OBJECT(entry_button), "wifi-network-data", net_copy, (GDestroyNotify)wifi_network_free);
-            
             gtk_widget_add_css_class(entry_button, "list-item-button");
             GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
             gtk_button_set_child(GTK_BUTTON(entry_button), box);
-            
             GtkWidget *icon_stack = gtk_stack_new();
-            gtk_widget_set_name(icon_stack, "icon-stack");
+            gtk_widget_set_valign(icon_stack, GTK_ALIGN_CENTER);
             const char *icon_name = get_wifi_icon_name_for_signal(net_copy->strength);
-            GtkWidget *icon = gtk_image_new_from_icon_name(icon_name);
-            GtkWidget *spinner = gtk_spinner_new();
-            gtk_stack_add_named(GTK_STACK(icon_stack), icon, "icon");
-            gtk_stack_add_named(GTK_STACK(icon_stack), spinner, "spinner");
+            gtk_stack_add_named(GTK_STACK(icon_stack), gtk_image_new_from_icon_name(icon_name), "icon");
+            gtk_stack_add_named(GTK_STACK(icon_stack), gtk_spinner_new(), "spinner");
             gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "icon");
             gtk_box_append(GTK_BOX(box), icon_stack);
-            
+            GtkWidget *text_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+            gtk_widget_set_hexpand(text_vbox, TRUE);
+            gtk_box_append(GTK_BOX(box), text_vbox);
             GtkWidget *label = gtk_label_new(net_copy->ssid);
-            gtk_widget_set_halign(label, GTK_ALIGN_START);
-            gtk_widget_set_hexpand(label, TRUE);
-            gtk_box_append(GTK_BOX(box), label);
-
-            if (net_copy->is_secure) {
-                gtk_box_append(GTK_BOX(box), gtk_image_new_from_icon_name("network-wireless-encrypted-symbolic"));
-            }
+            gtk_label_set_xalign(GTK_LABEL(label), 0.0);
+            gtk_box_append(GTK_BOX(text_vbox), label);
+            GtkWidget *sublabel = gtk_label_new("");
+            gtk_widget_add_css_class(sublabel, "connected-sublabel");
+            gtk_label_set_xalign(GTK_LABEL(sublabel), 0.0);
+            gtk_box_append(GTK_BOX(text_vbox), sublabel);
+            const gchar *sublabel_text = NULL;
             if (net_copy->is_active) {
-                GtkWidget *check_icon = gtk_image_new_from_icon_name("object-select-symbolic");
-                gtk_widget_add_css_class(check_icon, "active-symbol");
-                gtk_widget_set_name(check_icon, "active-check");
-                gtk_box_append(GTK_BOX(box), check_icon);
-                gtk_widget_add_css_class(entry_button, "active-network");
+                switch (net_copy->connectivity) {
+                    case WIFI_STATE_CONNECTED: sublabel_text = "Connected"; break;
+                    case WIFI_STATE_LIMITED: sublabel_text = "Connected / No Internet Access"; break;
+                    case WIFI_STATE_CONNECTING: sublabel_text = "Connecting..."; break;
+                    default: sublabel_text = "Connected"; break;
+                }
+            } else if (net_copy->is_known) {
+                sublabel_text = "Saved";
             }
-            
-            // Connect signals. The data is now ignored in the "clicked" handler's user_data.
+            if (sublabel_text) {
+                gtk_label_set_text(GTK_LABEL(sublabel), sublabel_text);
+                gtk_widget_set_visible(sublabel, TRUE);
+            } else {
+                gtk_widget_set_visible(sublabel, FALSE);
+            }
+            if (net_copy->is_secure) {
+                GtkWidget *secure_icon = gtk_image_new_from_icon_name("network-wireless-encrypted-symbolic");
+                gtk_widget_set_valign(secure_icon, GTK_ALIGN_CENTER);
+                gtk_box_append(GTK_BOX(box), secure_icon);
+            }
             g_signal_connect(entry_button, "clicked", G_CALLBACK(on_wifi_network_clicked), NULL);
-            
+
+            // *** THE FIX: Use GtkGestureClick on the "released" signal. ***
             GtkGesture *right_click = gtk_gesture_click_new();
             gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right_click), GDK_BUTTON_SECONDARY);
-            // The data is now ignored in the "pressed" handler's user_data as well.
-            g_signal_connect(right_click, "pressed", G_CALLBACK(on_wifi_right_click), NULL);
+            g_signal_connect(right_click, "released", G_CALLBACK(on_wifi_right_click), NULL);
             gtk_widget_add_controller(entry_button, GTK_EVENT_CONTROLLER(right_click));
+            // *** END FIX ***
 
-            gtk_box_append(GTK_BOX(list_box), entry_button);
+            if (net_copy->is_active) {
+                GtkWidget *qr_button = gtk_button_new_from_icon_name("view-grid-symbolic");
+                gtk_widget_add_css_class(qr_button, "wifi-qr-button");
+                gtk_widget_set_tooltip_text(qr_button, "Show QR code to connect");
+                gtk_widget_set_valign(qr_button, GTK_ALIGN_CENTER);
+                g_object_set_data(G_OBJECT(qr_button), "wifi-network-data", net_copy);
+                GtkGesture *qr_click_gesture = gtk_gesture_click_new();
+                g_signal_connect(qr_click_gesture, "pressed", G_CALLBACK(on_qr_button_pressed), NULL);
+                gtk_widget_add_controller(qr_button, GTK_EVENT_CONTROLLER(qr_click_gesture));
+                gtk_box_append(GTK_BOX(box), qr_button);
+                gtk_box_append(GTK_BOX(connected_list), entry_button);
+            } else {
+                gtk_box_append(GTK_BOX(available_list), entry_button);
+            }
         }
     }
 
-    // 2. Second pass: Remove any widgets that are no longer in the new scan results.
-    GList *children_to_remove = NULL;
-    GtkWidget *child = gtk_widget_get_first_child(list_box);
-    while (child) {
-        WifiNetwork *net = get_wifi_network_from_widget(child);
-        // If the widget has data but its SSID is not in the new scan, mark it for removal.
-        if (net && !g_hash_table_contains(new_ssids, net->ssid)) {
-            children_to_remove = g_list_prepend(children_to_remove, child);
+    GList *widgets_to_remove = NULL;
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, existing_widgets);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        if (!g_hash_table_contains(seen_ssids, key)) {
+            widgets_to_remove = g_list_prepend(widgets_to_remove, value);
         }
-        child = gtk_widget_get_next_sibling(child);
     }
+    for (GList *l = widgets_to_remove; l != NULL; l = l->next) {
+        GtkWidget *widget_to_remove = l->data;
+        if (GTK_IS_WIDGET(widget_to_remove)) {
+            gtk_widget_unparent(widget_to_remove);
+        }
+    }
+    g_list_free(widgets_to_remove);
+    g_hash_table_destroy(existing_widgets);
+    g_hash_table_destroy(seen_ssids);
 
-    for (GList *l = children_to_remove; l != NULL; l = l->next) {
-        gtk_box_remove(GTK_BOX(list_box), l->data);
+    gboolean has_connected = (gtk_widget_get_first_child(connected_list) != NULL);
+    gboolean has_available = (gtk_widget_get_first_child(available_list) != NULL);
+    if (!is_wifi_enabled()) {
+        GtkWidget *child;
+        while ((child = gtk_widget_get_first_child(connected_list))) { gtk_box_remove(GTK_BOX(connected_list), child); }
+        while ((child = gtk_widget_get_first_child(available_list))) { gtk_box_remove(GTK_BOX(available_list), child); }
+        GtkWidget *label = gtk_label_new("Wi-Fi is turned off");
+        gtk_widget_set_vexpand(label, TRUE);
+        gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
+        gtk_box_append(GTK_BOX(available_list), label);
+        has_connected = FALSE;
+        has_available = TRUE;
     }
-    
-    g_list_free(children_to_remove);
-    g_hash_table_destroy(new_ssids);
+    gtk_widget_set_visible(widgets->wifi_connected_header, has_connected);
+    gtk_widget_set_visible(widgets->wifi_available_header, has_available);
     free_wifi_network_list(networks);
 }
 
 static void on_bt_scan_results(GList *devices, gpointer user_data) {
     AppWidgets *widgets = (AppWidgets*)user_data;
-    if(!widgets) {
+    if(!widgets || !widgets->bt_connected_list_box || !widgets->bt_available_list_box) {
         free_bluetooth_device_list(devices);
         return;
     }
 
-    GtkWidget *list_box = widgets->bt_list_box;
+    gtk_spinner_stop(GTK_SPINNER(widgets->bt_header_spinner));
+    GtkWidget *connected_list = widgets->bt_connected_list_box;
+    GtkWidget *available_list = widgets->bt_available_list_box;
+
     GtkWidget *child;
-    while ((child = gtk_widget_get_first_child(list_box)) != NULL) {
-        gtk_box_remove(GTK_BOX(list_box), child);
-    }
+    while ((child = gtk_widget_get_first_child(connected_list)) != NULL) { gtk_box_remove(GTK_BOX(connected_list), child); }
+    while ((child = gtk_widget_get_first_child(available_list)) != NULL) { gtk_box_remove(GTK_BOX(available_list), child); }
+
+    gboolean has_connected = FALSE;
+    gboolean has_available = FALSE;
 
     if (g_list_length(devices) == 0) {
-        gtk_box_append(GTK_BOX(list_box), gtk_label_new("No Bluetooth devices found."));
-        free_bluetooth_device_list(devices);
-        return;
-    }
+        GtkWidget *placeholder = gtk_label_new("No Bluetooth devices found.");
+        gtk_widget_set_vexpand(placeholder, TRUE);
+        gtk_widget_set_valign(placeholder, GTK_ALIGN_CENTER);
+        gtk_box_append(GTK_BOX(available_list), placeholder);
+    } else {
+        for (GList *l = devices; l != NULL; l = l->next) {
+            BluetoothDevice *dev = l->data;
+            BluetoothDevice *dev_copy = g_new0(BluetoothDevice, 1);
+            dev_copy->address = g_strdup(dev->address);
+            dev_copy->name = g_strdup(dev->name);
+            dev_copy->is_connected = dev->is_connected;
 
-    for (GList *l = devices; l != NULL; l = l->next) {
-        BluetoothDevice *dev_from_scan = l->data;
-        // dev_copy is the data that will be owned by the row widget.
-        BluetoothDevice *dev_copy = g_new0(BluetoothDevice, 1);
-        dev_copy->address = g_strdup(dev_from_scan->address);
-        dev_copy->name = g_strdup(dev_from_scan->name);
-        dev_copy->is_connected = dev_from_scan->is_connected;
+            GtkWidget *row_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+            gtk_widget_add_css_class(row_hbox, "list-item-button");
+            g_object_set_data_full(G_OBJECT(row_hbox), "device-data", dev_copy, (GDestroyNotify)bluetooth_device_free);
 
-        GtkWidget *entry_button = gtk_button_new();
-        gtk_widget_add_css_class(entry_button, "list-item-button");
-        
-        // --- DATA OWNERSHIP FIX ---
-        // The main row button now owns the data and is responsible for freeing it.
-        g_object_set_data_full(G_OBJECT(entry_button), "device-data", dev_copy, (GDestroyNotify)bluetooth_device_free);
-        
-        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-        gtk_button_set_child(GTK_BUTTON(entry_button), box);
-        
-        GtkWidget *icon_stack = gtk_stack_new();
-        GtkWidget *icon = gtk_image_new_from_icon_name("bluetooth-active-symbolic");
-        GtkWidget *spinner = gtk_spinner_new();
-        gtk_stack_add_named(GTK_STACK(icon_stack), icon, "icon");
-        gtk_stack_add_named(GTK_STACK(icon_stack), spinner, "spinner");
-        gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "icon");
-        gtk_box_append(GTK_BOX(box), icon_stack);
-
-        GtkWidget *label = gtk_label_new(dev_copy->name);
-        gtk_widget_set_halign(label, GTK_ALIGN_START);
-        gtk_widget_set_hexpand(label, TRUE);
-        gtk_box_append(GTK_BOX(box), label);
-        
-        if (dev_copy->is_connected) {
-            gtk_widget_add_css_class(entry_button, "active-network");
+            GtkWidget *icon_stack = gtk_stack_new();
+            gtk_widget_set_valign(icon_stack, GTK_ALIGN_CENTER);
+            gtk_stack_add_named(GTK_STACK(icon_stack), gtk_image_new_from_icon_name("bluetooth-active-symbolic"), "icon");
+            gtk_stack_add_named(GTK_STACK(icon_stack), gtk_spinner_new(), "spinner");
+            gtk_stack_set_visible_child_name(GTK_STACK(icon_stack), "icon");
+            gtk_box_append(GTK_BOX(row_hbox), icon_stack);
             
-            GtkWidget *disconnect_button = gtk_button_new_from_icon_name("network-wired-disconnected-symbolic");
-            gtk_widget_add_css_class(disconnect_button, "disconnect-button");
-            gtk_widget_set_tooltip_text(disconnect_button, "Disconnect");
+            // --- THIS IS THE KEY CONDITIONAL LOGIC ---
+            if (dev->is_connected) {
+                // If connected, create the VBox for Name + Sublabel
+                GtkWidget *text_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+                gtk_widget_set_hexpand(text_vbox, TRUE);
+                gtk_box_append(GTK_BOX(row_hbox), text_vbox);
 
-            // Give the button a plain reference to the data, but don't transfer ownership.
-            g_object_set_data(G_OBJECT(disconnect_button), "device-data", dev_copy);
-            g_object_set_data(G_OBJECT(disconnect_button), "parent-row-widget", entry_button);
-            
-            g_signal_connect(disconnect_button, "clicked", G_CALLBACK(on_bt_row_disconnect_button_clicked), NULL);
-            gtk_box_append(GTK_BOX(box), disconnect_button);
+                GtkWidget *label = gtk_label_new(dev_copy->name);
+                gtk_label_set_xalign(GTK_LABEL(label), 0.0);
+                gtk_box_append(GTK_BOX(text_vbox), label);
 
-        } else {
-            // --- ADD THE CONNECT BUTTON ---
-            GtkWidget *connect_button = gtk_button_new_from_icon_name("network-wired-symbolic");
-            gtk_widget_add_css_class(connect_button, "connect-button"); // For styling
-            gtk_widget_set_tooltip_text(connect_button, "Connect");
+                GtkWidget *sublabel = gtk_label_new("Connected");
+                gtk_widget_add_css_class(sublabel, "connected-sublabel");
+                gtk_label_set_xalign(GTK_LABEL(sublabel), 0.0);
+                gtk_box_append(GTK_BOX(text_vbox), sublabel);
 
-            // Give it a plain reference to the data.
-            g_object_set_data(G_OBJECT(connect_button), "device-data", dev_copy);
-            g_object_set_data(G_OBJECT(connect_button), "parent-row-widget", entry_button);
+            } else {
+                // If not connected, just add the name label directly
+                GtkWidget *label = gtk_label_new(dev_copy->name);
+                gtk_label_set_xalign(GTK_LABEL(label), 0.0);
+                gtk_widget_set_hexpand(label, TRUE);
+                gtk_widget_set_valign(label, GTK_ALIGN_CENTER); // Center it vertically
+                gtk_box_append(GTK_BOX(row_hbox), label);
+            }
 
-            g_signal_connect(connect_button, "clicked", G_CALLBACK(on_bt_row_connect_button_clicked), NULL);
-            gtk_box_append(GTK_BOX(box), connect_button);
-            
-            // The main row is no longer clickable itself.
-            // g_signal_connect(entry_button, "clicked", G_CALLBACK(on_bluetooth_device_clicked), dev_copy);
+            update_bt_widget_state(row_hbox, dev_copy);
+
+            GtkGesture *right_click = gtk_gesture_click_new();
+            gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right_click), GDK_BUTTON_SECONDARY);
+            g_signal_connect(right_click, "pressed", G_CALLBACK(on_bluetooth_right_click), dev_copy);
+            gtk_widget_add_controller(row_hbox, GTK_EVENT_CONTROLLER(right_click));
+
+            if (dev->is_connected) {
+                gtk_box_append(GTK_BOX(connected_list), row_hbox);
+                has_connected = TRUE;
+            } else {
+                gtk_box_append(GTK_BOX(available_list), row_hbox);
+                has_available = TRUE;
+            }
         }
-        
-        // Remove the old direct signal connection for freeing memory.
-        // g_signal_connect_swapped(entry_button, "destroy", G_CALLBACK(bluetooth_device_free), dev_copy);
-
-        // Right-click still works on the entire row.
-        GtkGesture *right_click = gtk_gesture_click_new();
-        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right_click), GDK_BUTTON_SECONDARY);
-        // Pass the dev_copy here so it's available to the handler
-        g_signal_connect(right_click, "pressed", G_CALLBACK(on_bluetooth_right_click), dev_copy);
-        gtk_widget_add_controller(entry_button, GTK_EVENT_CONTROLLER(right_click));
-
-        gtk_box_append(GTK_BOX(list_box), entry_button);
     }
+
+    gtk_widget_set_visible(widgets->bt_connected_header, has_connected);
+    gtk_widget_set_visible(widgets->bt_available_header, has_available || g_list_length(devices) == 0);
+
     free_bluetooth_device_list(devices);
 }
 
 // --- Page & Section Builders ---
 static GtkWidget* create_wifi_page(AppWidgets *widgets) {
-    GtkWidget *list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-    gtk_widget_set_margin_top(list_box, 8);
-    widgets->wifi_list_box = list_box;
+    // The main container for the page is a vertical box
+    GtkWidget *page_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_margin_top(GTK_WIDGET(page_vbox), 8);
 
+    // --- SECTION 1: Connected Network ---
+    // Note: Wi-Fi usually only has one connected network, so the header is singular.
+    widgets->wifi_connected_header = gtk_label_new("Connected network");
+    gtk_widget_add_css_class(widgets->wifi_connected_header, "bt-header"); // Reuse bt-header style
+    gtk_label_set_xalign(GTK_LABEL(widgets->wifi_connected_header), 0.0);
+    gtk_widget_set_visible(widgets->wifi_connected_header, FALSE); // Hide initially
+    gtk_box_append(GTK_BOX(page_vbox), widgets->wifi_connected_header);
+
+    widgets->wifi_connected_list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_box_append(GTK_BOX(page_vbox), widgets->wifi_connected_list_box);
+
+    // --- SECTION 2: Available Networks ---
+    widgets->wifi_available_header = gtk_label_new("Available networks");
+    gtk_widget_add_css_class(widgets->wifi_available_header, "bt-header"); // Reuse bt-header style
+    gtk_label_set_xalign(GTK_LABEL(widgets->wifi_available_header), 0.0);
+    gtk_widget_set_visible(widgets->wifi_available_header, FALSE); // Hide initially
+    gtk_box_append(GTK_BOX(page_vbox), widgets->wifi_available_header);
+    
+    widgets->wifi_available_list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_box_append(GTK_BOX(page_vbox), widgets->wifi_available_list_box);
+
+    // Create one scrolled window to contain the whole page
     GtkWidget *scrolled_window = gtk_scrolled_window_new();
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled_window), list_box);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled_window), page_vbox);
     gtk_widget_set_size_request(scrolled_window, -1, LIST_REQUESTED_HEIGHT);
     gtk_widget_set_vexpand(scrolled_window, FALSE);
     gtk_widget_set_valign(scrolled_window, GTK_ALIGN_START);
 
+    // We can reuse the overlay logic for a central spinner if needed for connect/disconnect ops
     GtkWidget *overlay = gtk_overlay_new();
-    GtkWidget *spinner = gtk_spinner_new();
-    gtk_widget_set_halign(spinner, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(spinner, GTK_ALIGN_CENTER);
     gtk_overlay_set_child(GTK_OVERLAY(overlay), scrolled_window);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), spinner);
-    widgets->wifi_list_overlay = overlay;
-    widgets->wifi_list_spinner = spinner;
+    
     return overlay;
 }
 
 static GtkWidget* create_bluetooth_page(AppWidgets *widgets) {
-    GtkWidget *list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-    gtk_widget_set_margin_top(list_box, 8);
-    widgets->bt_list_box = list_box;
+    // The main container for the page is a vertical box
+    GtkWidget *page_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_margin_top(GTK_WIDGET(page_vbox), 8);
 
+    // --- SECTION 1: Connected Devices ---
+    widgets->bt_connected_header = gtk_label_new("Connected devices");
+    gtk_widget_add_css_class(widgets->bt_connected_header, "bt-header");
+    gtk_label_set_xalign(GTK_LABEL(widgets->bt_connected_header), 0.0);
+    gtk_widget_set_visible(widgets->bt_connected_header, FALSE); // Hide initially
+    gtk_box_append(GTK_BOX(page_vbox), widgets->bt_connected_header);
+
+    widgets->bt_connected_list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_box_append(GTK_BOX(page_vbox), widgets->bt_connected_list_box);
+
+    // --- SECTION 2: Available Devices ---
+    GtkWidget *available_header_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    widgets->bt_available_header = available_header_box;
+    gtk_widget_add_css_class(widgets->bt_available_header, "bt-header");
+    gtk_widget_set_visible(widgets->bt_available_header, FALSE); // Hide initially
+    
+    GtkWidget* available_label = gtk_label_new("Available devices");
+    gtk_widget_set_hexpand(available_label, TRUE);
+    gtk_label_set_xalign(GTK_LABEL(available_label), 0.0);
+    
+    widgets->bt_header_spinner = gtk_spinner_new();
+
+    gtk_box_append(GTK_BOX(available_header_box), available_label);
+    gtk_box_append(GTK_BOX(available_header_box), widgets->bt_header_spinner);
+    gtk_box_append(GTK_BOX(page_vbox), widgets->bt_available_header);
+    
+    widgets->bt_available_list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_box_append(GTK_BOX(page_vbox), widgets->bt_available_list_box);
+
+    // Create one scrolled window to contain the whole page
     GtkWidget *scrolled_window = gtk_scrolled_window_new();
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled_window), list_box);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled_window), page_vbox);
     gtk_widget_set_size_request(scrolled_window, -1, LIST_REQUESTED_HEIGHT);
     gtk_widget_set_vexpand(scrolled_window, FALSE);
     gtk_widget_set_valign(scrolled_window, GTK_ALIGN_START);
 
+    // The overlay now goes around this single scrolled window
     GtkWidget *overlay = gtk_overlay_new();
-    GtkWidget *spinner = gtk_spinner_new();
-    gtk_widget_set_halign(spinner, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(spinner, GTK_ALIGN_CENTER);
     gtk_overlay_set_child(GTK_OVERLAY(overlay), scrolled_window);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), spinner);
+    
+    // We still keep the main spinner for initial loading or major operations
+    widgets->bt_list_spinner = gtk_spinner_new();
+    gtk_widget_set_halign(widgets->bt_list_spinner, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(widgets->bt_list_spinner, GTK_ALIGN_CENTER);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), widgets->bt_list_spinner);
     widgets->bt_list_overlay = overlay;
-    widgets->bt_list_spinner = spinner;
+
     return overlay;
 }
 
@@ -1518,14 +1886,20 @@ static void on_expandable_toggle_toggled(GtkToggleButton *toggled_button, AppWid
         other_toggle1 = widgets->bt_toggle;     handler_id1 = widgets->bt_toggle_handler_id;
         other_toggle2 = widgets->audio_toggle;  handler_id2 = widgets->audio_toggle_handler_id;
         wifi_scanner_start(widgets->wifi_scanner, WIFI_SCAN_INTERVAL_SECONDS);
-    } else if (toggled_button == GTK_TOGGLE_BUTTON(widgets->bt_toggle)) {
+    }   else if (toggled_button == GTK_TOGGLE_BUTTON(widgets->bt_toggle)) {
         target_page = "bt_page";
         other_toggle1 = widgets->wifi_toggle;   handler_id1 = widgets->wifi_toggle_handler_id;
         other_toggle2 = widgets->audio_toggle;  handler_id2 = widgets->audio_toggle_handler_id;
-        // --- MODIFICATION IS HERE ---
-        // The interval is no longer needed as scanning is event-based.
+
+        // --- START OF CORRECTION ---
+        // Make the "Available devices" header visible and start its spinner
+        // to show that a scan is in progress.
+        gtk_widget_set_visible(widgets->bt_available_header, TRUE);
+        gtk_spinner_start(GTK_SPINNER(widgets->bt_header_spinner));
+        // --- END OF CORRECTION ---
+        
         bluetooth_scanner_start(widgets->bt_scanner);
-    } else if (toggled_button == GTK_TOGGLE_BUTTON(widgets->audio_toggle)) {
+    }  else if (toggled_button == GTK_TOGGLE_BUTTON(widgets->audio_toggle)) {
         target_page = "audio_page";
         other_toggle1 = widgets->wifi_toggle;   handler_id1 = widgets->wifi_toggle_handler_id;
         other_toggle2 = widgets->bt_toggle;     handler_id2 = widgets->bt_toggle_handler_id;
@@ -1690,7 +2064,6 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
 ======================================================================
 ### FILE: ././widgets/control-center/src/network_manager.c
 ======================================================================
-// ===== src/network_manager.c =====
 #include "network_manager.h"
 #include <gio/gio.h>
 #include <string.h>
@@ -1708,7 +2081,14 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
 #define NM_DEVICE_TYPE_WIFI 2
 #define NM_STATE_ASLEEP 10
 
-// --- Context and Data Structures (Reverted to simple version) ---
+// --- NEW D-BUS CONSTANTS ---
+#define NM_CONNECTIVITY_UNKNOWN 0
+#define NM_CONNECTIVITY_NONE    1
+#define NM_CONNECTIVITY_PORTAL  2
+#define NM_CONNECTIVITY_LIMITED 3
+#define NM_CONNECTIVITY_FULL    4
+
+// --- Context and Data Structures ---
 typedef struct {
     GDBusProxy *nm_proxy;
     GDBusProxy *settings_proxy;
@@ -1730,15 +2110,9 @@ static void activate_connection_thread_func(GTask *task, gpointer s, gpointer d,
 static void set_enabled_task_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c);
 
 // --- Memory management for task data ---
-static void add_connection_task_data_free(gpointer data) {
-    AddConnectionTaskData *d = data; if (!d) return; g_free(d->ssid); g_free(d->ap_path); g_free(d->password); g_free(d);
-}
-static void activate_connection_task_data_free(gpointer data) {
-    ActivateConnectionTaskData *d = data; if (!d) return; g_free(d->connection_path); g_free(d->ap_path); g_free(d);
-}
-static void forget_task_data_free(gpointer data) {
-    ForgetTaskData *d = data; if (!d) return; g_free(d->ssid); g_free(d);
-}
+static void add_connection_task_data_free(gpointer data) { AddConnectionTaskData *d = data; if (!d) return; g_free(d->ssid); g_free(d->ap_path); g_free(d->password); g_free(d); }
+static void activate_connection_task_data_free(gpointer data) { ActivateConnectionTaskData *d = data; if (!d) return; g_free(d->connection_path); g_free(d->ap_path); g_free(d); }
+static void forget_task_data_free(gpointer data) { ForgetTaskData *d = data; if (!d) return; g_free(d->ssid); g_free(d); }
 
 // --- Helper Functions ---
 static gchar* find_wifi_device_path() {
@@ -1761,63 +2135,26 @@ static gchar* find_wifi_device_path() {
 }
 
 // --- Detailed Network Info Functions ---
-void free_wifi_network_details(WifiNetworkDetails *details) {
-    if (!details) return;
-    g_free(details->ssid);
-    g_free(details->security);
-    g_free(details->ip_address);
-    g_free(details->mac_address);
-    g_free(details);
-}
+void free_wifi_network_details(WifiNetworkDetails *details) { if (!details) return; g_free(details->ssid); g_free(details->security); g_free(details->ip_address); g_free(details->mac_address); g_free(details); }
+typedef struct { gchar *ap_path; } GetDetailsTaskData;
+typedef struct { WifiDetailsCallback user_callback; gpointer user_data; } GetDetailsFinishData;
 
-// --- Async Task Data for Get Details ---
-typedef struct {
-    gchar *ap_path;
-} GetDetailsTaskData;
-
-typedef struct {
-    WifiDetailsCallback user_callback;
-    gpointer user_data;
-} GetDetailsFinishData;
-
-
-// Thread function: This runs in the background
 static void get_details_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) {
     (void)s; (void)d; (void)c;
     GetDetailsTaskData *data = g_task_get_task_data(task);
-    
-    // This is the exact same logic from your old blocking function
     g_autoptr(GError) error = NULL;
     g_autoptr(GDBusProxy) ap_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, data->ap_path, NM_AP_INTERFACE, NULL, &error);
-    if (error) { 
-        g_warning("Failed to create AP proxy for details: %s", error->message); 
-        g_task_return_pointer(task, NULL, NULL);
-        return;
-    }
-
+    if (error) { g_warning("Failed to create AP proxy for details: %s", error->message); g_task_return_pointer(task, NULL, NULL); return; }
     WifiNetworkDetails *details = g_new0(WifiNetworkDetails, 1);
-    // ... (The rest of this function body is identical to your old get_wifi_network_details) ...
     g_autoptr(GVariant) ssid_v = g_dbus_proxy_get_cached_property(ap_proxy, "Ssid");
-    if (ssid_v) {
-        gsize len;
-        const guint8 *ssid_bytes = g_variant_get_fixed_array(ssid_v, &len, sizeof(guint8));
-        details->ssid = g_strndup((const gchar*)ssid_bytes, len);
-    }
+    if (ssid_v) { gsize len; const guint8 *ssid_bytes = g_variant_get_fixed_array(ssid_v, &len, sizeof(guint8)); details->ssid = g_strndup((const gchar*)ssid_bytes, len); }
     g_autoptr(GVariant) strength_v = g_dbus_proxy_get_cached_property(ap_proxy, "Strength");
     if (strength_v) details->strength = g_variant_get_byte(strength_v);
     g_autoptr(GVariant) mac_v = g_dbus_proxy_get_cached_property(ap_proxy, "HwAddress");
     if (mac_v) details->mac_address = g_variant_dup_string(mac_v, NULL);
     g_autoptr(GVariant) rsnflags_v = g_dbus_proxy_get_cached_property(ap_proxy, "RsnFlags");
-    if (rsnflags_v && g_variant_get_uint32(rsnflags_v) != 0) {
-        details->security = g_strdup("WPA2/WPA3");
-    } else {
-        g_autoptr(GVariant) wpaflags_v = g_dbus_proxy_get_cached_property(ap_proxy, "WpaFlags");
-        if (wpaflags_v && g_variant_get_uint32(wpaflags_v) != 0) {
-            details->security = g_strdup("WPA");
-        } else {
-            details->security = g_strdup("Open");
-        }
-    }
+    if (rsnflags_v && g_variant_get_uint32(rsnflags_v) != 0) { details->security = g_strdup("WPA2/WPA3"); }
+    else { g_autoptr(GVariant) wpaflags_v = g_dbus_proxy_get_cached_property(ap_proxy, "WpaFlags"); if (wpaflags_v && g_variant_get_uint32(wpaflags_v) != 0) { details->security = g_strdup("WPA"); } else { details->security = g_strdup("Open"); } }
     g_autofree gchar *wifi_dev_path = find_wifi_device_path();
     if (wifi_dev_path) {
         g_autoptr(GDBusProxy) wireless_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, wifi_dev_path, NM_WIRELESS_DEVICE_INTERFACE, NULL, NULL);
@@ -1832,14 +2169,12 @@ static void get_details_thread_func(GTask *task, gpointer s, gpointer d, GCancel
                     g_autoptr(GVariant) ip4_config_v = g_dbus_proxy_get_cached_property(conn_proxy, "Ip4Config");
                     const gchar* ip4_config_path = ip4_config_v ? g_variant_get_string(ip4_config_v, NULL) : NULL;
                     if(ip4_config_path && g_strcmp0(ip4_config_path, "/") != 0) {
-                         g_autoptr(GDBusProxy) ip4_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, ip4_config_path, "org.freedesktop.NetworkManager.IP4Config", NULL, NULL);
-                         g_autoptr(GVariant) addr_data_v = g_dbus_proxy_get_cached_property(ip4_proxy, "AddressData");
-                         if (addr_data_v) {
-                            GVariantIter iter; GVariant *addr_dict_variant;
-                            g_variant_iter_init(&iter, addr_data_v);
+                        g_autoptr(GDBusProxy) ip4_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, ip4_config_path, "org.freedesktop.NetworkManager.IP4Config", NULL, NULL);
+                        g_autoptr(GVariant) addr_data_v = g_dbus_proxy_get_cached_property(ip4_proxy, "AddressData");
+                        if (addr_data_v) {
+                            GVariantIter iter; GVariant *addr_dict_variant; g_variant_iter_init(&iter, addr_data_v);
                             if (g_variant_iter_next(&iter, "a{sv}", &addr_dict_variant)) {
-                                GVariantIter dict_iter; gchar *key; GVariant *value;
-                                g_variant_iter_init(&dict_iter, addr_dict_variant);
+                                GVariantIter dict_iter; gchar *key; GVariant *value; g_variant_iter_init(&dict_iter, addr_dict_variant);
                                 while (g_variant_iter_next(&dict_iter, "{sv}", &key, &value)) {
                                     if (g_strcmp0(key, "address") == 0) details->ip_address = g_variant_dup_string(value, NULL);
                                     g_free(key); g_variant_unref(value);
@@ -1847,385 +2182,185 @@ static void get_details_thread_func(GTask *task, gpointer s, gpointer d, GCancel
                                 }
                                 g_variant_unref(addr_dict_variant);
                             }
-                         }
+                        }
                     }
                 }
             }
         }
     }
-    
-    // Return the result to the main thread
     g_task_return_pointer(task, details, (GDestroyNotify)free_wifi_network_details);
 }
 
-// Finish function: This runs on the main thread after the background work is done
-static void on_get_details_finished(GObject *s, GAsyncResult *res, gpointer user_data) {
-    (void)s;
-    GetDetailsFinishData *finish_data = user_data;
-    g_autoptr(GError) error = NULL;
-    WifiNetworkDetails *details = g_task_propagate_pointer(G_TASK(res), &error);
+static void on_get_details_finished(GObject *s, GAsyncResult *res, gpointer user_data) { (void)s; GetDetailsFinishData *finish_data = user_data; g_autoptr(GError) error = NULL; WifiNetworkDetails *details = g_task_propagate_pointer(G_TASK(res), &error); if (error) { g_warning("Failed to get network details: %s", error->message); g_clear_pointer(&details, free_wifi_network_details); } if (finish_data->user_callback) { finish_data->user_callback(details, finish_data->user_data); } else { if (details) free_wifi_network_details(details); } g_free(finish_data); }
+void get_wifi_network_details_async(const gchar *ap_path, WifiDetailsCallback cb, gpointer ud) { GetDetailsTaskData *td = g_new0(GetDetailsTaskData, 1); td->ap_path = g_strdup(ap_path); GetDetailsFinishData *fd = g_new0(GetDetailsFinishData, 1); fd->user_callback = cb; fd->user_data = ud; GTask *task = g_task_new(NULL, NULL, on_get_details_finished, fd); g_task_set_task_data(task, td, (GDestroyNotify)g_free); g_task_run_in_thread(task, get_details_thread_func); g_object_unref(task); }
+gboolean is_connection_forgettable(const gchar *connection_path, gboolean is_network_secure) { g_return_val_if_fail(connection_path != NULL, FALSE); if (!is_network_secure) return TRUE; g_autoptr(GDBusProxy) conn_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, connection_path, NM_SETTINGS_CONNECTION_INTERFACE, NULL, NULL); if (!conn_proxy) return FALSE; g_autoptr(GVariant) settings_variant = g_dbus_proxy_call_sync(conn_proxy, "GetSettings", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL); if (!settings_variant) return FALSE; g_autoptr(GVariant) settings_dict = g_variant_get_child_value(settings_variant, 0); g_autoptr(GVariant) security_settings = g_variant_lookup_value(settings_dict, "802-11-wireless-security", G_VARIANT_TYPE("a{sv}")); if (security_settings == NULL) return FALSE; return (g_variant_lookup_value(security_settings, "psk", G_VARIANT_TYPE_STRING) != NULL); }
 
-    if (error) {
-        g_warning("Failed to get network details: %s", error->message);
-        g_clear_pointer(&details, free_wifi_network_details);
-    }
-    
-    if (finish_data->user_callback) {
-        finish_data->user_callback(details, finish_data->user_data);
-    } else {
-        if (details) free_wifi_network_details(details);
-    }
-
-    g_free(finish_data);
-}
-
-// Public API function
-void get_wifi_network_details_async(const gchar *ap_path, WifiDetailsCallback cb, gpointer ud) {
-    GetDetailsTaskData *task_data = g_new0(GetDetailsTaskData, 1);
-    task_data->ap_path = g_strdup(ap_path);
-
-    GetDetailsFinishData *finish_data = g_new0(GetDetailsFinishData, 1);
-    finish_data->user_callback = cb;
-    finish_data->user_data = ud;
-
-    GTask *task = g_task_new(NULL, NULL, on_get_details_finished, finish_data);
-    g_task_set_task_data(task, task_data, (GDestroyNotify)g_free);
-    g_task_run_in_thread(task, get_details_thread_func);
-    g_object_unref(task);
-}
-
-gboolean is_connection_forgettable(const gchar *connection_path, gboolean is_network_secure) {
-    g_return_val_if_fail(connection_path != NULL, FALSE);
-    if (!is_network_secure) return TRUE;
-    g_autoptr(GDBusProxy) conn_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, connection_path, NM_SETTINGS_CONNECTION_INTERFACE, NULL, NULL);
-    if (!conn_proxy) return FALSE;
-    g_autoptr(GVariant) settings_variant = g_dbus_proxy_call_sync(conn_proxy, "GetSettings", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
-    if (!settings_variant) return FALSE;
-    g_autoptr(GVariant) settings_dict = g_variant_get_child_value(settings_variant, 0);
-    g_autoptr(GVariant) security_settings = g_variant_lookup_value(settings_dict, "802-11-wireless-security", G_VARIANT_TYPE("a{sv}"));
-    if (security_settings == NULL) return FALSE;
-    return (g_variant_lookup_value(security_settings, "psk", G_VARIANT_TYPE_STRING) != NULL);
-}
-
-// --- Init and Shutdown (Reverted to simple version) ---
 // --- Init and Shutdown ---
-gboolean network_manager_init() {
-    g_return_val_if_fail(g_context == NULL, TRUE);
-    g_autoptr(GError) error = NULL;
-    g_context = g_new0(NetworkManagerContext, 1);
-
-    // --- THE NEW, MORE ROBUST METHOD ---
-    g_autoptr(GDBusConnection) connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
-    if (error) {
-        g_warning("Failed to get D-Bus system bus connection: %s", error->message);
-        network_manager_shutdown();
-        return FALSE;
-    }
-
-    // Create the main NetworkManager proxy
-    g_context->nm_proxy = g_dbus_proxy_new_sync(
-        connection,
-        G_DBUS_PROXY_FLAGS_NONE,
-        NULL,                            // GDBusInterfaceInfo
-        NM_DBUS_SERVICE,                 // "org.freedesktop.NetworkManager"
-        NM_DBUS_PATH,                    // "/org/freedesktop/NetworkManager" <-- The CORRECT path
-        NM_DBUS_INTERFACE,               // "org.freedesktop.NetworkManager"
-        NULL,                            // GCancellable
-        &error
-    );
-
-    if (error || g_context->nm_proxy == NULL) {
-        g_warning("Failed to create NM proxy: %s", error ? error->message : "Proxy creation returned NULL");
-        g_clear_error(&error);
-        network_manager_shutdown();
-        return FALSE;
-    }
-
-    // Create the Settings proxy
-    g_context->settings_proxy = g_dbus_proxy_new_sync(
-        connection,
-        G_DBUS_PROXY_FLAGS_NONE,
-        NULL,
-        NM_DBUS_SERVICE,
-        NM_SETTINGS_PATH,                // "/org/freedesktop/NetworkManager/Settings"
-        NM_SETTINGS_INTERFACE,           // "org.freedesktop.NetworkManager.Settings"
-        NULL,
-        &error
-    );
-    
-    if (error || g_context->settings_proxy == NULL) {
-        g_warning("Failed to create NM Settings proxy: %s", error ? error->message : "Proxy creation returned NULL");
-        network_manager_shutdown();
-        return FALSE;
-    }
-    
-    g_print("NetworkManager D-Bus interface initialized successfully.\n");
-    return TRUE;
-}
-
-void network_manager_shutdown() {
-    if (!g_context) return;
-    g_clear_object(&g_context->nm_proxy);
-    g_clear_object(&g_context->settings_proxy);
-    g_free(g_context);
-    g_context = NULL;
-    g_print("NetworkManager D-Bus interface shut down.\n");
-}
-
-static void on_operation_finished(GObject *s, GAsyncResult *res, gpointer user_data) {
-    (void)s;
-    OperationFinishData *finish_data = user_data;
-    gboolean success = g_task_propagate_boolean(G_TASK(res), NULL);
-    if (finish_data && finish_data->user_callback) {
-        finish_data->user_callback(success, finish_data->user_data);
-    }
-    g_free(finish_data);
-}
+gboolean network_manager_init() { g_return_val_if_fail(g_context == NULL, TRUE); g_autoptr(GError) error = NULL; g_context = g_new0(NetworkManagerContext, 1); g_autoptr(GDBusConnection) connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error); if (error) { g_warning("Failed to get D-Bus system bus connection: %s", error->message); network_manager_shutdown(); return FALSE; } g_context->nm_proxy = g_dbus_proxy_new_sync( connection, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, NM_DBUS_PATH, NM_DBUS_INTERFACE, NULL, &error ); if (error || g_context->nm_proxy == NULL) { g_warning("Failed to create NM proxy: %s", error ? error->message : "Proxy creation returned NULL"); g_clear_error(&error); network_manager_shutdown(); return FALSE; } g_context->settings_proxy = g_dbus_proxy_new_sync( connection, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, NM_SETTINGS_PATH, NM_SETTINGS_INTERFACE, NULL, &error ); if (error || g_context->settings_proxy == NULL) { g_warning("Failed to create NM Settings proxy: %s", error ? error->message : "Proxy creation returned NULL"); network_manager_shutdown(); return FALSE; } g_print("NetworkManager D-Bus interface initialized successfully.\n"); return TRUE; }
+void network_manager_shutdown() { if (!g_context) return; g_clear_object(&g_context->nm_proxy); g_clear_object(&g_context->settings_proxy); g_free(g_context); g_context = NULL; g_print("NetworkManager D-Bus interface shut down.\n"); }
+static void on_operation_finished(GObject *s, GAsyncResult *res, gpointer user_data) { (void)s; OperationFinishData *finish_data = user_data; gboolean success = g_task_propagate_boolean(G_TASK(res), NULL); if (finish_data && finish_data->user_callback) { finish_data->user_callback(success, finish_data->user_data); } g_free(finish_data); }
 
 // --- Radio Control Implementation ---
-gboolean is_wifi_enabled() {
-    g_return_val_if_fail(g_context && g_context->nm_proxy, FALSE);
-    g_autoptr(GVariant) prop = g_dbus_proxy_get_cached_property(g_context->nm_proxy, "WirelessEnabled");
-    return prop ? g_variant_get_boolean(prop) : FALSE;
-}
-gboolean is_airplane_mode_active() {
-    g_return_val_if_fail(g_context && g_context->nm_proxy, FALSE);
-    g_autoptr(GVariant) prop = g_dbus_proxy_get_cached_property(g_context->nm_proxy, "State");
-    return prop ? (g_variant_get_uint32(prop) == NM_STATE_ASLEEP) : FALSE;
-}
-void set_wifi_enabled_async(gboolean enabled, NetworkOperationCallback cb, gpointer ud) {
-    SetEnabledTaskData *task_data = g_new0(SetEnabledTaskData, 1);
-    task_data->enabled = enabled;
-    OperationFinishData *finish_data = g_new0(OperationFinishData, 1);
-    finish_data->user_callback = cb;
-    finish_data->user_data = ud;
-    GTask *task = g_task_new(NULL, NULL, on_operation_finished, finish_data);
-    g_task_set_task_data(task, task_data, g_free);
-    g_task_run_in_thread(task, set_enabled_task_thread_func);
-    g_object_unref(task);
-}
-static void set_enabled_task_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) {
-    (void)s; (void)d; (void)c;
-    SetEnabledTaskData *data = g_task_get_task_data(task);
-    g_autoptr(GError) error = NULL;
-    g_dbus_proxy_call_sync(g_context->nm_proxy, "org.freedesktop.DBus.Properties.Set", g_variant_new("(ssv)", NM_DBUS_INTERFACE, "WirelessEnabled", g_variant_new_boolean(data->enabled)), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-    g_task_return_boolean(task, error == NULL);
-}
+gboolean is_wifi_enabled() { g_return_val_if_fail(g_context && g_context->nm_proxy, FALSE); g_autoptr(GVariant) prop = g_dbus_proxy_get_cached_property(g_context->nm_proxy, "WirelessEnabled"); return prop ? g_variant_get_boolean(prop) : FALSE; }
+gboolean is_airplane_mode_active() { g_return_val_if_fail(g_context && g_context->nm_proxy, FALSE); g_autoptr(GVariant) prop = g_dbus_proxy_get_cached_property(g_context->nm_proxy, "State"); return prop ? (g_variant_get_uint32(prop) == NM_STATE_ASLEEP) : FALSE; }
+void set_wifi_enabled_async(gboolean enabled, NetworkOperationCallback cb, gpointer ud) { SetEnabledTaskData *td = g_new0(SetEnabledTaskData, 1); td->enabled = enabled; OperationFinishData *fd = g_new0(OperationFinishData, 1); fd->user_callback = cb; fd->user_data = ud; GTask *t = g_task_new(NULL, NULL, on_operation_finished, fd); g_task_set_task_data(t, td, g_free); g_task_run_in_thread(t, set_enabled_task_thread_func); g_object_unref(t); }
+static void set_enabled_task_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) { (void)s; (void)d; (void)c; SetEnabledTaskData *data = g_task_get_task_data(task); g_autoptr(GError) error = NULL; g_dbus_proxy_call_sync(g_context->nm_proxy, "org.freedesktop.DBus.Properties.Set", g_variant_new("(ssv)", NM_DBUS_INTERFACE, "WirelessEnabled", g_variant_new_boolean(data->enabled)), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error); g_task_return_boolean(task, error == NULL); }
 
 // --- Network List & Profile Functions ---
-static gint sort_networks(gconstpointer a, gconstpointer b) {
-    const WifiNetwork *net_a = a; const WifiNetwork *net_b = b;
-    if (net_a->is_active && !net_b->is_active) return -1;
-    if (!net_a->is_active && net_b->is_active) return 1;
-    if (net_a->strength > net_b->strength) return -1;
-    if (net_a->strength < net_b->strength) return 1;
-    return g_strcmp0(net_a->ssid, net_b->ssid);
-}
+static gint sort_networks(gconstpointer a, gconstpointer b) { const WifiNetwork *na = a; const WifiNetwork *nb = b; if (na->is_active && !nb->is_active) return -1; if (!na->is_active && nb->is_active) return 1; if (na->strength > nb->strength) return -1; if (na->strength < nb->strength) return 1; return g_strcmp0(na->ssid, nb->ssid); }
 
 GList* get_available_wifi_networks() {
+    g_print("\n--- [WIFI DEBUG] Starting get_available_wifi_networks ---\n");
     g_autofree gchar *wifi_device_path = find_wifi_device_path();
-    if (!wifi_device_path) return NULL;
+    if (!wifi_device_path) {
+        g_warning("[WIFI WARNING] No Wi-Fi device path found. Aborting scan.");
+        return NULL;
+    }
+
     g_autoptr(GError) error = NULL;
     g_autoptr(GDBusProxy) wireless_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, wifi_device_path, NM_WIRELESS_DEVICE_INTERFACE, NULL, &error);
-    if (error) { g_warning("Failed to create wireless device proxy: %s", error->message); return NULL; }
-
-  
+    if (error) { g_warning("[WIFI WARNING] Failed to create wireless device proxy: %s", error->message); return NULL; }
 
     g_autoptr(GVariant) aps_variant = g_dbus_proxy_call_sync(wireless_proxy, "GetAllAccessPoints", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
-    if (!aps_variant) return NULL;
+    if (!aps_variant) { g_warning("[WIFI WARNING] GetAllAccessPoints call returned NULL."); return NULL; }
+    
     g_autoptr(GVariant) active_ap_variant = g_dbus_proxy_get_cached_property(wireless_proxy, "ActiveAccessPoint");
     const gchar *active_ap_path = active_ap_variant ? g_variant_get_string(active_ap_variant, NULL) : NULL;
+
+    guint32 global_connectivity = NM_CONNECTIVITY_UNKNOWN;
+    g_autoptr(GVariant) connectivity_variant = g_dbus_proxy_get_cached_property(g_context->nm_proxy, "Connectivity");
+    if (connectivity_variant) { global_connectivity = g_variant_get_uint32(connectivity_variant); }
+    
+    // --- DEBUG: Get and print all saved connections ---
+    GHashTable *saved_ssids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    g_autoptr(GVariant) connections_variant = g_dbus_proxy_call_sync(g_context->settings_proxy, "ListConnections", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
+    if (connections_variant) {
+        g_print("[WIFI DEBUG] Found saved system connections. Parsing SSIDs:\n");
+        g_autoptr(GVariantIter) iter;
+        g_variant_get(connections_variant, "(ao)", &iter);
+        const gchar *conn_path;
+        while (g_variant_iter_loop(iter, "o", &conn_path)) {
+            g_autoptr(GDBusProxy) conn_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, conn_path, NM_SETTINGS_CONNECTION_INTERFACE, NULL, NULL);
+            if (!conn_proxy) continue;
+            g_autoptr(GVariant) settings_variant = g_dbus_proxy_call_sync(conn_proxy, "GetSettings", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
+            if (!settings_variant) continue;
+            g_autoptr(GVariant) settings_dict = g_variant_get_child_value(settings_variant, 0);
+            g_autoptr(GVariant) wifi_settings = g_variant_lookup_value(settings_dict, "802-11-wireless", G_VARIANT_TYPE("a{sv}"));
+            if (!wifi_settings) continue;
+            g_autoptr(GVariant) ssid_variant = g_variant_lookup_value(wifi_settings, "ssid", G_VARIANT_TYPE("ay"));
+            if (ssid_variant) {
+                gsize len;
+                const gchar *ssid_bytes = g_variant_get_fixed_array(ssid_variant, &len, sizeof(guint8));
+                g_autofree gchar *ssid_str = g_strndup(ssid_bytes, len);
+                g_print("    -> Found saved SSID: '%s'\n", ssid_str);
+                // Use g_hash_table_replace to handle potential duplicates
+                g_hash_table_replace(saved_ssids, g_strdup(ssid_str), GINT_TO_POINTER(1));
+            }
+        }
+    } else {
+        g_warning("[WIFI WARNING] ListConnections call failed. Cannot determine saved networks.");
+    }
+
+    g_print("[WIFI DEBUG] Iterating through visible Access Points:\n");
     GList *networks = NULL;
-    g_autoptr(GVariantIter) iter;
-    g_variant_get(aps_variant, "(ao)", &iter);
+    g_autoptr(GVariantIter) ap_iter;
+    g_variant_get(aps_variant, "(ao)", &ap_iter);
     const gchar *ap_path;
-    while (g_variant_iter_loop(iter, "o", &ap_path)) {
+
+    while (g_variant_iter_loop(ap_iter, "o", &ap_path)) {
         g_autoptr(GDBusProxy) ap_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, ap_path, NM_AP_INTERFACE, NULL, NULL);
         if (!ap_proxy) continue;
+
         g_autoptr(GVariant) ssid_v = g_dbus_proxy_get_cached_property(ap_proxy, "Ssid");
+        if (!ssid_v) continue;
+
+        gsize n_elements;
+        const guint8 *ssid_bytes = g_variant_get_fixed_array(ssid_v, &n_elements, sizeof(guint8));
+        g_autofree gchar *ssid_str = g_strndup((const gchar*)ssid_bytes, n_elements);
+        if(strlen(ssid_str) == 0) { continue; }
+        
+        WifiNetwork *net = g_new0(WifiNetwork, 1);
+        net->ssid = g_strdup(ssid_str);
+        net->object_path = g_strdup(ap_path);
         g_autoptr(GVariant) strength_v = g_dbus_proxy_get_cached_property(ap_proxy, "Strength");
+        net->strength = strength_v ? g_variant_get_byte(strength_v) : 0;
+        
+        net->is_active = (active_ap_path && g_strcmp0(ap_path, active_ap_path) == 0);
+        
         g_autoptr(GVariant) flags_v = g_dbus_proxy_get_cached_property(ap_proxy, "Flags");
         g_autoptr(GVariant) wpaflags_v = g_dbus_proxy_get_cached_property(ap_proxy, "WpaFlags");
         g_autoptr(GVariant) rsnflags_v = g_dbus_proxy_get_cached_property(ap_proxy, "RsnFlags");
-        if (!ssid_v || !strength_v) continue;
-        gsize n_elements;
-        const guint8 *ssid_bytes = g_variant_get_fixed_array(ssid_v, &n_elements, sizeof(guint8));
-        gchar *ssid_str = g_strndup((const gchar*)ssid_bytes, n_elements);
-        if(strlen(ssid_str) == 0) { g_free(ssid_str); continue; }
-        WifiNetwork *net = g_new0(WifiNetwork, 1);
-        net->ssid = ssid_str;
-        net->object_path = g_strdup(ap_path);
-        net->strength = g_variant_get_byte(strength_v);
-        net->is_active = (active_ap_path && g_strcmp0(ap_path, active_ap_path) == 0);
         guint32 flags = flags_v ? g_variant_get_uint32(flags_v) : 0;
         guint32 wpa_flags = wpaflags_v ? g_variant_get_uint32(wpaflags_v) : 0;
         guint32 rsn_flags = rsnflags_v ? g_variant_get_uint32(rsnflags_v) : 0;
         net->is_secure = (flags != 0 || wpa_flags != 0 || rsn_flags != 0);
+
+        // --- THE DEBUGGED CHECK ---
+        net->is_known = g_hash_table_contains(saved_ssids, net->ssid);
+        g_print("    -> Checking AP: '%s'. Is it saved? %s\n", net->ssid, net->is_known ? "YES" : "NO");
+
+        if (net->is_active) {
+            switch (global_connectivity) {
+                case NM_CONNECTIVITY_FULL:    net->connectivity = WIFI_STATE_CONNECTED; break;
+                case NM_CONNECTIVITY_LIMITED:
+                case NM_CONNECTIVITY_PORTAL:  net->connectivity = WIFI_STATE_LIMITED; break;
+                default:                      net->connectivity = WIFI_STATE_CONNECTING; break;
+            }
+        } else {
+            net->connectivity = WIFI_STATE_DISCONNECTED;
+        }
+
         networks = g_list_prepend(networks, net);
     }
+    
+    g_hash_table_destroy(saved_ssids);
+    g_print("--- [WIFI DEBUG] Finished get_available_wifi_networks ---\n");
     return g_list_sort(networks, sort_networks);
 }
 
-gchar* find_connection_for_ssid(const gchar *ssid) {
-    g_return_val_if_fail(g_context && g_context->settings_proxy, NULL);
-    g_autoptr(GVariant) connections_variant = g_dbus_proxy_call_sync(g_context->settings_proxy, "ListConnections", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
-    if (!connections_variant) return NULL;
-    gchar *found_path = NULL;
-    g_autoptr(GVariantIter) iter;
-    g_variant_get(connections_variant, "(ao)", &iter);
-    const gchar *conn_path;
-    while (g_variant_iter_loop(iter, "o", &conn_path)) {
-        g_autoptr(GDBusProxy) conn_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, conn_path, NM_SETTINGS_CONNECTION_INTERFACE, NULL, NULL);
-        if (!conn_proxy) continue;
-        g_autoptr(GVariant) settings_variant = g_dbus_proxy_call_sync(conn_proxy, "GetSettings", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
-        if (!settings_variant) continue;
-        g_autoptr(GVariant) settings_dict = g_variant_get_child_value(settings_variant, 0);
-        g_autoptr(GVariant) wifi_settings = g_variant_lookup_value(settings_dict, "802-11-wireless", G_VARIANT_TYPE("a{sv}"));
-        if (!wifi_settings) continue;
-        g_autoptr(GVariant) ssid_variant = g_variant_lookup_value(wifi_settings, "ssid", G_VARIANT_TYPE("ay"));
-        if (ssid_variant) {
-            gsize len;
-            const gchar *ssid_bytes = g_variant_get_fixed_array(ssid_variant, &len, sizeof(guint8));
-            if (len == strlen(ssid) && memcmp(ssid_bytes, ssid, len) == 0) {
-                found_path = g_strdup(conn_path);
-                break;
+
+gchar* find_connection_for_ssid(const gchar *ssid) { g_return_val_if_fail(g_context && g_context->settings_proxy, NULL); g_autoptr(GVariant) connections_variant = g_dbus_proxy_call_sync(g_context->settings_proxy, "ListConnections", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL); if (!connections_variant) return NULL; gchar *found_path = NULL; g_autoptr(GVariantIter) iter; g_variant_get(connections_variant, "(ao)", &iter); const gchar *conn_path; while (g_variant_iter_loop(iter, "o", &conn_path)) { g_autoptr(GDBusProxy) conn_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, conn_path, NM_SETTINGS_CONNECTION_INTERFACE, NULL, NULL); if (!conn_proxy) continue; g_autoptr(GVariant) settings_variant = g_dbus_proxy_call_sync(conn_proxy, "GetSettings", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL); if (!settings_variant) continue; g_autoptr(GVariant) settings_dict = g_variant_get_child_value(settings_variant, 0); g_autoptr(GVariant) wifi_settings = g_variant_lookup_value(settings_dict, "802-11-wireless", G_VARIANT_TYPE("a{sv}")); if (!wifi_settings) continue; g_autoptr(GVariant) ssid_variant = g_variant_lookup_value(wifi_settings, "ssid", G_VARIANT_TYPE("ay")); if (ssid_variant) { gsize len; const gchar *ssid_bytes = g_variant_get_fixed_array(ssid_variant, &len, sizeof(guint8)); if (len == strlen(ssid) && memcmp(ssid_bytes, ssid, len) == 0) { found_path = g_strdup(conn_path); break; } } } return found_path; }
+void activate_wifi_connection_async(const gchar *connection_path, const gchar *ap_path, NetworkOperationCallback cb, gpointer ud) { ActivateConnectionTaskData *td = g_new0(ActivateConnectionTaskData, 1); td->connection_path = g_strdup(connection_path); td->ap_path = g_strdup(ap_path); OperationFinishData *fd = g_new0(OperationFinishData, 1); fd->user_callback = cb; fd->user_data = ud; GTask *t = g_task_new(NULL, NULL, on_operation_finished, fd); g_task_set_task_data(t, td, activate_connection_task_data_free); g_task_run_in_thread(t, activate_connection_thread_func); g_object_unref(t); }
+static void activate_connection_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) { (void)s; (void)d; (void)c; ActivateConnectionTaskData *data = g_task_get_task_data(task); g_autofree gchar *device_path = find_wifi_device_path(); if (!device_path) { g_warning("No Wi-Fi device for activation."); g_task_return_boolean(task, FALSE); return; } g_autoptr(GError) error = NULL; g_dbus_proxy_call_sync(g_context->nm_proxy, "ActivateConnection", g_variant_new("(ooo)", data->connection_path, device_path, data->ap_path), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error); if (error) { g_warning("Failed to activate connection %s: %s", data->connection_path, error->message); g_task_return_boolean(task, FALSE); } else { g_task_return_boolean(task, TRUE); } }
+void add_and_activate_wifi_connection_async(const gchar *ssid, const gchar *ap_path, const gchar *password, gboolean is_secure, NetworkOperationCallback cb, gpointer ud) { AddConnectionTaskData *td = g_new0(AddConnectionTaskData, 1); td->ssid = g_strdup(ssid); td->ap_path = g_strdup(ap_path); td->password = g_strdup(password); td->is_secure = is_secure; OperationFinishData *fd = g_new0(OperationFinishData, 1); fd->user_callback = cb; fd->user_data = ud; GTask *t = g_task_new(NULL, NULL, on_operation_finished, fd); g_task_set_task_data(t, td, add_connection_task_data_free); g_task_run_in_thread(t, add_and_activate_connection_thread_func); g_object_unref(t); }
+static void add_and_activate_connection_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) { (void)s; (void)d; (void)c; AddConnectionTaskData *data = g_task_get_task_data(task); g_autofree gchar *device_path = find_wifi_device_path(); if (!device_path) { g_warning("No Wi-Fi device for new connection."); g_task_return_boolean(task, FALSE); return; } g_autoptr(GError) error = NULL; GPtrArray *entries = g_ptr_array_new_with_free_func((GDestroyNotify) g_variant_unref); GVariantBuilder builder; g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT); g_variant_builder_add(&builder, "{sv}", "type", g_variant_new_string("802-11-wireless")); g_variant_builder_add(&builder, "{sv}", "id", g_variant_new_string(data->ssid)); g_autofree gchar* uuid = g_uuid_string_random(); g_variant_builder_add(&builder, "{sv}", "uuid", g_variant_new_string(uuid)); g_ptr_array_add(entries, g_variant_new_dict_entry(g_variant_new_string("connection"), g_variant_builder_end(&builder))); g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT); g_autoptr(GVariant) ssid_v = g_variant_new_from_data(G_VARIANT_TYPE("ay"), data->ssid, strlen(data->ssid), TRUE, NULL, NULL); g_variant_builder_add(&builder, "{sv}", "ssid", ssid_v); g_variant_builder_add(&builder, "{sv}", "mode", g_variant_new_string("infrastructure")); g_ptr_array_add(entries, g_variant_new_dict_entry(g_variant_new_string("802-11-wireless"), g_variant_builder_end(&builder))); g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT); g_variant_builder_add(&builder, "{sv}", "method", g_variant_new_string("auto")); g_ptr_array_add(entries, g_variant_new_dict_entry(g_variant_new_string("ipv4"), g_variant_builder_end(&builder))); if (data->is_secure) { g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT); g_variant_builder_add(&builder, "{sv}", "key-mgmt", g_variant_new_string("wpa-psk")); if (data->password && data->password[0] != '\0') { g_variant_builder_add(&builder, "{sv}", "psk", g_variant_new_string(data->password)); } g_ptr_array_add(entries, g_variant_new_dict_entry(g_variant_new_string("802-11-wireless-security"), g_variant_builder_end(&builder))); } GVariant *settings = g_variant_new_array(G_VARIANT_TYPE_DICT_ENTRY, (GVariant **)entries->pdata, entries->len); g_ptr_array_free(entries, TRUE); g_dbus_proxy_call_sync(g_context->nm_proxy, "AddAndActivateConnection", g_variant_new("(a{sa{sv}}oo)", settings, device_path, data->ap_path), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error); if (error) { g_warning("Failed to add connection: %s", error->message); g_task_return_boolean(task, FALSE); } else { g_print("D-Bus call successful.\n"); g_task_return_boolean(task, TRUE); } }
+void forget_wifi_connection_async(const gchar *ssid, NetworkOperationCallback cb, gpointer ud) { ForgetTaskData *td = g_new0(ForgetTaskData, 1); td->ssid = g_strdup(ssid); OperationFinishData *fd = g_new0(OperationFinishData, 1); fd->user_callback = cb; fd->user_data = ud; GTask *t = g_task_new(NULL, NULL, on_operation_finished, fd); g_task_set_task_data(t, td, forget_task_data_free); g_task_run_in_thread(t, forget_task_thread_func); g_object_unref(t); }
+static void forget_task_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) { 
+    (void)s; (void)d; (void)c; 
+    ForgetTaskData *data = g_task_get_task_data(task); 
+    g_print("[FORGET DEBUG] 2. Background thread started for SSID: '%s'\n", data->ssid);
+    gboolean overall_success = TRUE; 
+    g_autofree gchar *connection_to_forget = find_connection_for_ssid(data->ssid); 
+    
+    if (connection_to_forget) { 
+        g_print("[FORGET DEBUG] 3. Found profile to delete at D-Bus path: %s\n", connection_to_forget); 
+        g_autoptr(GDBusProxy) conn_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, connection_to_forget, NM_SETTINGS_CONNECTION_INTERFACE, NULL, NULL); 
+        if (conn_proxy) { 
+            g_autoptr(GError) delete_error = NULL; 
+            g_dbus_proxy_call_sync(conn_proxy, "Delete", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &delete_error); 
+            if(delete_error) { 
+                g_warning("[FORGET DEBUG] 4. D-Bus 'Delete' call FAILED: %s", delete_error->message); 
+                overall_success = FALSE; 
+            } else {
+                g_print("[FORGET DEBUG] 4. D-Bus 'Delete' call SUCCEEDED.\n");
             }
-        }
+        } else { 
+            g_warning("[FORGET DEBUG] 4. FAILED to create D-Bus proxy for the connection.\n");
+            overall_success = FALSE; 
+        } 
+    } else {
+        g_print("[FORGET DEBUG] 3. No saved profile found for SSID '%s'. Nothing to delete.\n", data->ssid);
+        // If there's nothing to forget, we can consider it a "success" in that the desired state is achieved.
+        overall_success = TRUE;
     }
-    return found_path;
+    
+    g_task_return_boolean(task, overall_success); 
 }
+void disconnect_wifi_async(NetworkOperationCallback cb, gpointer ud) { OperationFinishData *fd = g_new0(OperationFinishData, 1); fd->user_callback = cb; fd->user_data = ud; GTask *t = g_task_new(NULL, NULL, on_operation_finished, fd); g_task_run_in_thread(t, disconnect_task_thread_func); g_object_unref(t); }
+static void disconnect_task_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) { (void)s; (void)d; (void)c; g_autofree gchar *device_path = find_wifi_device_path(); if (!device_path) { g_warning("No Wi-Fi device to disconnect."); g_task_return_boolean(task, FALSE); return; } g_autoptr(GError) error = NULL; g_autoptr(GDBusProxy) device_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, device_path, NM_DEVICE_INTERFACE, NULL, &error); if (error) { g_warning("Failed to create device proxy for disconnect: %s", error->message); g_task_return_boolean(task, FALSE); return; } g_dbus_proxy_call_sync(device_proxy, "Disconnect", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error); g_task_return_boolean(task, error == NULL); }
 
-void activate_wifi_connection_async(const gchar *connection_path, const gchar *ap_path, NetworkOperationCallback cb, gpointer ud) {
-    ActivateConnectionTaskData *task_data = g_new0(ActivateConnectionTaskData, 1);
-    task_data->connection_path = g_strdup(connection_path);
-    task_data->ap_path = g_strdup(ap_path);
-    OperationFinishData *finish_data = g_new0(OperationFinishData, 1);
-    finish_data->user_callback = cb;
-    finish_data->user_data = ud;
-    GTask *task = g_task_new(NULL, NULL, on_operation_finished, finish_data);
-    g_task_set_task_data(task, task_data, activate_connection_task_data_free);
-    g_task_run_in_thread(task, activate_connection_thread_func);
-    g_object_unref(task);
-}
-static void activate_connection_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) {
-    (void)s; (void)d; (void)c;
-    ActivateConnectionTaskData *data = g_task_get_task_data(task);
-    g_autofree gchar *device_path = find_wifi_device_path();
-    if (!device_path) { g_warning("No Wi-Fi device for activation."); g_task_return_boolean(task, FALSE); return; }
-    g_autoptr(GError) error = NULL;
-    g_dbus_proxy_call_sync(g_context->nm_proxy, "ActivateConnection", g_variant_new("(ooo)", data->connection_path, device_path, data->ap_path), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-    if (error) { g_warning("Failed to activate connection %s: %s", data->connection_path, error->message); g_task_return_boolean(task, FALSE); } else { g_task_return_boolean(task, TRUE); }
-}
-
-void add_and_activate_wifi_connection_async(const gchar *ssid, const gchar *ap_path, const gchar *password, gboolean is_secure, NetworkOperationCallback cb, gpointer ud) {
-    AddConnectionTaskData *task_data = g_new0(AddConnectionTaskData, 1);
-    task_data->ssid = g_strdup(ssid);
-    task_data->ap_path = g_strdup(ap_path);
-    task_data->password = g_strdup(password);
-    task_data->is_secure = is_secure;
-    OperationFinishData *finish_data = g_new0(OperationFinishData, 1);
-    finish_data->user_callback = cb;
-    finish_data->user_data = ud;
-    GTask *task = g_task_new(NULL, NULL, on_operation_finished, finish_data);
-    g_task_set_task_data(task, task_data, add_connection_task_data_free);
-    g_task_run_in_thread(task, add_and_activate_connection_thread_func);
-    g_object_unref(task);
-}
-
-
-static void add_and_activate_connection_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) {
-    (void)s; (void)d; (void)c;
-    AddConnectionTaskData *data = g_task_get_task_data(task);
-    g_autofree gchar *device_path = find_wifi_device_path();
-    if (!device_path) { g_warning("No Wi-Fi device for new connection."); g_task_return_boolean(task, FALSE); return; }
-    g_autoptr(GError) error = NULL;
-    GPtrArray *entries = g_ptr_array_new_with_free_func((GDestroyNotify) g_variant_unref);
-    GVariantBuilder builder;
-    g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-    g_variant_builder_add(&builder, "{sv}", "type", g_variant_new_string("802-11-wireless"));
-    g_variant_builder_add(&builder, "{sv}", "id", g_variant_new_string(data->ssid));
-    g_autofree gchar* uuid = g_uuid_string_random();
-    g_variant_builder_add(&builder, "{sv}", "uuid", g_variant_new_string(uuid));
-    g_ptr_array_add(entries, g_variant_new_dict_entry(g_variant_new_string("connection"), g_variant_builder_end(&builder)));
-    g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-    g_autoptr(GVariant) ssid_v = g_variant_new_from_data(G_VARIANT_TYPE("ay"), data->ssid, strlen(data->ssid), TRUE, NULL, NULL);
-    g_variant_builder_add(&builder, "{sv}", "ssid", ssid_v);
-    g_variant_builder_add(&builder, "{sv}", "mode", g_variant_new_string("infrastructure"));
-    g_ptr_array_add(entries, g_variant_new_dict_entry(g_variant_new_string("802-11-wireless"), g_variant_builder_end(&builder)));
-    g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-    g_variant_builder_add(&builder, "{sv}", "method", g_variant_new_string("auto"));
-    g_ptr_array_add(entries, g_variant_new_dict_entry(g_variant_new_string("ipv4"), g_variant_builder_end(&builder)));
-    if (data->is_secure) {
-        g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-        g_variant_builder_add(&builder, "{sv}", "key-mgmt", g_variant_new_string("wpa-psk"));
-        if (data->password && data->password[0] != '\0') {
-            g_variant_builder_add(&builder, "{sv}", "psk", g_variant_new_string(data->password));
-        }
-        g_ptr_array_add(entries, g_variant_new_dict_entry(g_variant_new_string("802-11-wireless-security"), g_variant_builder_end(&builder)));
-    }
-    GVariant *settings = g_variant_new_array(G_VARIANT_TYPE_DICT_ENTRY, (GVariant **)entries->pdata, entries->len);
-    g_ptr_array_free(entries, TRUE);
-    g_dbus_proxy_call_sync(g_context->nm_proxy, "AddAndActivateConnection", g_variant_new("(a{sa{sv}}oo)", settings, device_path, data->ap_path), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-    if (error) { g_warning("Failed to add connection: %s", error->message); g_task_return_boolean(task, FALSE); } else { g_print("D-Bus call successful.\n"); g_task_return_boolean(task, TRUE); }
-}
-
-void forget_wifi_connection_async(const gchar *ssid, NetworkOperationCallback cb, gpointer ud) {
-    ForgetTaskData *task_data = g_new0(ForgetTaskData, 1);
-    task_data->ssid = g_strdup(ssid);
-    OperationFinishData *finish_data = g_new0(OperationFinishData, 1);
-    finish_data->user_callback = cb;
-    finish_data->user_data = ud;
-    GTask *task = g_task_new(NULL, NULL, on_operation_finished, finish_data);
-    g_task_set_task_data(task, task_data, forget_task_data_free);
-    g_task_run_in_thread(task, forget_task_thread_func);
-    g_object_unref(task);
-}
-static void forget_task_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) {
-    (void)s; (void)d; (void)c;
-    ForgetTaskData *data = g_task_get_task_data(task);
-    gboolean overall_success = TRUE;
-    g_autofree gchar *connection_to_forget = find_connection_for_ssid(data->ssid);
-    if (connection_to_forget) {
-        g_print("==> Found matching profile at %s. Deleting.\n", connection_to_forget);
-        g_autoptr(GDBusProxy) conn_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, connection_to_forget, NM_SETTINGS_CONNECTION_INTERFACE, NULL, NULL);
-        if (conn_proxy) {
-            g_autoptr(GError) delete_error = NULL;
-            g_dbus_proxy_call_sync(conn_proxy, "Delete", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &delete_error);
-            if(delete_error) { g_warning("Failed to delete connection %s: %s", connection_to_forget, delete_error->message); overall_success = FALSE; }
-        } else { overall_success = FALSE; }
-    }
-    g_task_return_boolean(task, overall_success);
-}
-
-void disconnect_wifi_async(NetworkOperationCallback cb, gpointer ud) {
-    OperationFinishData *finish_data = g_new0(OperationFinishData, 1);
-    finish_data->user_callback = cb;
-    finish_data->user_data = ud;
-    GTask *task = g_task_new(NULL, NULL, on_operation_finished, finish_data);
-    g_task_run_in_thread(task, disconnect_task_thread_func);
-    g_object_unref(task);
-}
-static void disconnect_task_thread_func(GTask *task, gpointer s, gpointer d, GCancellable *c) {
-    (void)s; (void)d; (void)c;
-    g_autofree gchar *device_path = find_wifi_device_path();
-    if (!device_path) { g_warning("No Wi-Fi device to disconnect."); g_task_return_boolean(task, FALSE); return; }
-    g_autoptr(GError) error = NULL;
-    g_autoptr(GDBusProxy) device_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, NM_DBUS_SERVICE, device_path, NM_DEVICE_INTERFACE, NULL, &error);
-    if (error) { g_warning("Failed to create device proxy for disconnect: %s", error->message); g_task_return_boolean(task, FALSE); return; }
-    g_dbus_proxy_call_sync(device_proxy, "Disconnect", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-    g_task_return_boolean(task, error == NULL);
-}
-
-void wifi_network_free(gpointer data) {
-    if (!data) return;
-    WifiNetwork *net = (WifiNetwork*)data;
-    g_free(net->ssid);
-    g_free(net->object_path);
-    g_free(net);
-}
-void free_wifi_network_list(GList *list) {
-    g_list_free_full(list, wifi_network_free);
-}
+void wifi_network_free(gpointer data) { if (!data) return; WifiNetwork *net = (WifiNetwork*)data; g_free(net->ssid); g_free(net->object_path); g_free(net); }
+void free_wifi_network_list(GList *list) { g_list_free_full(list, wifi_network_free); }
 ======================================================================
 ### FILE: ././widgets/control-center/src/brightness_manager.c
 ======================================================================
@@ -2292,6 +2427,217 @@ void set_brightness_async(gint percentage) {
     g_object_unref(task);
 }
 ======================================================================
+### FILE: ././widgets/control-center/src/qr.c
+======================================================================
+#include "qr.h"
+#include <qrencode.h>
+#include <cairo.h>
+
+// D-Bus constants
+#define NM_DBUS_SERVICE "org.freedesktop.NetworkManager"
+#define NM_SETTINGS_PATH "/org/freedesktop/NetworkManager/Settings"
+#define NM_SETTINGS_INTERFACE "org.freedesktop.NetworkManager.Settings"
+#define NM_SETTINGS_CONNECTION_INTERFACE "org.freedesktop.NetworkManager.Settings.Connection"
+
+// Data for our background task
+typedef struct {
+    gchar *ssid;
+    WifiQRCodeCallback user_callback;
+    gpointer user_data;
+} QRTaskData;
+
+// Helper to find the D-Bus path of a saved connection by its SSID
+static gchar* find_connection_path_for_ssid(GDBusConnection *bus, const gchar *ssid, GError **error) {
+    g_autoptr(GVariant) connections_variant = g_dbus_connection_call_sync(bus,
+        NM_DBUS_SERVICE, NM_SETTINGS_PATH, NM_SETTINGS_INTERFACE, "ListConnections",
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, error);
+    if (*error) return NULL;
+
+    g_autoptr(GVariantIter) iter;
+    g_variant_get(connections_variant, "(ao)", &iter);
+    const gchar *conn_path;
+    while (g_variant_iter_loop(iter, "o", &conn_path)) {
+        g_autoptr(GVariant) settings_variant = g_dbus_connection_call_sync(bus,
+            NM_DBUS_SERVICE, conn_path, NM_SETTINGS_CONNECTION_INTERFACE, "GetSettings",
+            NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
+        if (!settings_variant) continue;
+
+        g_autoptr(GVariant) settings_dict = g_variant_get_child_value(settings_variant, 0);
+        g_autoptr(GVariant) wifi_settings = g_variant_lookup_value(settings_dict, "802-11-wireless", G_VARIANT_TYPE("a{sv}"));
+        if (!wifi_settings) continue;
+
+        g_autoptr(GVariant) ssid_variant = g_variant_lookup_value(wifi_settings, "ssid", G_VARIANT_TYPE("ay"));
+        if (ssid_variant) {
+            gsize len;
+            const gchar *ssid_bytes = g_variant_get_fixed_array(ssid_variant, &len, sizeof(guint8));
+            if (len == strlen(ssid) && memcmp(ssid_bytes, ssid, len) == 0) {
+                return g_strdup(conn_path);
+            }
+        }
+    }
+    return NULL;
+}
+
+// Helper to convert a qrencode object to a GdkPixbuf
+static GdkPixbuf* qrcode_to_pixbuf(const QRcode *qrcode) {
+    if (!qrcode) return NULL;
+    const int scale = 8;
+    const int margin = 2; // 2 modules of white space around the QR code
+    int size = (qrcode->width + margin * 2) * scale;
+
+    // Create a full-color ARGB surface directly. No more A8 mask.
+    cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, size, size);
+    cairo_t *cr = cairo_create(surface);
+
+    // 1. Fill the entire background with white.
+    cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+    cairo_paint(cr);
+
+    // 2. Set the drawing color to black for the QR code modules.
+    cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+
+    // 3. Loop through the QR data and draw the black squares.
+    unsigned char *p = qrcode->data;
+    for (int y = 0; y < qrcode->width; y++) {
+        for (int x = 0; x < qrcode->width; x++) {
+            if (*p & 1) { // If the bit is 1, it's a black module
+                // The coordinates are shifted by the margin to center the code.
+                cairo_rectangle(cr, (x + margin) * scale, (y + margin) * scale, scale, scale);
+            }
+            p++;
+        }
+    }
+    // Fill all the rectangles we defined in one go. This is more efficient.
+    cairo_fill(cr);
+
+    // Convert the final, correctly drawn surface to a pixbuf.
+    GdkPixbuf *pixbuf = gdk_pixbuf_get_from_surface(surface, 0, 0, size, size);
+
+    // Clean up Cairo resources.
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+
+    return pixbuf;
+}
+
+// Main background thread logic (IMPROVED)
+static void qr_code_thread_func(GTask *task, gpointer source_object, gpointer task_data, GCancellable *cancellable) {
+    (void)source_object; (void)cancellable;
+    QRTaskData *data = task_data;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *password = NULL;
+    g_autofree gchar *security_type = NULL;
+    g_autoptr(GdkPixbuf) result_pixbuf = NULL;
+    
+    g_print("[QR BACKEND] 3. Background thread started for SSID: '%s'\n", data->ssid);
+    
+    g_autoptr(GDBusConnection) bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
+    if (error) {
+        g_warning("[QR BACKEND]    -> FAILURE: Could not connect to the system D-Bus. Error: %s\n", error->message);
+        g_task_return_error(task, g_error_copy(error));
+        return;
+    }
+    g_print("[QR BACKEND]    -> Successfully connected to D-Bus.\n");
+
+    g_autofree gchar *connection_path = find_connection_path_for_ssid(bus, data->ssid, &error);
+    if (error) {
+        g_warning("[QR BACKEND]    -> FAILURE: Error while searching for connection profile. Error: %s\n", error->message);
+        g_task_return_error(task, g_error_copy(error));
+        return;
+    }
+    if (!connection_path) {
+        g_warning("[QR BACKEND]    -> FAILURE: No saved connection profile found for SSID '%s'. Cannot get password.\n", data->ssid);
+        g_task_return_error(task, g_error_new(G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "No saved connection profile found for SSID '%s'", data->ssid));
+        return;
+    }
+    g_print("[QR BACKEND]    -> Found connection profile at D-Bus path: %s\n", connection_path);
+
+    g_print("[QR BACKEND] 4. Asking NetworkManager for secrets. This requires Polkit authentication!\n");
+    g_autoptr(GVariant) secrets_variant = g_dbus_connection_call_sync(bus,
+        NM_DBUS_SERVICE, connection_path, NM_SETTINGS_CONNECTION_INTERFACE, "GetSecrets",
+        g_variant_new("(s)", "802-11-wireless-security"), NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
+    
+    if (error) {
+        g_warning("[QR BACKEND]    -> D-Bus call to 'GetSecrets' FAILED! This is the most common failure point.\n");
+        g_warning("[QR BACKEND]    -> Reason: %s\n", error->message);
+        g_warning("[QR BACKEND]    -> This usually means a Polkit agent is not running or permissions were denied.\n");
+        g_task_return_error(task, g_error_copy(error));
+        return;
+    }
+
+    g_print("[QR BACKEND]    -> Successfully received secrets from NetworkManager.\n");
+    
+    g_autoptr(GVariant) secrets_dict_outer = g_variant_get_child_value(secrets_variant, 0);
+    g_autoptr(GVariant) secrets_dict = g_variant_lookup_value(secrets_dict_outer, "802-11-wireless-security", G_VARIANT_TYPE_VARDICT);
+    if (secrets_dict) {
+        g_print("[QR BACKEND]    -> Parsing secrets dictionary...\n");
+        g_autoptr(GVariant) psk_variant = g_variant_lookup_value(secrets_dict, "psk", G_VARIANT_TYPE_STRING);
+        if (psk_variant) {
+            password = g_variant_dup_string(psk_variant, NULL);
+            security_type = g_strdup("WPA");
+            g_print("[QR BACKEND]    -> Success! Found WPA password (psk).\n");
+        } else {
+             g_warning("[QR BACKEND]    -> NOTE: Password (psk) not found in secrets. This might be an enterprise network (PEAP/EAP) or open network.\n");
+        }
+    } else {
+         g_warning("[QR BACKEND]    -> NOTE: '802-11-wireless-security' dictionary not found. This is likely an open (unsecured) network.\n");
+    }
+
+    gchar *qr_string = NULL;
+    if (password && security_type) {
+        qr_string = g_strdup_printf("WIFI:S:%s;T:%s;P:%s;;", data->ssid, security_type, password);
+    } else {
+        qr_string = g_strdup_printf("WIFI:S:%s;T:nopass;;", data->ssid);
+    }
+
+    
+    QRcode *qrcode = QRcode_encodeString(qr_string, 0, QR_ECLEVEL_L, QR_MODE_8, 1);
+    result_pixbuf = qrcode_to_pixbuf(qrcode);
+    QRcode_free(qrcode);
+    g_free(qr_string);
+    
+    if (result_pixbuf) {
+        g_print("[QR BACKEND]    -> QR Code generated and converted to pixbuf successfully.\n");
+    } else {
+        g_warning("[QR BACKEND]    -> FAILURE: QR code generation returned a NULL pixbuf.\n");
+    }
+    
+    g_task_return_pointer(task, g_object_ref(result_pixbuf), g_object_unref);
+}
+
+// Main thread callback
+static void on_qr_code_finished(GObject *source_object, GAsyncResult *res, gpointer user_data) {
+    (void)source_object;
+    QRTaskData *data = user_data;
+    g_autoptr(GError) error = NULL;
+    
+    GdkPixbuf *pixbuf = g_task_propagate_pointer(G_TASK(res), &error);
+    
+    if (error) {
+        g_warning("Failed to generate QR code: %s", error->message);
+        data->user_callback(NULL, data->user_data);
+    } else {
+        data->user_callback(pixbuf, data->user_data);
+        if(pixbuf) g_object_unref(pixbuf);
+    }
+    
+    g_free(data->ssid);
+    g_free(data);
+}
+
+// Public API function
+void generate_wifi_qr_code_async(const gchar *ssid, WifiQRCodeCallback callback, gpointer user_data) {
+    QRTaskData *data = g_new0(QRTaskData, 1);
+    data->ssid = g_strdup(ssid);
+    data->user_callback = callback;
+    data->user_data = user_data;
+    
+    GTask *task = g_task_new(NULL, NULL, on_qr_code_finished, data);
+    g_task_set_task_data(task, data, NULL);
+    g_task_run_in_thread(task, qr_code_thread_func);
+    g_object_unref(task);
+}
+======================================================================
 ### FILE: ././widgets/control-center/src/utils.c
 ======================================================================
 #include "utils.h"
@@ -2338,7 +2684,7 @@ void set_brightness_async(gint percentage);
 ======================================================================
 ### FILE: ././widgets/control-center/src/bluetooth_manager.c
 ======================================================================
-// ===== src/bluetooth_manager.c =====
+// ===== widgets/control-center/src/bluetooth_manager.c (WITH DEBUG LOGGING) =====
 #include "bluetooth_manager.h"
 #include <gio/gio.h>
 #include <string.h>
@@ -2403,47 +2749,22 @@ static gchar* find_device_path_for_address(const gchar *address) {
 }
 
 // --- D-Bus Signal Handlers ---
-static void on_object_added_or_removed(GDBusObjectManager *m, GDBusObject *o, gpointer d) {
-    (void)m; (void)o; (void)d;
-    refresh_and_notify();
-}
-static void on_properties_changed(GDBusObjectManagerClient *m, GDBusObjectProxy *o, GDBusProxy *i, GVariant *v, const gchar *const *iv, gpointer d) {
-    (void)m; (void)o; (void)i; (void)v; (void)iv; (void)d;
-    refresh_and_notify();
-}
-
-// --- Core Logic ---
-static void refresh_and_notify() {
-    if (g_bt_context && g_bt_context->update_callback) {
-        GList *devices = get_available_bluetooth_devices();
-        g_bt_context->update_callback(devices, g_bt_context->user_data);
-    }
-}
+static void on_object_added_or_removed(GDBusObjectManager *m, GDBusObject *o, gpointer d) { (void)m; (void)o; (void)d; refresh_and_notify(); }
+static void on_properties_changed(GDBusObjectManagerClient *m, GDBusObjectProxy *o, GDBusProxy *i, GVariant *v, const gchar *const *iv, gpointer d) { (void)m; (void)o; (void)i; (void)v; (void)iv; (void)d; refresh_and_notify(); }
+static void refresh_and_notify() { if (g_bt_context && g_bt_context->update_callback) { GList *devices = get_available_bluetooth_devices(); g_bt_context->update_callback(devices, g_bt_context->user_data); } }
 
 // --- Lifecycle ---
 gboolean bluetooth_manager_init(BluetoothDeviceUpdateCallback callback, gpointer user_data) {
     if (g_bt_context) return TRUE;
     g_bt_context = g_new0(BluetoothManagerContext, 1);
-    g_bt_context->update_callback = callback;
-    g_bt_context->user_data = user_data;
-
+    g_bt_context->update_callback = callback; g_bt_context->user_data = user_data;
     g_autoptr(GError) error = NULL;
-    g_bt_context->object_manager = g_dbus_object_manager_client_new_for_bus_sync(
-        G_BUS_TYPE_SYSTEM, G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
-        BLUEZ_DBUS_SERVICE, BLUEZ_DBUS_PATH, NULL, NULL, NULL, NULL, &error);
-
-    if (error) {
-        g_warning("Failed to create BlueZ D-Bus object manager: %s", error->message);
-        bluetooth_manager_shutdown();
-        return FALSE;
-    }
-
+    g_bt_context->object_manager = g_dbus_object_manager_client_new_for_bus_sync( G_BUS_TYPE_SYSTEM, G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE, BLUEZ_DBUS_SERVICE, BLUEZ_DBUS_PATH, NULL, NULL, NULL, NULL, &error);
+    if (error) { g_warning("Failed to create BlueZ D-Bus object manager: %s", error->message); bluetooth_manager_shutdown(); return FALSE; }
     g_bt_context->object_added_handler_id = g_signal_connect(g_bt_context->object_manager, "object-added", G_CALLBACK(on_object_added_or_removed), NULL);
     g_bt_context->object_removed_handler_id = g_signal_connect(g_bt_context->object_manager, "object-removed", G_CALLBACK(on_object_added_or_removed), NULL);
     g_bt_context->properties_changed_handler_id = g_signal_connect(g_bt_context->object_manager, "interface-proxy-properties-changed", G_CALLBACK(on_properties_changed), NULL);
-    
-    refresh_and_notify(); // Provide initial list
-    return TRUE;
+    refresh_and_notify(); return TRUE;
 }
 
 void bluetooth_manager_shutdown() {
@@ -2454,158 +2775,111 @@ void bluetooth_manager_shutdown() {
         g_signal_handler_disconnect(g_bt_context->object_manager, g_bt_context->properties_changed_handler_id);
         g_object_unref(g_bt_context->object_manager);
     }
-    g_free(g_bt_context);
-    g_bt_context = NULL;
+    g_free(g_bt_context); g_bt_context = NULL;
 }
 
-// --- Discovery ---
-void bluetooth_manager_start_discovery() {
-    g_autofree gchar *adapter_path = find_adapter_path();
-    if (!adapter_path) return;
-    g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, BLUEZ_DBUS_SERVICE, adapter_path, BLUEZ_ADAPTER_INTERFACE, NULL, NULL);
-    if (proxy) g_dbus_proxy_call(proxy, "StartDiscovery", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
-}
-
-void bluetooth_manager_stop_discovery() {
-    g_autofree gchar *adapter_path = find_adapter_path();
-    if (!adapter_path) return;
-    g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, BLUEZ_DBUS_SERVICE, adapter_path, BLUEZ_ADAPTER_INTERFACE, NULL, NULL);
-    if (proxy) g_dbus_proxy_call(proxy, "StopDiscovery", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
-}
-
-// --- Power Control ---
-gboolean is_bluetooth_powered() {
-    g_autofree gchar *adapter_path = find_adapter_path();
-    if (!adapter_path) return FALSE;
-    g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, BLUEZ_DBUS_SERVICE, adapter_path, BLUEZ_ADAPTER_INTERFACE, NULL, NULL);
-    if (!proxy) return FALSE;
-    g_autoptr(GVariant) prop = g_dbus_proxy_get_cached_property(proxy, "Powered");
-    return prop ? g_variant_get_boolean(prop) : FALSE;
-}
-
-// --- Async Operation Logic ---
-static void on_async_op_finished(GObject *s, GAsyncResult *res, gpointer d) {
-    (void)s; // Fix: Mark unused parameter
-    FinishData *fd = d;
-    gboolean success = g_task_propagate_boolean(G_TASK(res), NULL);
-    if (fd->cb) fd->cb(success, fd->ud);
-    g_free(fd);
-}
-
-static void set_powered_thread(GTask *t, gpointer s, gpointer d, GCancellable *c) {
-    (void)s; (void)c; (void)d; // Fix: Mark unused parameter
-    OperationData *data = g_task_get_task_data(t);
-    g_autofree gchar *adapter_path = find_adapter_path();
-    if (!adapter_path) { g_task_return_boolean(t, FALSE); return; }
-    g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, BLUEZ_DBUS_SERVICE, adapter_path, "org.freedesktop.DBus.Properties", NULL, NULL);
-    if (!proxy) { g_task_return_boolean(t, FALSE); return; }
-    g_autoptr(GError) error = NULL;
-    g_dbus_proxy_call_sync(proxy, "Set", g_variant_new("(ssv)", BLUEZ_ADAPTER_INTERFACE, "Powered", g_variant_new_boolean(data->powered)), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-    g_task_return_boolean(t, error == NULL);
-}
-
-void set_bluetooth_powered_async(gboolean powered, BluetoothOperationCallback cb, gpointer ud) {
-    OperationData *task_data = g_new0(OperationData, 1);
-    task_data->powered = powered;
-    FinishData *finish_data = g_new0(FinishData, 1);
-    finish_data->cb = cb; finish_data->ud = ud;
-    GTask *task = g_task_new(NULL, NULL, on_async_op_finished, finish_data);
-    g_task_set_task_data(task, task_data, operation_data_free);
-    g_task_run_in_thread(task, set_powered_thread);
-    g_object_unref(task);
-}
+// --- Discovery & Power ---
+void bluetooth_manager_start_discovery() { g_autofree gchar *p = find_adapter_path(); if (!p) return; g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, BLUEZ_DBUS_SERVICE, p, BLUEZ_ADAPTER_INTERFACE, NULL, NULL); if (proxy) g_dbus_proxy_call(proxy, "StartDiscovery", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL); }
+void bluetooth_manager_stop_discovery() { g_autofree gchar *p = find_adapter_path(); if (!p) return; g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, BLUEZ_DBUS_SERVICE, p, BLUEZ_ADAPTER_INTERFACE, NULL, NULL); if (proxy) g_dbus_proxy_call(proxy, "StopDiscovery", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL); }
+gboolean is_bluetooth_powered() { g_autofree gchar *p = find_adapter_path(); if (!p) return FALSE; g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, BLUEZ_DBUS_SERVICE, p, BLUEZ_ADAPTER_INTERFACE, NULL, NULL); if (!proxy) return FALSE; g_autoptr(GVariant) prop = g_dbus_proxy_get_cached_property(proxy, "Powered"); return prop ? g_variant_get_boolean(prop) : FALSE; }
+static void on_async_op_finished(GObject *s, GAsyncResult *res, gpointer d) { (void)s; FinishData *fd = d; gboolean success = g_task_propagate_boolean(G_TASK(res), NULL); g_print("[BT DEBUG] on_async_op_finished called. Success: %s\n", success ? "TRUE" : "FALSE"); if (fd->cb) fd->cb(success, fd->ud); g_free(fd); }
+static void set_powered_thread(GTask *t, gpointer s, gpointer d, GCancellable *c) { (void)s; (void)c; (void)d; OperationData *data = g_task_get_task_data(t); g_autofree gchar *p = find_adapter_path(); if (!p) { g_task_return_boolean(t, FALSE); return; } g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, BLUEZ_DBUS_SERVICE, p, "org.freedesktop.DBus.Properties", NULL, NULL); if (!proxy) { g_task_return_boolean(t, FALSE); return; } g_autoptr(GError) error = NULL; g_dbus_proxy_call_sync(proxy, "Set", g_variant_new("(ssv)", BLUEZ_ADAPTER_INTERFACE, "Powered", g_variant_new_boolean(data->powered)), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error); g_task_return_boolean(t, error == NULL); }
+void set_bluetooth_powered_async(gboolean powered, BluetoothOperationCallback cb, gpointer ud) { OperationData *td = g_new0(OperationData, 1); td->powered = powered; FinishData *fd = g_new0(FinishData, 1); fd->cb = cb; fd->ud = ud; GTask *t = g_task_new(NULL, NULL, on_async_op_finished, fd); g_task_set_task_data(t, td, operation_data_free); g_task_run_in_thread(t, set_powered_thread); g_object_unref(t); }
 
 // --- Get Devices (from cache) ---
-static gint sort_devices(gconstpointer a, gconstpointer b) {
-    const BluetoothDevice *dev_a = a; const BluetoothDevice *dev_b = b;
-    if (dev_a->is_connected && !dev_b->is_connected) return -1;
-    if (!dev_a->is_connected && dev_b->is_connected) return 1;
-    return g_strcmp0(dev_a->name, dev_b->name);
-}
-
-GList* get_available_bluetooth_devices() {
-    if (!g_bt_context || !g_bt_context->object_manager) return NULL;
-    GList *devices = NULL;
-    g_autoptr(GList) objects = g_dbus_object_manager_get_objects(g_bt_context->object_manager);
-    for (GList *l = objects; l != NULL; l = l->next) {
-        g_autoptr(GDBusInterface) iface = g_dbus_object_get_interface(l->data, BLUEZ_DEVICE_INTERFACE);
-        if (iface) {
-            BluetoothDevice *dev = g_new0(BluetoothDevice, 1);
-            dev->object_path = g_strdup(g_dbus_object_get_object_path(l->data));
-            g_autoptr(GVariant) name_var = g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface), "Name");
-            g_autoptr(GVariant) addr_var = g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface), "Address");
-            g_autoptr(GVariant) conn_var = g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface), "Connected");
-            dev->name = name_var ? g_variant_dup_string(name_var, NULL) : g_strdup("Unknown Device");
-            dev->address = addr_var ? g_variant_dup_string(addr_var, NULL) : g_strdup("??:??:??:??:??:??");
-            dev->is_connected = conn_var ? g_variant_get_boolean(conn_var) : FALSE;
-            devices = g_list_prepend(devices, dev);
-        }
-    }
-    return g_list_sort(devices, sort_devices);
-}
+static gint sort_devices(gconstpointer a, gconstpointer b) { const BluetoothDevice *da=a, *db=b; if (da->is_connected && !db->is_connected) return -1; if (!da->is_connected && db->is_connected) return 1; return g_strcmp0(da->name, db->name); }
+GList* get_available_bluetooth_devices() { if (!g_bt_context || !g_bt_context->object_manager) return NULL; GList *devices = NULL; g_autoptr(GList) objects = g_dbus_object_manager_get_objects(g_bt_context->object_manager); for (GList *l = objects; l != NULL; l = l->next) { g_autoptr(GDBusInterface) iface = g_dbus_object_get_interface(l->data, BLUEZ_DEVICE_INTERFACE); if (iface) { BluetoothDevice *dev=g_new0(BluetoothDevice,1); dev->object_path=g_strdup(g_dbus_object_get_object_path(l->data)); g_autoptr(GVariant) name=g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface),"Name"), addr=g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface),"Address"), conn=g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface),"Connected"); dev->name = name ? g_variant_dup_string(name,NULL) : g_strdup("Unknown"); dev->address = addr ? g_variant_dup_string(addr,NULL) : g_strdup("??:"); dev->is_connected = conn ? g_variant_get_boolean(conn) : FALSE; devices = g_list_prepend(devices,dev); } } return g_list_sort(devices, sort_devices); }
 
 // --- Connect/Disconnect ---
-// --- FIX START: Create separate thread functions ---
 static void connect_thread(GTask *t, gpointer s, gpointer d, GCancellable *c) {
     (void)s; (void)c; (void)d;
     OperationData *data = g_task_get_task_data(t);
+    g_print("[BT DEBUG] connect_thread started for address: %s\n", data->address);
+
     g_autofree gchar *device_path = find_device_path_for_address(data->address);
-    if (!device_path) { g_task_return_boolean(t, FALSE); return; }
-    g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, BLUEZ_DBUS_SERVICE, device_path, BLUEZ_DEVICE_INTERFACE, NULL, NULL);
-    if (!proxy) { g_task_return_boolean(t, FALSE); return; }
+    if (!device_path) {
+        g_warning("[BT WARNING] connect_thread: FAILED to find device path for address: %s\n", data->address);
+        g_task_return_boolean(t, FALSE);
+        return;
+    }
+    g_print("[BT DEBUG] connect_thread: Found device path: %s\n", device_path);
+
+    g_autoptr(GDBusInterface) iface = g_dbus_object_manager_get_interface(g_bt_context->object_manager, device_path, BLUEZ_DEVICE_INTERFACE);
+    if (!iface) {
+        g_warning("[BT WARNING] connect_thread: FAILED to get D-Bus interface for path: %s\n", device_path);
+        g_task_return_boolean(t, FALSE);
+        return;
+    }
+    g_print("[BT DEBUG] connect_thread: Got D-Bus interface successfully.\n");
+
     g_autoptr(GError) error = NULL;
-    g_dbus_proxy_call_sync(proxy, "Connect", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-    g_task_return_boolean(t, error == NULL);
+    g_dbus_proxy_call_sync(G_DBUS_PROXY(iface), "Connect", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
+
+    if (error) {
+        g_warning("[BT WARNING] connect_thread: D-Bus Connect() call FAILED: %s\n", error->message);
+        g_task_return_boolean(t, FALSE);
+    } else {
+        g_print("[BT DEBUG] connect_thread: D-Bus Connect() call SUCCEEDED.\n");
+        g_task_return_boolean(t, TRUE);
+    }
 }
 
 static void disconnect_thread(GTask *t, gpointer s, gpointer d, GCancellable *c) {
     (void)s; (void)c; (void)d;
     OperationData *data = g_task_get_task_data(t);
+    g_print("[BT DEBUG] disconnect_thread started for address: %s\n", data->address);
+
     g_autofree gchar *device_path = find_device_path_for_address(data->address);
-    if (!device_path) { g_task_return_boolean(t, FALSE); return; }
-    g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, BLUEZ_DBUS_SERVICE, device_path, BLUEZ_DEVICE_INTERFACE, NULL, NULL);
-    if (!proxy) { g_task_return_boolean(t, FALSE); return; }
+    if (!device_path) {
+        g_warning("[BT WARNING] disconnect_thread: FAILED to find device path for address: %s\n", data->address);
+        g_task_return_boolean(t, FALSE);
+        return;
+    }
+    g_print("[BT DEBUG] disconnect_thread: Found device path: %s\n", device_path);
+
+    g_autoptr(GDBusInterface) iface = g_dbus_object_manager_get_interface(g_bt_context->object_manager, device_path, BLUEZ_DEVICE_INTERFACE);
+    if (!iface) {
+        g_warning("[BT WARNING] disconnect_thread: FAILED to get D-Bus interface for path: %s\n", device_path);
+        g_task_return_boolean(t, FALSE);
+        return;
+    }
+    g_print("[BT DEBUG] disconnect_thread: Got D-Bus interface successfully.\n");
+
     g_autoptr(GError) error = NULL;
-    g_dbus_proxy_call_sync(proxy, "Disconnect", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-    g_task_return_boolean(t, error == NULL);
+    g_dbus_proxy_call_sync(G_DBUS_PROXY(iface), "Disconnect", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
+    
+    if (error) {
+        g_warning("[BT WARNING] disconnect_thread: D-Bus Disconnect() call FAILED: %s\n", error->message);
+        g_task_return_boolean(t, FALSE);
+    } else {
+        g_print("[BT DEBUG] disconnect_thread: D-Bus Disconnect() call SUCCEEDED.\n");
+        g_task_return_boolean(t, TRUE);
+    }
 }
 
 void connect_to_bluetooth_device_async(const gchar *address, BluetoothOperationCallback cb, gpointer ud) {
-    OperationData *task_data = g_new0(OperationData, 1);
-    task_data->address = g_strdup(address);
-    FinishData *finish_data = g_new0(FinishData, 1);
-    finish_data->cb = cb; finish_data->ud = ud;
-    GTask *task = g_task_new(NULL, NULL, on_async_op_finished, finish_data);
-    g_task_set_task_data(task, task_data, operation_data_free);
-    g_task_run_in_thread(task, connect_thread);
-    g_object_unref(task);
+    g_print("[BT DEBUG] connect_to_bluetooth_device_async called for %s\n", address);
+    OperationData *td = g_new0(OperationData, 1); td->address = g_strdup(address);
+    FinishData *fd = g_new0(FinishData, 1); fd->cb = cb; fd->ud = ud;
+    GTask *t = g_task_new(NULL, NULL, on_async_op_finished, fd);
+    g_task_set_task_data(t, td, operation_data_free);
+    g_task_run_in_thread(t, connect_thread);
+    g_object_unref(t);
 }
 
 void disconnect_bluetooth_device_async(const gchar *address, BluetoothOperationCallback cb, gpointer ud) {
-    OperationData *task_data = g_new0(OperationData, 1);
-    task_data->address = g_strdup(address);
-    FinishData *finish_data = g_new0(FinishData, 1);
-    finish_data->cb = cb; finish_data->ud = ud;
-    GTask *task = g_task_new(NULL, NULL, on_async_op_finished, finish_data);
-    g_task_set_task_data(task, task_data, operation_data_free);
-    g_task_run_in_thread(task, disconnect_thread);
-    g_object_unref(task);
+    g_print("[BT DEBUG] disconnect_bluetooth_device_async called for %s\n", address);
+    OperationData *td = g_new0(OperationData, 1); td->address = g_strdup(address);
+    FinishData *fd = g_new0(FinishData, 1); fd->cb = cb; fd->ud = ud;
+    GTask *t = g_task_new(NULL, NULL, on_async_op_finished, fd);
+    g_task_set_task_data(t, td, operation_data_free);
+    g_task_run_in_thread(t, disconnect_thread);
+    g_object_unref(t);
 }
-// --- FIX END ---
 
 // --- Memory Management ---
-void bluetooth_device_free(gpointer data) {
-    if (!data) return;
-    BluetoothDevice *dev = (BluetoothDevice*)data;
-    g_free(dev->address);
-    g_free(dev->name);
-    g_free(dev->object_path);
-    g_free(dev);
-}
-
-void free_bluetooth_device_list(GList *list) {
-    g_list_free_full(list, bluetooth_device_free);
-}
+void bluetooth_device_free(gpointer data) { if (!data) return; BluetoothDevice *dev = (BluetoothDevice*)data; g_free(dev->address); g_free(dev->name); g_free(dev->object_path); g_free(dev); }
+void free_bluetooth_device_list(GList *list) { g_list_free_full(list, bluetooth_device_free); }
 ======================================================================
 ### FILE: ././widgets/control-center/src/bluetooth_scanner.c
 ======================================================================
@@ -2872,7 +3146,7 @@ void system_monitor_free(SystemMonitor *monitor);
 ======================================================================
 ### FILE: ././widgets/control-center/src/network_manager.h
 ======================================================================
-// ===== src/network_manager.h =====
+// ===== widgets/control-center/src/network_manager.h (COMPLETE) =====
 #ifndef NETWORK_MANAGER_H
 #define NETWORK_MANAGER_H
 
@@ -2885,12 +3159,26 @@ void network_manager_shutdown();
 // --- Type Definitions ---
 typedef void (*NetworkOperationCallback)(gboolean success, gpointer user_data);
 
+// --- ADD THIS NEW ENUM ---
+typedef enum {
+    WIFI_STATE_DISCONNECTED,      // Not connected, but might be known/saved
+    WIFI_STATE_CONNECTING,        // In the process of connecting
+    WIFI_STATE_LIMITED,           // Connected to router, but no internet access
+    WIFI_STATE_CONNECTED          // Fully connected with internet access
+} WifiConnectivityState;
+// --- END NEW ENUM ---
+
 typedef struct {
     gchar *ssid;
     gchar *object_path; // D-Bus object path of the Access Point
     guint8 strength;
     gboolean is_secure;
     gboolean is_active;
+    gboolean is_known; // Is this a saved network profile?
+    
+    // --- ADD THIS NEW FIELD ---
+    WifiConnectivityState connectivity;
+
 } WifiNetwork;
 
 typedef struct {
@@ -2912,7 +3200,6 @@ gboolean is_airplane_mode_active();
 // --- Network Operations ---
 GList* get_available_wifi_networks();
 
-// CHANGED: This is now an async function
 void get_wifi_network_details_async(const gchar *ap_path, WifiDetailsCallback callback, gpointer user_data);
 
 gchar* find_connection_for_ssid(const gchar *ssid);
@@ -2958,6 +3245,7 @@ control_center_sources = [
   'src/system_monitor.c',
   'src/utils.c',
   'src/wifi_scanner.c',
+  'src/qr.c', 
 ]
 
 control_center_deps = [
@@ -2965,6 +3253,7 @@ control_center_deps = [
   dependency('libadwaita-1'),
   dependency('gio-2.0'),
   dependency('gio-unix-2.0'),
+  dependency('libqrencode'),
 ]
 
 # Note: Your config.json looks for 'control-center.so'.
@@ -8393,6 +8682,944 @@ subdir('insight-daemon')
 ### FILE: ././build/meson-private/sanitycheckc.c
 ======================================================================
 int main(void) { int class=0; return class; }
+
+======================================================================
+### FILE: ././build/meson-private/__CMake_compiler_info__/CMakeFiles/4.1.2/CompilerIdC/CMakeCCompilerId.c
+======================================================================
+#ifdef __cplusplus
+# error "A C++ compiler has been selected for C."
+#endif
+
+#if defined(__18CXX)
+# define ID_VOID_MAIN
+#endif
+#if defined(__CLASSIC_C__)
+/* cv-qualifiers did not exist in K&R C */
+# define const
+# define volatile
+#endif
+
+#if !defined(__has_include)
+/* If the compiler does not have __has_include, pretend the answer is
+   always no.  */
+#  define __has_include(x) 0
+#endif
+
+
+/* Version number components: V=Version, R=Revision, P=Patch
+   Version date components:   YYYY=Year, MM=Month,   DD=Day  */
+
+#if defined(__INTEL_COMPILER) || defined(__ICC)
+# define COMPILER_ID "Intel"
+# if defined(_MSC_VER)
+#  define SIMULATE_ID "MSVC"
+# endif
+# if defined(__GNUC__)
+#  define SIMULATE_ID "GNU"
+# endif
+  /* __INTEL_COMPILER = VRP prior to 2021, and then VVVV for 2021 and later,
+     except that a few beta releases use the old format with V=2021.  */
+# if __INTEL_COMPILER < 2021 || __INTEL_COMPILER == 202110 || __INTEL_COMPILER == 202111
+#  define COMPILER_VERSION_MAJOR DEC(__INTEL_COMPILER/100)
+#  define COMPILER_VERSION_MINOR DEC(__INTEL_COMPILER/10 % 10)
+#  if defined(__INTEL_COMPILER_UPDATE)
+#   define COMPILER_VERSION_PATCH DEC(__INTEL_COMPILER_UPDATE)
+#  else
+#   define COMPILER_VERSION_PATCH DEC(__INTEL_COMPILER   % 10)
+#  endif
+# else
+#  define COMPILER_VERSION_MAJOR DEC(__INTEL_COMPILER)
+#  define COMPILER_VERSION_MINOR DEC(__INTEL_COMPILER_UPDATE)
+   /* The third version component from --version is an update index,
+      but no macro is provided for it.  */
+#  define COMPILER_VERSION_PATCH DEC(0)
+# endif
+# if defined(__INTEL_COMPILER_BUILD_DATE)
+   /* __INTEL_COMPILER_BUILD_DATE = YYYYMMDD */
+#  define COMPILER_VERSION_TWEAK DEC(__INTEL_COMPILER_BUILD_DATE)
+# endif
+# if defined(_MSC_VER)
+   /* _MSC_VER = VVRR */
+#  define SIMULATE_VERSION_MAJOR DEC(_MSC_VER / 100)
+#  define SIMULATE_VERSION_MINOR DEC(_MSC_VER % 100)
+# endif
+# if defined(__GNUC__)
+#  define SIMULATE_VERSION_MAJOR DEC(__GNUC__)
+# elif defined(__GNUG__)
+#  define SIMULATE_VERSION_MAJOR DEC(__GNUG__)
+# endif
+# if defined(__GNUC_MINOR__)
+#  define SIMULATE_VERSION_MINOR DEC(__GNUC_MINOR__)
+# endif
+# if defined(__GNUC_PATCHLEVEL__)
+#  define SIMULATE_VERSION_PATCH DEC(__GNUC_PATCHLEVEL__)
+# endif
+
+#elif (defined(__clang__) && defined(__INTEL_CLANG_COMPILER)) || defined(__INTEL_LLVM_COMPILER)
+# define COMPILER_ID "IntelLLVM"
+#if defined(_MSC_VER)
+# define SIMULATE_ID "MSVC"
+#endif
+#if defined(__GNUC__)
+# define SIMULATE_ID "GNU"
+#endif
+/* __INTEL_LLVM_COMPILER = VVVVRP prior to 2021.2.0, VVVVRRPP for 2021.2.0 and
+ * later.  Look for 6 digit vs. 8 digit version number to decide encoding.
+ * VVVV is no smaller than the current year when a version is released.
+ */
+#if __INTEL_LLVM_COMPILER < 1000000L
+# define COMPILER_VERSION_MAJOR DEC(__INTEL_LLVM_COMPILER/100)
+# define COMPILER_VERSION_MINOR DEC(__INTEL_LLVM_COMPILER/10 % 10)
+# define COMPILER_VERSION_PATCH DEC(__INTEL_LLVM_COMPILER    % 10)
+#else
+# define COMPILER_VERSION_MAJOR DEC(__INTEL_LLVM_COMPILER/10000)
+# define COMPILER_VERSION_MINOR DEC(__INTEL_LLVM_COMPILER/100 % 100)
+# define COMPILER_VERSION_PATCH DEC(__INTEL_LLVM_COMPILER     % 100)
+#endif
+#if defined(_MSC_VER)
+  /* _MSC_VER = VVRR */
+# define SIMULATE_VERSION_MAJOR DEC(_MSC_VER / 100)
+# define SIMULATE_VERSION_MINOR DEC(_MSC_VER % 100)
+#endif
+#if defined(__GNUC__)
+# define SIMULATE_VERSION_MAJOR DEC(__GNUC__)
+#elif defined(__GNUG__)
+# define SIMULATE_VERSION_MAJOR DEC(__GNUG__)
+#endif
+#if defined(__GNUC_MINOR__)
+# define SIMULATE_VERSION_MINOR DEC(__GNUC_MINOR__)
+#endif
+#if defined(__GNUC_PATCHLEVEL__)
+# define SIMULATE_VERSION_PATCH DEC(__GNUC_PATCHLEVEL__)
+#endif
+
+#elif defined(__PATHCC__)
+# define COMPILER_ID "PathScale"
+# define COMPILER_VERSION_MAJOR DEC(__PATHCC__)
+# define COMPILER_VERSION_MINOR DEC(__PATHCC_MINOR__)
+# if defined(__PATHCC_PATCHLEVEL__)
+#  define COMPILER_VERSION_PATCH DEC(__PATHCC_PATCHLEVEL__)
+# endif
+
+#elif defined(__BORLANDC__) && defined(__CODEGEARC_VERSION__)
+# define COMPILER_ID "Embarcadero"
+# define COMPILER_VERSION_MAJOR HEX(__CODEGEARC_VERSION__>>24 & 0x00FF)
+# define COMPILER_VERSION_MINOR HEX(__CODEGEARC_VERSION__>>16 & 0x00FF)
+# define COMPILER_VERSION_PATCH DEC(__CODEGEARC_VERSION__     & 0xFFFF)
+
+#elif defined(__BORLANDC__)
+# define COMPILER_ID "Borland"
+  /* __BORLANDC__ = 0xVRR */
+# define COMPILER_VERSION_MAJOR HEX(__BORLANDC__>>8)
+# define COMPILER_VERSION_MINOR HEX(__BORLANDC__ & 0xFF)
+
+#elif defined(__WATCOMC__) && __WATCOMC__ < 1200
+# define COMPILER_ID "Watcom"
+   /* __WATCOMC__ = VVRR */
+# define COMPILER_VERSION_MAJOR DEC(__WATCOMC__ / 100)
+# define COMPILER_VERSION_MINOR DEC((__WATCOMC__ / 10) % 10)
+# if (__WATCOMC__ % 10) > 0
+#  define COMPILER_VERSION_PATCH DEC(__WATCOMC__ % 10)
+# endif
+
+#elif defined(__WATCOMC__)
+# define COMPILER_ID "OpenWatcom"
+   /* __WATCOMC__ = VVRP + 1100 */
+# define COMPILER_VERSION_MAJOR DEC((__WATCOMC__ - 1100) / 100)
+# define COMPILER_VERSION_MINOR DEC((__WATCOMC__ / 10) % 10)
+# if (__WATCOMC__ % 10) > 0
+#  define COMPILER_VERSION_PATCH DEC(__WATCOMC__ % 10)
+# endif
+
+#elif defined(__SUNPRO_C)
+# define COMPILER_ID "SunPro"
+# if __SUNPRO_C >= 0x5100
+   /* __SUNPRO_C = 0xVRRP */
+#  define COMPILER_VERSION_MAJOR HEX(__SUNPRO_C>>12)
+#  define COMPILER_VERSION_MINOR HEX(__SUNPRO_C>>4 & 0xFF)
+#  define COMPILER_VERSION_PATCH HEX(__SUNPRO_C    & 0xF)
+# else
+   /* __SUNPRO_CC = 0xVRP */
+#  define COMPILER_VERSION_MAJOR HEX(__SUNPRO_C>>8)
+#  define COMPILER_VERSION_MINOR HEX(__SUNPRO_C>>4 & 0xF)
+#  define COMPILER_VERSION_PATCH HEX(__SUNPRO_C    & 0xF)
+# endif
+
+#elif defined(__HP_cc)
+# define COMPILER_ID "HP"
+  /* __HP_cc = VVRRPP */
+# define COMPILER_VERSION_MAJOR DEC(__HP_cc/10000)
+# define COMPILER_VERSION_MINOR DEC(__HP_cc/100 % 100)
+# define COMPILER_VERSION_PATCH DEC(__HP_cc     % 100)
+
+#elif defined(__DECC)
+# define COMPILER_ID "Compaq"
+  /* __DECC_VER = VVRRTPPPP */
+# define COMPILER_VERSION_MAJOR DEC(__DECC_VER/10000000)
+# define COMPILER_VERSION_MINOR DEC(__DECC_VER/100000  % 100)
+# define COMPILER_VERSION_PATCH DEC(__DECC_VER         % 10000)
+
+#elif defined(__IBMC__) && defined(__COMPILER_VER__)
+# define COMPILER_ID "zOS"
+  /* __IBMC__ = VRP */
+# define COMPILER_VERSION_MAJOR DEC(__IBMC__/100)
+# define COMPILER_VERSION_MINOR DEC(__IBMC__/10 % 10)
+# define COMPILER_VERSION_PATCH DEC(__IBMC__    % 10)
+
+#elif defined(__open_xl__) && defined(__clang__)
+# define COMPILER_ID "IBMClang"
+# define COMPILER_VERSION_MAJOR DEC(__open_xl_version__)
+# define COMPILER_VERSION_MINOR DEC(__open_xl_release__)
+# define COMPILER_VERSION_PATCH DEC(__open_xl_modification__)
+# define COMPILER_VERSION_TWEAK DEC(__open_xl_ptf_fix_level__)
+# define COMPILER_VERSION_INTERNAL_STR  __clang_version__
+
+
+#elif defined(__ibmxl__) && defined(__clang__)
+# define COMPILER_ID "XLClang"
+# define COMPILER_VERSION_MAJOR DEC(__ibmxl_version__)
+# define COMPILER_VERSION_MINOR DEC(__ibmxl_release__)
+# define COMPILER_VERSION_PATCH DEC(__ibmxl_modification__)
+# define COMPILER_VERSION_TWEAK DEC(__ibmxl_ptf_fix_level__)
+
+
+#elif defined(__IBMC__) && !defined(__COMPILER_VER__) && __IBMC__ >= 800
+# define COMPILER_ID "XL"
+  /* __IBMC__ = VRP */
+# define COMPILER_VERSION_MAJOR DEC(__IBMC__/100)
+# define COMPILER_VERSION_MINOR DEC(__IBMC__/10 % 10)
+# define COMPILER_VERSION_PATCH DEC(__IBMC__    % 10)
+
+#elif defined(__IBMC__) && !defined(__COMPILER_VER__) && __IBMC__ < 800
+# define COMPILER_ID "VisualAge"
+  /* __IBMC__ = VRP */
+# define COMPILER_VERSION_MAJOR DEC(__IBMC__/100)
+# define COMPILER_VERSION_MINOR DEC(__IBMC__/10 % 10)
+# define COMPILER_VERSION_PATCH DEC(__IBMC__    % 10)
+
+#elif defined(__NVCOMPILER)
+# define COMPILER_ID "NVHPC"
+# define COMPILER_VERSION_MAJOR DEC(__NVCOMPILER_MAJOR__)
+# define COMPILER_VERSION_MINOR DEC(__NVCOMPILER_MINOR__)
+# if defined(__NVCOMPILER_PATCHLEVEL__)
+#  define COMPILER_VERSION_PATCH DEC(__NVCOMPILER_PATCHLEVEL__)
+# endif
+
+#elif defined(__PGI)
+# define COMPILER_ID "PGI"
+# define COMPILER_VERSION_MAJOR DEC(__PGIC__)
+# define COMPILER_VERSION_MINOR DEC(__PGIC_MINOR__)
+# if defined(__PGIC_PATCHLEVEL__)
+#  define COMPILER_VERSION_PATCH DEC(__PGIC_PATCHLEVEL__)
+# endif
+
+#elif defined(__clang__) && defined(__cray__)
+# define COMPILER_ID "CrayClang"
+# define COMPILER_VERSION_MAJOR DEC(__cray_major__)
+# define COMPILER_VERSION_MINOR DEC(__cray_minor__)
+# define COMPILER_VERSION_PATCH DEC(__cray_patchlevel__)
+# define COMPILER_VERSION_INTERNAL_STR __clang_version__
+
+
+#elif defined(_CRAYC)
+# define COMPILER_ID "Cray"
+# define COMPILER_VERSION_MAJOR DEC(_RELEASE_MAJOR)
+# define COMPILER_VERSION_MINOR DEC(_RELEASE_MINOR)
+
+#elif defined(__TI_COMPILER_VERSION__)
+# define COMPILER_ID "TI"
+  /* __TI_COMPILER_VERSION__ = VVVRRRPPP */
+# define COMPILER_VERSION_MAJOR DEC(__TI_COMPILER_VERSION__/1000000)
+# define COMPILER_VERSION_MINOR DEC(__TI_COMPILER_VERSION__/1000   % 1000)
+# define COMPILER_VERSION_PATCH DEC(__TI_COMPILER_VERSION__        % 1000)
+
+#elif defined(__CLANG_FUJITSU)
+# define COMPILER_ID "FujitsuClang"
+# define COMPILER_VERSION_MAJOR DEC(__FCC_major__)
+# define COMPILER_VERSION_MINOR DEC(__FCC_minor__)
+# define COMPILER_VERSION_PATCH DEC(__FCC_patchlevel__)
+# define COMPILER_VERSION_INTERNAL_STR __clang_version__
+
+
+#elif defined(__FUJITSU)
+# define COMPILER_ID "Fujitsu"
+# if defined(__FCC_version__)
+#   define COMPILER_VERSION __FCC_version__
+# elif defined(__FCC_major__)
+#   define COMPILER_VERSION_MAJOR DEC(__FCC_major__)
+#   define COMPILER_VERSION_MINOR DEC(__FCC_minor__)
+#   define COMPILER_VERSION_PATCH DEC(__FCC_patchlevel__)
+# endif
+# if defined(__fcc_version)
+#   define COMPILER_VERSION_INTERNAL DEC(__fcc_version)
+# elif defined(__FCC_VERSION)
+#   define COMPILER_VERSION_INTERNAL DEC(__FCC_VERSION)
+# endif
+
+
+#elif defined(__ghs__)
+# define COMPILER_ID "GHS"
+/* __GHS_VERSION_NUMBER = VVVVRP */
+# ifdef __GHS_VERSION_NUMBER
+# define COMPILER_VERSION_MAJOR DEC(__GHS_VERSION_NUMBER / 100)
+# define COMPILER_VERSION_MINOR DEC(__GHS_VERSION_NUMBER / 10 % 10)
+# define COMPILER_VERSION_PATCH DEC(__GHS_VERSION_NUMBER      % 10)
+# endif
+
+#elif defined(__TASKING__)
+# define COMPILER_ID "Tasking"
+  # define COMPILER_VERSION_MAJOR DEC(__VERSION__/1000)
+  # define COMPILER_VERSION_MINOR DEC(__VERSION__ % 100)
+# define COMPILER_VERSION_INTERNAL DEC(__VERSION__)
+
+#elif defined(__ORANGEC__)
+# define COMPILER_ID "OrangeC"
+# define COMPILER_VERSION_MAJOR DEC(__ORANGEC_MAJOR__)
+# define COMPILER_VERSION_MINOR DEC(__ORANGEC_MINOR__)
+# define COMPILER_VERSION_PATCH DEC(__ORANGEC_PATCHLEVEL__)
+
+#elif defined(__RENESAS__)
+# define COMPILER_ID "Renesas"
+/* __RENESAS_VERSION__ = 0xVVRRPP00 */
+# define COMPILER_VERSION_MAJOR HEX(__RENESAS_VERSION__ >> 24 & 0xFF)
+# define COMPILER_VERSION_MINOR HEX(__RENESAS_VERSION__ >> 16 & 0xFF)
+# define COMPILER_VERSION_PATCH HEX(__RENESAS_VERSION__ >> 8  & 0xFF)
+
+#elif defined(__TINYC__)
+# define COMPILER_ID "TinyCC"
+
+#elif defined(__BCC__)
+# define COMPILER_ID "Bruce"
+
+#elif defined(__SCO_VERSION__)
+# define COMPILER_ID "SCO"
+
+#elif defined(__ARMCC_VERSION) && !defined(__clang__)
+# define COMPILER_ID "ARMCC"
+#if __ARMCC_VERSION >= 1000000
+  /* __ARMCC_VERSION = VRRPPPP */
+  # define COMPILER_VERSION_MAJOR DEC(__ARMCC_VERSION/1000000)
+  # define COMPILER_VERSION_MINOR DEC(__ARMCC_VERSION/10000 % 100)
+  # define COMPILER_VERSION_PATCH DEC(__ARMCC_VERSION     % 10000)
+#else
+  /* __ARMCC_VERSION = VRPPPP */
+  # define COMPILER_VERSION_MAJOR DEC(__ARMCC_VERSION/100000)
+  # define COMPILER_VERSION_MINOR DEC(__ARMCC_VERSION/10000 % 10)
+  # define COMPILER_VERSION_PATCH DEC(__ARMCC_VERSION    % 10000)
+#endif
+
+
+#elif defined(__clang__) && defined(__apple_build_version__)
+# define COMPILER_ID "AppleClang"
+# if defined(_MSC_VER)
+#  define SIMULATE_ID "MSVC"
+# endif
+# define COMPILER_VERSION_MAJOR DEC(__clang_major__)
+# define COMPILER_VERSION_MINOR DEC(__clang_minor__)
+# define COMPILER_VERSION_PATCH DEC(__clang_patchlevel__)
+# if defined(_MSC_VER)
+   /* _MSC_VER = VVRR */
+#  define SIMULATE_VERSION_MAJOR DEC(_MSC_VER / 100)
+#  define SIMULATE_VERSION_MINOR DEC(_MSC_VER % 100)
+# endif
+# define COMPILER_VERSION_TWEAK DEC(__apple_build_version__)
+
+#elif defined(__clang__) && defined(__ARMCOMPILER_VERSION)
+# define COMPILER_ID "ARMClang"
+  # define COMPILER_VERSION_MAJOR DEC(__ARMCOMPILER_VERSION/1000000)
+  # define COMPILER_VERSION_MINOR DEC(__ARMCOMPILER_VERSION/10000 % 100)
+  # define COMPILER_VERSION_PATCH DEC(__ARMCOMPILER_VERSION/100   % 100)
+# define COMPILER_VERSION_INTERNAL DEC(__ARMCOMPILER_VERSION)
+
+#elif defined(__clang__) && defined(__ti__)
+# define COMPILER_ID "TIClang"
+  # define COMPILER_VERSION_MAJOR DEC(__ti_major__)
+  # define COMPILER_VERSION_MINOR DEC(__ti_minor__)
+  # define COMPILER_VERSION_PATCH DEC(__ti_patchlevel__)
+# define COMPILER_VERSION_INTERNAL DEC(__ti_version__)
+
+#elif defined(__clang__)
+# define COMPILER_ID "Clang"
+# if defined(_MSC_VER)
+#  define SIMULATE_ID "MSVC"
+# endif
+# define COMPILER_VERSION_MAJOR DEC(__clang_major__)
+# define COMPILER_VERSION_MINOR DEC(__clang_minor__)
+# define COMPILER_VERSION_PATCH DEC(__clang_patchlevel__)
+# if defined(_MSC_VER)
+   /* _MSC_VER = VVRR */
+#  define SIMULATE_VERSION_MAJOR DEC(_MSC_VER / 100)
+#  define SIMULATE_VERSION_MINOR DEC(_MSC_VER % 100)
+# endif
+
+#elif defined(__LCC__) && (defined(__GNUC__) || defined(__GNUG__) || defined(__MCST__))
+# define COMPILER_ID "LCC"
+# define COMPILER_VERSION_MAJOR DEC(__LCC__ / 100)
+# define COMPILER_VERSION_MINOR DEC(__LCC__ % 100)
+# if defined(__LCC_MINOR__)
+#  define COMPILER_VERSION_PATCH DEC(__LCC_MINOR__)
+# endif
+# if defined(__GNUC__) && defined(__GNUC_MINOR__)
+#  define SIMULATE_ID "GNU"
+#  define SIMULATE_VERSION_MAJOR DEC(__GNUC__)
+#  define SIMULATE_VERSION_MINOR DEC(__GNUC_MINOR__)
+#  if defined(__GNUC_PATCHLEVEL__)
+#   define SIMULATE_VERSION_PATCH DEC(__GNUC_PATCHLEVEL__)
+#  endif
+# endif
+
+#elif defined(__GNUC__)
+# define COMPILER_ID "GNU"
+# define COMPILER_VERSION_MAJOR DEC(__GNUC__)
+# if defined(__GNUC_MINOR__)
+#  define COMPILER_VERSION_MINOR DEC(__GNUC_MINOR__)
+# endif
+# if defined(__GNUC_PATCHLEVEL__)
+#  define COMPILER_VERSION_PATCH DEC(__GNUC_PATCHLEVEL__)
+# endif
+
+#elif defined(_MSC_VER)
+# define COMPILER_ID "MSVC"
+  /* _MSC_VER = VVRR */
+# define COMPILER_VERSION_MAJOR DEC(_MSC_VER / 100)
+# define COMPILER_VERSION_MINOR DEC(_MSC_VER % 100)
+# if defined(_MSC_FULL_VER)
+#  if _MSC_VER >= 1400
+    /* _MSC_FULL_VER = VVRRPPPPP */
+#   define COMPILER_VERSION_PATCH DEC(_MSC_FULL_VER % 100000)
+#  else
+    /* _MSC_FULL_VER = VVRRPPPP */
+#   define COMPILER_VERSION_PATCH DEC(_MSC_FULL_VER % 10000)
+#  endif
+# endif
+# if defined(_MSC_BUILD)
+#  define COMPILER_VERSION_TWEAK DEC(_MSC_BUILD)
+# endif
+
+#elif defined(_ADI_COMPILER)
+# define COMPILER_ID "ADSP"
+#if defined(__VERSIONNUM__)
+  /* __VERSIONNUM__ = 0xVVRRPPTT */
+#  define COMPILER_VERSION_MAJOR DEC(__VERSIONNUM__ >> 24 & 0xFF)
+#  define COMPILER_VERSION_MINOR DEC(__VERSIONNUM__ >> 16 & 0xFF)
+#  define COMPILER_VERSION_PATCH DEC(__VERSIONNUM__ >> 8 & 0xFF)
+#  define COMPILER_VERSION_TWEAK DEC(__VERSIONNUM__ & 0xFF)
+#endif
+
+#elif defined(__IAR_SYSTEMS_ICC__) || defined(__IAR_SYSTEMS_ICC)
+# define COMPILER_ID "IAR"
+# if defined(__VER__) && defined(__ICCARM__)
+#  define COMPILER_VERSION_MAJOR DEC((__VER__) / 1000000)
+#  define COMPILER_VERSION_MINOR DEC(((__VER__) / 1000) % 1000)
+#  define COMPILER_VERSION_PATCH DEC((__VER__) % 1000)
+#  define COMPILER_VERSION_INTERNAL DEC(__IAR_SYSTEMS_ICC__)
+# elif defined(__VER__) && (defined(__ICCAVR__) || defined(__ICCRX__) || defined(__ICCRH850__) || defined(__ICCRL78__) || defined(__ICC430__) || defined(__ICCRISCV__) || defined(__ICCV850__) || defined(__ICC8051__) || defined(__ICCSTM8__))
+#  define COMPILER_VERSION_MAJOR DEC((__VER__) / 100)
+#  define COMPILER_VERSION_MINOR DEC((__VER__) - (((__VER__) / 100)*100))
+#  define COMPILER_VERSION_PATCH DEC(__SUBVERSION__)
+#  define COMPILER_VERSION_INTERNAL DEC(__IAR_SYSTEMS_ICC__)
+# endif
+
+#elif defined(__DCC__) && defined(_DIAB_TOOL)
+# define COMPILER_ID "Diab"
+  # define COMPILER_VERSION_MAJOR DEC(__VERSION_MAJOR_NUMBER__)
+  # define COMPILER_VERSION_MINOR DEC(__VERSION_MINOR_NUMBER__)
+  # define COMPILER_VERSION_PATCH DEC(__VERSION_ARCH_FEATURE_NUMBER__)
+  # define COMPILER_VERSION_TWEAK DEC(__VERSION_BUG_FIX_NUMBER__)
+
+
+#elif defined(__SDCC_VERSION_MAJOR) || defined(SDCC)
+# define COMPILER_ID "SDCC"
+# if defined(__SDCC_VERSION_MAJOR)
+#  define COMPILER_VERSION_MAJOR DEC(__SDCC_VERSION_MAJOR)
+#  define COMPILER_VERSION_MINOR DEC(__SDCC_VERSION_MINOR)
+#  define COMPILER_VERSION_PATCH DEC(__SDCC_VERSION_PATCH)
+# else
+  /* SDCC = VRP */
+#  define COMPILER_VERSION_MAJOR DEC(SDCC/100)
+#  define COMPILER_VERSION_MINOR DEC(SDCC/10 % 10)
+#  define COMPILER_VERSION_PATCH DEC(SDCC    % 10)
+# endif
+
+
+/* These compilers are either not known or too old to define an
+  identification macro.  Try to identify the platform and guess that
+  it is the native compiler.  */
+#elif defined(__hpux) || defined(__hpua)
+# define COMPILER_ID "HP"
+
+#else /* unknown compiler */
+# define COMPILER_ID ""
+#endif
+
+/* Construct the string literal in pieces to prevent the source from
+   getting matched.  Store it in a pointer rather than an array
+   because some compilers will just produce instructions to fill the
+   array rather than assigning a pointer to a static array.  */
+char const* info_compiler = "INFO" ":" "compiler[" COMPILER_ID "]";
+#ifdef SIMULATE_ID
+char const* info_simulate = "INFO" ":" "simulate[" SIMULATE_ID "]";
+#endif
+
+#ifdef __QNXNTO__
+char const* qnxnto = "INFO" ":" "qnxnto[]";
+#endif
+
+#if defined(__CRAYXT_COMPUTE_LINUX_TARGET)
+char const *info_cray = "INFO" ":" "compiler_wrapper[CrayPrgEnv]";
+#endif
+
+#define STRINGIFY_HELPER(X) #X
+#define STRINGIFY(X) STRINGIFY_HELPER(X)
+
+/* Identify known platforms by name.  */
+#if defined(__linux) || defined(__linux__) || defined(linux)
+# define PLATFORM_ID "Linux"
+
+#elif defined(__MSYS__)
+# define PLATFORM_ID "MSYS"
+
+#elif defined(__CYGWIN__)
+# define PLATFORM_ID "Cygwin"
+
+#elif defined(__MINGW32__)
+# define PLATFORM_ID "MinGW"
+
+#elif defined(__APPLE__)
+# define PLATFORM_ID "Darwin"
+
+#elif defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
+# define PLATFORM_ID "Windows"
+
+#elif defined(__FreeBSD__) || defined(__FreeBSD)
+# define PLATFORM_ID "FreeBSD"
+
+#elif defined(__NetBSD__) || defined(__NetBSD)
+# define PLATFORM_ID "NetBSD"
+
+#elif defined(__OpenBSD__) || defined(__OPENBSD)
+# define PLATFORM_ID "OpenBSD"
+
+#elif defined(__sun) || defined(sun)
+# define PLATFORM_ID "SunOS"
+
+#elif defined(_AIX) || defined(__AIX) || defined(__AIX__) || defined(__aix) || defined(__aix__)
+# define PLATFORM_ID "AIX"
+
+#elif defined(__hpux) || defined(__hpux__)
+# define PLATFORM_ID "HP-UX"
+
+#elif defined(__HAIKU__)
+# define PLATFORM_ID "Haiku"
+
+#elif defined(__BeOS) || defined(__BEOS__) || defined(_BEOS)
+# define PLATFORM_ID "BeOS"
+
+#elif defined(__QNX__) || defined(__QNXNTO__)
+# define PLATFORM_ID "QNX"
+
+#elif defined(__tru64) || defined(_tru64) || defined(__TRU64__)
+# define PLATFORM_ID "Tru64"
+
+#elif defined(__riscos) || defined(__riscos__)
+# define PLATFORM_ID "RISCos"
+
+#elif defined(__sinix) || defined(__sinix__) || defined(__SINIX__)
+# define PLATFORM_ID "SINIX"
+
+#elif defined(__UNIX_SV__)
+# define PLATFORM_ID "UNIX_SV"
+
+#elif defined(__bsdos__)
+# define PLATFORM_ID "BSDOS"
+
+#elif defined(_MPRAS) || defined(MPRAS)
+# define PLATFORM_ID "MP-RAS"
+
+#elif defined(__osf) || defined(__osf__)
+# define PLATFORM_ID "OSF1"
+
+#elif defined(_SCO_SV) || defined(SCO_SV) || defined(sco_sv)
+# define PLATFORM_ID "SCO_SV"
+
+#elif defined(__ultrix) || defined(__ultrix__) || defined(_ULTRIX)
+# define PLATFORM_ID "ULTRIX"
+
+#elif defined(__XENIX__) || defined(_XENIX) || defined(XENIX)
+# define PLATFORM_ID "Xenix"
+
+#elif defined(__WATCOMC__)
+# if defined(__LINUX__)
+#  define PLATFORM_ID "Linux"
+
+# elif defined(__DOS__)
+#  define PLATFORM_ID "DOS"
+
+# elif defined(__OS2__)
+#  define PLATFORM_ID "OS2"
+
+# elif defined(__WINDOWS__)
+#  define PLATFORM_ID "Windows3x"
+
+# elif defined(__VXWORKS__)
+#  define PLATFORM_ID "VxWorks"
+
+# else /* unknown platform */
+#  define PLATFORM_ID
+# endif
+
+#elif defined(__INTEGRITY)
+# if defined(INT_178B)
+#  define PLATFORM_ID "Integrity178"
+
+# else /* regular Integrity */
+#  define PLATFORM_ID "Integrity"
+# endif
+
+# elif defined(_ADI_COMPILER)
+#  define PLATFORM_ID "ADSP"
+
+#else /* unknown platform */
+# define PLATFORM_ID
+
+#endif
+
+/* For windows compilers MSVC and Intel we can determine
+   the architecture of the compiler being used.  This is because
+   the compilers do not have flags that can change the architecture,
+   but rather depend on which compiler is being used
+*/
+#if defined(_WIN32) && defined(_MSC_VER)
+# if defined(_M_IA64)
+#  define ARCHITECTURE_ID "IA64"
+
+# elif defined(_M_ARM64EC)
+#  define ARCHITECTURE_ID "ARM64EC"
+
+# elif defined(_M_X64) || defined(_M_AMD64)
+#  define ARCHITECTURE_ID "x64"
+
+# elif defined(_M_IX86)
+#  define ARCHITECTURE_ID "X86"
+
+# elif defined(_M_ARM64)
+#  define ARCHITECTURE_ID "ARM64"
+
+# elif defined(_M_ARM)
+#  if _M_ARM == 4
+#   define ARCHITECTURE_ID "ARMV4I"
+#  elif _M_ARM == 5
+#   define ARCHITECTURE_ID "ARMV5I"
+#  else
+#   define ARCHITECTURE_ID "ARMV" STRINGIFY(_M_ARM)
+#  endif
+
+# elif defined(_M_MIPS)
+#  define ARCHITECTURE_ID "MIPS"
+
+# elif defined(_M_SH)
+#  define ARCHITECTURE_ID "SHx"
+
+# else /* unknown architecture */
+#  define ARCHITECTURE_ID ""
+# endif
+
+#elif defined(__WATCOMC__)
+# if defined(_M_I86)
+#  define ARCHITECTURE_ID "I86"
+
+# elif defined(_M_IX86)
+#  define ARCHITECTURE_ID "X86"
+
+# else /* unknown architecture */
+#  define ARCHITECTURE_ID ""
+# endif
+
+#elif defined(__IAR_SYSTEMS_ICC__) || defined(__IAR_SYSTEMS_ICC)
+# if defined(__ICCARM__)
+#  define ARCHITECTURE_ID "ARM"
+
+# elif defined(__ICCRX__)
+#  define ARCHITECTURE_ID "RX"
+
+# elif defined(__ICCRH850__)
+#  define ARCHITECTURE_ID "RH850"
+
+# elif defined(__ICCRL78__)
+#  define ARCHITECTURE_ID "RL78"
+
+# elif defined(__ICCRISCV__)
+#  define ARCHITECTURE_ID "RISCV"
+
+# elif defined(__ICCAVR__)
+#  define ARCHITECTURE_ID "AVR"
+
+# elif defined(__ICC430__)
+#  define ARCHITECTURE_ID "MSP430"
+
+# elif defined(__ICCV850__)
+#  define ARCHITECTURE_ID "V850"
+
+# elif defined(__ICC8051__)
+#  define ARCHITECTURE_ID "8051"
+
+# elif defined(__ICCSTM8__)
+#  define ARCHITECTURE_ID "STM8"
+
+# else /* unknown architecture */
+#  define ARCHITECTURE_ID ""
+# endif
+
+#elif defined(__ghs__)
+# if defined(__PPC64__)
+#  define ARCHITECTURE_ID "PPC64"
+
+# elif defined(__ppc__)
+#  define ARCHITECTURE_ID "PPC"
+
+# elif defined(__ARM__)
+#  define ARCHITECTURE_ID "ARM"
+
+# elif defined(__x86_64__)
+#  define ARCHITECTURE_ID "x64"
+
+# elif defined(__i386__)
+#  define ARCHITECTURE_ID "X86"
+
+# else /* unknown architecture */
+#  define ARCHITECTURE_ID ""
+# endif
+
+#elif defined(__clang__) && defined(__ti__)
+# if defined(__ARM_ARCH)
+#  define ARCHITECTURE_ID "ARM"
+
+# else /* unknown architecture */
+#  define ARCHITECTURE_ID ""
+# endif
+
+#elif defined(__TI_COMPILER_VERSION__)
+# if defined(__TI_ARM__)
+#  define ARCHITECTURE_ID "ARM"
+
+# elif defined(__MSP430__)
+#  define ARCHITECTURE_ID "MSP430"
+
+# elif defined(__TMS320C28XX__)
+#  define ARCHITECTURE_ID "TMS320C28x"
+
+# elif defined(__TMS320C6X__) || defined(_TMS320C6X)
+#  define ARCHITECTURE_ID "TMS320C6x"
+
+# else /* unknown architecture */
+#  define ARCHITECTURE_ID ""
+# endif
+
+# elif defined(__ADSPSHARC__)
+#  define ARCHITECTURE_ID "SHARC"
+
+# elif defined(__ADSPBLACKFIN__)
+#  define ARCHITECTURE_ID "Blackfin"
+
+#elif defined(__TASKING__)
+
+# if defined(__CTC__) || defined(__CPTC__)
+#  define ARCHITECTURE_ID "TriCore"
+
+# elif defined(__CMCS__)
+#  define ARCHITECTURE_ID "MCS"
+
+# elif defined(__CARM__) || defined(__CPARM__)
+#  define ARCHITECTURE_ID "ARM"
+
+# elif defined(__CARC__)
+#  define ARCHITECTURE_ID "ARC"
+
+# elif defined(__C51__)
+#  define ARCHITECTURE_ID "8051"
+
+# elif defined(__CPCP__)
+#  define ARCHITECTURE_ID "PCP"
+
+# else
+#  define ARCHITECTURE_ID ""
+# endif
+
+#elif defined(__RENESAS__)
+# if defined(__CCRX__)
+#  define ARCHITECTURE_ID "RX"
+
+# elif defined(__CCRL__)
+#  define ARCHITECTURE_ID "RL78"
+
+# elif defined(__CCRH__)
+#  define ARCHITECTURE_ID "RH850"
+
+# else
+#  define ARCHITECTURE_ID ""
+# endif
+
+#else
+#  define ARCHITECTURE_ID
+#endif
+
+/* Convert integer to decimal digit literals.  */
+#define DEC(n)                   \
+  ('0' + (((n) / 10000000)%10)), \
+  ('0' + (((n) / 1000000)%10)),  \
+  ('0' + (((n) / 100000)%10)),   \
+  ('0' + (((n) / 10000)%10)),    \
+  ('0' + (((n) / 1000)%10)),     \
+  ('0' + (((n) / 100)%10)),      \
+  ('0' + (((n) / 10)%10)),       \
+  ('0' +  ((n) % 10))
+
+/* Convert integer to hex digit literals.  */
+#define HEX(n)             \
+  ('0' + ((n)>>28 & 0xF)), \
+  ('0' + ((n)>>24 & 0xF)), \
+  ('0' + ((n)>>20 & 0xF)), \
+  ('0' + ((n)>>16 & 0xF)), \
+  ('0' + ((n)>>12 & 0xF)), \
+  ('0' + ((n)>>8  & 0xF)), \
+  ('0' + ((n)>>4  & 0xF)), \
+  ('0' + ((n)     & 0xF))
+
+/* Construct a string literal encoding the version number. */
+#ifdef COMPILER_VERSION
+char const* info_version = "INFO" ":" "compiler_version[" COMPILER_VERSION "]";
+
+/* Construct a string literal encoding the version number components. */
+#elif defined(COMPILER_VERSION_MAJOR)
+char const info_version[] = {
+  'I', 'N', 'F', 'O', ':',
+  'c','o','m','p','i','l','e','r','_','v','e','r','s','i','o','n','[',
+  COMPILER_VERSION_MAJOR,
+# ifdef COMPILER_VERSION_MINOR
+  '.', COMPILER_VERSION_MINOR,
+#  ifdef COMPILER_VERSION_PATCH
+   '.', COMPILER_VERSION_PATCH,
+#   ifdef COMPILER_VERSION_TWEAK
+    '.', COMPILER_VERSION_TWEAK,
+#   endif
+#  endif
+# endif
+  ']','\0'};
+#endif
+
+/* Construct a string literal encoding the internal version number. */
+#ifdef COMPILER_VERSION_INTERNAL
+char const info_version_internal[] = {
+  'I', 'N', 'F', 'O', ':',
+  'c','o','m','p','i','l','e','r','_','v','e','r','s','i','o','n','_',
+  'i','n','t','e','r','n','a','l','[',
+  COMPILER_VERSION_INTERNAL,']','\0'};
+#elif defined(COMPILER_VERSION_INTERNAL_STR)
+char const* info_version_internal = "INFO" ":" "compiler_version_internal[" COMPILER_VERSION_INTERNAL_STR "]";
+#endif
+
+/* Construct a string literal encoding the version number components. */
+#ifdef SIMULATE_VERSION_MAJOR
+char const info_simulate_version[] = {
+  'I', 'N', 'F', 'O', ':',
+  's','i','m','u','l','a','t','e','_','v','e','r','s','i','o','n','[',
+  SIMULATE_VERSION_MAJOR,
+# ifdef SIMULATE_VERSION_MINOR
+  '.', SIMULATE_VERSION_MINOR,
+#  ifdef SIMULATE_VERSION_PATCH
+   '.', SIMULATE_VERSION_PATCH,
+#   ifdef SIMULATE_VERSION_TWEAK
+    '.', SIMULATE_VERSION_TWEAK,
+#   endif
+#  endif
+# endif
+  ']','\0'};
+#endif
+
+/* Construct the string literal in pieces to prevent the source from
+   getting matched.  Store it in a pointer rather than an array
+   because some compilers will just produce instructions to fill the
+   array rather than assigning a pointer to a static array.  */
+char const* info_platform = "INFO" ":" "platform[" PLATFORM_ID "]";
+char const* info_arch = "INFO" ":" "arch[" ARCHITECTURE_ID "]";
+
+
+
+#define C_STD_99 199901L
+#define C_STD_11 201112L
+#define C_STD_17 201710L
+#define C_STD_23 202311L
+
+#ifdef __STDC_VERSION__
+#  define C_STD __STDC_VERSION__
+#endif
+
+#if !defined(__STDC__) && !defined(__clang__) && !defined(__RENESAS__)
+# if defined(_MSC_VER) || defined(__ibmxl__) || defined(__IBMC__)
+#  define C_VERSION "90"
+# else
+#  define C_VERSION
+# endif
+#elif C_STD > C_STD_17
+# define C_VERSION "23"
+#elif C_STD > C_STD_11
+# define C_VERSION "17"
+#elif C_STD > C_STD_99
+# define C_VERSION "11"
+#elif C_STD >= C_STD_99
+# define C_VERSION "99"
+#else
+# define C_VERSION "90"
+#endif
+const char* info_language_standard_default =
+  "INFO" ":" "standard_default[" C_VERSION "]";
+
+const char* info_language_extensions_default = "INFO" ":" "extensions_default["
+#if (defined(__clang__) || defined(__GNUC__) || defined(__xlC__) ||           \
+     defined(__TI_COMPILER_VERSION__) || defined(__RENESAS__)) &&             \
+  !defined(__STRICT_ANSI__)
+  "ON"
+#else
+  "OFF"
+#endif
+"]";
+
+/*--------------------------------------------------------------------------*/
+
+#ifdef ID_VOID_MAIN
+void main() {}
+#else
+# if defined(__CLASSIC_C__)
+int main(argc, argv) int argc; char *argv[];
+# else
+int main(int argc, char* argv[])
+# endif
+{
+  int require = 0;
+  require += info_compiler[argc];
+  require += info_platform[argc];
+  require += info_arch[argc];
+#ifdef COMPILER_VERSION_MAJOR
+  require += info_version[argc];
+#endif
+#if defined(COMPILER_VERSION_INTERNAL) || defined(COMPILER_VERSION_INTERNAL_STR)
+  require += info_version_internal[argc];
+#endif
+#ifdef SIMULATE_ID
+  require += info_simulate[argc];
+#endif
+#ifdef SIMULATE_VERSION_MAJOR
+  require += info_simulate_version[argc];
+#endif
+#if defined(__CRAYXT_COMPUTE_LINUX_TARGET)
+  require += info_cray[argc];
+#endif
+  require += info_language_standard_default[argc];
+  require += info_language_extensions_default[argc];
+  (void)argv;
+  return require;
+}
+#endif
 
 ======================================================================
 ### FILE: ././meson.build

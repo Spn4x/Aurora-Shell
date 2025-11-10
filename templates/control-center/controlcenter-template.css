@@ -121,8 +121,8 @@
 
 /* --- Expansion Content --- */
 .control-center-widget .expandable-content-area { 
-    background-color: alpha(@surface, 0.95);
-    border: 2px solid alpha(@accent, 0.9);
+    background-color: @gnome-bg;
+    border: 2px solid alpha(@accent, 0.2);
     border-radius: 12px; 
     padding: 8px; 
     box-shadow: none; 
@@ -139,3 +139,161 @@
 /* --- General Animation (Scoped) --- */
 .control-center-widget .fade-in-slide-up { animation: fade-in-slide-up 0.3s ease-out forwards; }
 @keyframes fade-in-slide-up { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+
+.active-symbol {
+  /* This will color the checkmark icon with your theme's accent color */
+  color: @accent_color;
+}
+
+
+/* Add this to your controlcenter.css */
+
+.popover-action-button {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.popover-action-button:hover {
+  background-color: alpha(@foreground, 0.1);
+}
+
+.details-grid {
+  padding: 12px;
+}
+
+/* Make the key labels in the details grid bold and less prominent */
+.details-grid > label:first-child {
+  font-weight: bold;
+  opacity: 0.7;
+}
+
+.expandable-content-area > overlay {
+  /* This creates a smooth transition for the dimming effect */
+  transition: background-color 0.2s ease-in-out;
+}
+
+/* 
+  When we set the overlay to be insensitive (while connecting),
+  this style will apply, dimming the list behind the spinner.
+*/
+.expandable-content-area > overlay:disabled {
+  background-color: alpha(black, 0.4);
+}
+
+
+.control-center-widget .disconnect-button {
+  background: none;
+  border: none;
+  box-shadow: none;
+  opacity: 0.7;
+  border-radius: 8px;
+  padding: 4px;
+  margin-right: 2px;
+  transition: all 0.2s ease-in-out;
+}
+
+.control-center-widget .disconnect-button:hover {
+  opacity: 1.0;
+  background-color: @gnome-highlight;
+}
+
+.control-center-widget .disconnect-button:active {
+  background-color: @accent;
+  color: white; /* Assumes accent color needs a light foreground */
+}
+
+.control-center-widget .connect-button {
+  background: none;
+  border: none;
+  box-shadow: none;
+  opacity: 0.7;
+  border-radius: 8px;
+  padding: 4px;
+  margin-right: 2px;
+  transition: all 0.2s ease-in-out;
+}
+
+.control-center-widget .connect-button:hover {
+  opacity: 1.0;
+  background-color: @gnome-highlight;
+}
+
+.control-center-widget .connect-button:active {
+  background-color: @accent;
+  color: white; /* Assumes accent color needs a light foreground */
+}
+
+.control-center-widget .bt-header {
+   
+    font-size: 0.9em;
+    opacity: 0.7;
+}
+
+.control-center-widget .bt-header spinner {
+   
+    -gtk-icon-size: 12px;
+}
+
+.control-center-widget .connected-sublabel {
+  font-size: 0.7em;
+  opacity: 0.7;
+  margin-left: 1px;
+  margin-top: 1px; 
+  margin-bottom: 4px; 
+}
+
+.control-center-widget .qr-code-popover {
+  /* Set a fixed size for the popover */
+}
+
+
+/* Style the new info label below the QR code */
+.control-center-widget .qr-info-label {
+  font-size: 0.8em;
+  color: alpha(white, 0.7);
+  text-align: center; /* Center the text if it wraps */
+}
+
+
+/*
+================================================================================
+  Wi-Fi Row Action Buttons (QR and Disconnect)
+================================================================================
+*/
+
+/* --- Base style for both QR and Disconnect buttons --- */
+.control-center-widget .wifi-qr-button,
+.control-center-widget .disconnect-button {
+  /* Reset button appearance to be flat and transparent */
+  background: none;
+  border: none;
+  box-shadow: none;
+  
+  border-radius: 8px; 
+
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  
+  -gtk-icon-size: 16px; 
+  transition: all 0.2s ease-in-out;
+}
+
+/* --- Hover State --- */
+.control-center-widget .wifi-qr-button:hover,
+.control-center-widget .disconnect-button:hover {
+  background-color: alpha(@foreground, 0.1);
+  color: @foreground; /* Make icon fully opaque on hover */
+}
+
+/* --- Active/Pressed State --- */
+.control-center-widget .wifi-qr-button:active,
+.control-center-widget .disconnect-button:active {
+  background-color: @accent;
+  color: @background; /* Make icon contrast with the accent color */
+  transition-duration: 0.05s;
+}

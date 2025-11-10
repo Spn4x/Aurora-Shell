@@ -1,9 +1,9 @@
 /* --- Wallust Placeholders for Topbar --- */
-@define-color custom-primary #CDEBD6;      /* Main text */
-@define-color custom-secondary #AFDABC;         /* Sub-text (often lighter grey) */
-@define-color custom-background #16171A;    /* Main bar background */
-@define-color custom-surface #3D3E42;         /* Module background */
-@define-color custom-accent #46A44D;        /* Primary accent */
+@define-color custom-primary #E4E3DE;      /* Main text */
+@define-color custom-secondary #D0CEC7;         /* Sub-text (often lighter grey) */
+@define-color custom-background #252322;    /* Main bar background */
+@define-color custom-surface #4B4947;         /* Module background */
+@define-color custom-accent #9A6426;        /* Primary accent */
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
 /* Note: 'custom-border' and 'custom-highlight' were defined but not used. */
@@ -73,6 +73,7 @@
     padding-right: 12px;
     padding-left: 8px;
     padding-bottom: 2px;
+    margin-right: 5px;
     background: @gnome-highlight;
     border-radius: 8px;
 }

@@ -45,10 +45,10 @@ void wifi_scanner_stop(WifiScanner *scanner) {
 }
 
 void wifi_scanner_trigger_scan(WifiScanner *scanner) {
-    if (!scanner->callback) {
+    if (!scanner || !scanner->callback) {
         return;
     }
-    g_print("Scanning for Wi-Fi networks...\n");
+    g_print("[FORGET DEBUG] 7. 'wifi_scanner_trigger_scan' is now calling the backend to get fresh network data.\n");
     GList *networks = get_available_wifi_networks();
     scanner->callback(networks, scanner->user_data);
 }

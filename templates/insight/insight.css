@@ -2,9 +2,9 @@
  * Aurora Insight - Template
  * Provides named colors for both GTK widgets and Cairo drawing.
 */
-@define-color accent #46A44D;
-@define-color background #16171A;
-@define-color foreground #CDEBD6; /* <-- THIS IS THE CRITICAL ADDITION */
+@define-color accent #9A6426;
+@define-color background #252322;
+@define-color foreground #E4E3DE; /* <-- THIS IS THE CRITICAL ADDITION */
 
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;

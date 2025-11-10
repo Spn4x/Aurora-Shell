@@ -1,8 +1,8 @@
 /* --- Template for the COMPACT Uptime Widget --- */
-@define-color surface #3D3E42;
-@define-color foreground #CDEBD6;
-@define-color accent #46A44D;      /* Using color4 for the accent */
-@define-color text-subtle #AFDABC;
+@define-color surface #4B4947;
+@define-color foreground #E4E3DE;
+@define-color accent #9A6426;      /* Using color4 for the accent */
+@define-color text-subtle #D0CEC7;
 
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;

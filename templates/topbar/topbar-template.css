@@ -73,6 +73,7 @@
     padding-right: 12px;
     padding-left: 8px;
     padding-bottom: 2px;
+    margin-right: 5px;
     background: @gnome-highlight;
     border-radius: 8px;
 }

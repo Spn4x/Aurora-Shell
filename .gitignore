@@ -15,3 +15,4 @@ uninstall
 .idea/
 *.swp
 debug_log.txt
+project_dump.txt
