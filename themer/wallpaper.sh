@@ -46,11 +46,11 @@ readonly AURORA_CONFIG_DIR="$HOME/.config/aurora-shell"
 # Using arrays makes it trivial to add/remove Aurora widgets to theme
 readonly AURORA_WIDGET_NAMES=(
     "Uptime" "Calendar" "Cheatsheet" "Control Center" "Launcher"
-    "MPRIS Player" "Topbar" "Cachy Selector" "Insight" "QScreen" 
+    "MPRIS Player" "Topbar" "Cachy Selector" "Insight" "QScreen" "Organizer"
 )
 readonly AURORA_TEMPLATE_FILES=(
     "$AURORA_CONFIG_DIR/templates/uptime/archbadge-template.css"
-    "$AURORA_CONFIG_DIR/templates/calendar/calendar-template.css"
+   # "$AURORA_CONFIG_DIR/templates/calendar/calendar-template.css"
     "$AURORA_CONFIG_DIR/templates/cheatsheet/cheatsheet-template.css"
     "$AURORA_CONFIG_DIR/templates/control-center/controlcenter-template.css"
     "$AURORA_CONFIG_DIR/templates/launcher/launcher-template.css"
@@ -58,11 +58,12 @@ readonly AURORA_TEMPLATE_FILES=(
     "$AURORA_CONFIG_DIR/templates/topbar/topbar-template.css"
     "$AURORA_CONFIG_DIR/templates/cachy-selector/cachy-selector-template.css"
     "$AURORA_CONFIG_DIR/templates/insight/insight-template.css"
-    "$AURORA_CONFIG_DIR/templates/qscreen/qscreen-template.css" 
+    "$AURORA_CONFIG_DIR/templates/qscreen/qscreen-template.css"
+    "$AURORA_CONFIG_DIR/templates/organizer/organizer-template.css"
 )
 readonly AURORA_OUTPUT_FILES=(
     "$AURORA_CONFIG_DIR/templates/uptime/archbadge.css"
-    "$AURORA_CONFIG_DIR/templates/calendar/calendar.css"
+   # "$AURORA_CONFIG_DIR/templates/calendar/calendar.css"
     "$AURORA_CONFIG_DIR/templates/cheatsheet/cheatsheet.css"
     "$AURORA_CONFIG_DIR/templates/control-center/controlcenter.css"
     "$AURORA_CONFIG_DIR/templates/launcher/launcher.css"
@@ -70,8 +71,10 @@ readonly AURORA_OUTPUT_FILES=(
     "$AURORA_CONFIG_DIR/templates/topbar/topbar.css"
     "$AURORA_CONFIG_DIR/templates/cachy-selector/cachy-selector.css"
     "$AURORA_CONFIG_DIR/templates/insight/insight.css"
-    "$AURORA_CONFIG_DIR/templates/qscreen/qscreen.css" 
+    "$AURORA_CONFIG_DIR/templates/qscreen/qscreen.css"
+    "$AURORA_CONFIG_DIR/templates/organizer/organizer.css"
 )
+
 
 # --- GLOBAL STATE ---
 NOTIFICATIONS_MUTED=false

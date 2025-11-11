@@ -123,7 +123,11 @@ static GtkWidget* create_popover_module(JsonObject *config) {
 static void load_module(JsonObject *module_config, TopbarState *state, GtkBox *target_box) {
     GtkWidget *module_widget = NULL;
 
-    // THE FIX: Add a check here to prevent the Json-CRITICAL error
+    // ===================================================================
+    // THIS IS THE FIX.
+    // This check prevents the crash if the config.json for topbar has
+    // a `null` or invalid entry in one of its module lists.
+    // ===================================================================
     if (!module_config) {
         return;
     }

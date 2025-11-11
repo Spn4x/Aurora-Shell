@@ -17,7 +17,7 @@
     "config": {
       "modules": {
         "left": [ { "name": "workspaces" } ],
-        "center": [ { "name": "clock", "on-click": "aurora-shell --toggle calendar" } ],
+        "center": [ { "name": "clock", "on-click": "aurora-shell --toggle organizer" } ],
        "right": [
   {
     "name": "sysinfo",
@@ -173,5 +173,24 @@
     "type": "daemon",
     "name": "aurora-insight-daemon",
     "command": "aurora-insight-daemon"
-  }
+  },
+     {
+        "type": "daemon",
+        "command": "auroranotifyd"
+    },
+    {
+        "type": "daemon",
+        "command": "auroranotify-ui"
+    },
+    {
+        "type": "widget",
+        "name": "organizer",
+        "plugin": "/usr/local/lib/aurora-shell/widgets/organizer.so",
+        "stylesheet": "organizer.css",
+        "layer": "top",
+        "anchor": "top",
+        "interactive": true,
+        "visible_on_start": false,
+        "margin": { "top": 1 }
+    }
 ]
