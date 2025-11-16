@@ -44,6 +44,11 @@ void wifi_scanner_stop(WifiScanner *scanner) {
     }
 }
 
+// Implement the status check function
+gboolean wifi_scanner_is_running(WifiScanner *scanner) {
+    return scanner && (scanner->timer_id > 0);
+}
+
 void wifi_scanner_trigger_scan(WifiScanner *scanner) {
     if (!scanner || !scanner->callback) {
         return;

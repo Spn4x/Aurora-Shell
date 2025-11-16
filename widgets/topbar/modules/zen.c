@@ -2,27 +2,17 @@
 #include <gio/gio.h>
 #include "zen.h"
 
-// D-Bus constants for our own notification daemon
 const char* NOTIFY_DAEMON_BUS_NAME = "org.freedesktop.Notifications";
 const char* NOTIFY_DAEMON_OBJECT_PATH = "/org/freedesktop/Notifications";
+const char* NOTIFY_DAEMON_INTERFACE = "org.freedesktop.Notifications";
 
 typedef struct {
     GtkWidget *main_button;
     GtkWidget *content_box;
     GtkWidget *glyph_label;
     GtkWidget *text_label;
-    GDBusProxy *notify_proxy; // Proxy to our auroranotifyd
+    guint signal_subscription_id;
 } ZenModule;
-
-
-// --- Forward Declarations ---
-static void update_zen_ui(ZenModule *module, gboolean is_dnd);
-static void update_from_proxy(ZenModule *module);
-static void on_zen_clicked(GtkButton *button, gpointer user_data);
-static gboolean on_zen_scroll(GtkEventControllerScroll* controller, double dx, double dy, gpointer user_data);
-static void on_proxy_created(GObject *source_object, GAsyncResult *res, gpointer user_data);
-static void on_properties_changed(GDBusProxy *proxy, GVariant *changed_properties, const gchar * const *invalidated_properties, gpointer user_data);
-static void zen_module_cleanup(gpointer data);
 
 static void update_zen_ui(ZenModule *module, gboolean is_dnd) {
     if (is_dnd) {
@@ -36,75 +26,45 @@ static void update_zen_ui(ZenModule *module, gboolean is_dnd) {
     }
 }
 
-static void update_from_proxy(ZenModule *module) {
-    if (!module->notify_proxy) return;
-
-    g_autoptr(GVariant) dnd_variant = g_dbus_proxy_get_cached_property(module->notify_proxy, "DND");
-    if (dnd_variant) {
-        update_zen_ui(module, g_variant_get_boolean(dnd_variant));
-    } else {
-        update_zen_ui(module, FALSE);
-    }
+static void on_dnd_state_changed(GDBusConnection *connection, const gchar *sender_name, const gchar *object_path, const gchar *interface_name, const gchar *signal_name, GVariant *parameters, gpointer user_data) {
+    (void)connection; (void)sender_name; (void)object_path; (void)interface_name; (void)signal_name;
+    ZenModule *module = (ZenModule*)user_data;
+    gboolean is_active;
+    g_variant_get(parameters, "(b)", &is_active);
+    update_zen_ui(module, is_active);
 }
 
-// --- D-Bus Callbacks ---
-
-static void on_proxy_created(GObject *source_object, GAsyncResult *res, gpointer user_data) {
-    (void)source_object;
+static void on_get_initial_dnd_state(GObject *source_object, GAsyncResult *res, gpointer user_data) {
     ZenModule *module = (ZenModule*)user_data;
     g_autoptr(GError) error = NULL;
-
-    module->notify_proxy = g_dbus_proxy_new_for_bus_finish(res, &error);
+    g_autoptr(GVariant) result = g_dbus_proxy_call_finish(G_DBUS_PROXY(source_object), res, &error);
     if (error) {
-        g_warning("Zen Module: Failed to create proxy for notify daemon: %s", error->message);
-        gtk_label_set_text(GTK_LABEL(module->text_label), " Error");
+        g_warning("Zen Module: Could not get initial DND state: %s", error->message);
         return;
     }
-
-    g_signal_connect(module->notify_proxy, "g-properties-changed", G_CALLBACK(on_properties_changed), module);
-    update_from_proxy(module);
+    gboolean is_active;
+    g_variant_get(result, "(b)", &is_active);
+    update_zen_ui(module, is_active);
 }
 
-static void on_properties_changed(GDBusProxy *proxy, GVariant *changed_properties, const gchar * const *invalidated_properties, gpointer user_data) {
-    (void)proxy; (void)invalidated_properties;
-    ZenModule *module = (ZenModule*)user_data;
-    
-    if (g_variant_lookup_value(changed_properties, "DND", NULL)) {
-        g_print("Zen Module: Received DND state change from daemon. Updating UI.\n");
-        update_from_proxy(module);
-    }
-}
-
-// --- UI Action Callbacks ---
-
-// MODIFIED: This is now much simpler. It just calls ToggleDND.
 static void on_zen_clicked(GtkButton *button, gpointer user_data) {
-    (void)button;
-    ZenModule *module = (ZenModule*)user_data;
-    if (!module->notify_proxy) return;
-
-    // Just tell the daemon to toggle. No need to know the current state.
-    g_dbus_proxy_call(module->notify_proxy, "ToggleDND", NULL,
-                      G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+    (void)button; (void)user_data;
+    g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL, NOTIFY_DAEMON_BUS_NAME, NOTIFY_DAEMON_OBJECT_PATH, NOTIFY_DAEMON_INTERFACE, NULL, NULL);
+    if(proxy) { g_dbus_proxy_call_sync(proxy, "ToggleDND", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL); }
 }
 
 static gboolean on_zen_scroll(GtkEventControllerScroll* controller, double dx, double dy, gpointer user_data) {
-    (void)controller; (void)dx;
-    ZenModule *module = (ZenModule*)user_data;
-
-    if (dy < 0) { // Scroll up toggles DND
-        on_zen_clicked(NULL, module);
-    } else if (dy > 0) { // Scroll down toggles the organizer
-        system("aurora-shell --toggle organizer &");
-    }
-    return G_SOURCE_CONTINUE;
+    (void)controller; (void)dx; (void)user_data;
+    if (dy < 0) { on_zen_clicked(NULL, NULL); } 
+    else if (dy > 0) { system("aurora-shell --toggle organizer &"); }
+    return TRUE;
 }
-
-// --- Lifecycle ---
 
 static void zen_module_cleanup(gpointer data) {
     ZenModule *module = (ZenModule *)data;
-    g_clear_object(&module->notify_proxy);
+    if (module->signal_subscription_id > 0) {
+        g_dbus_connection_signal_unsubscribe(g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL), module->signal_subscription_id);
+    }
     g_free(module);
 }
 
@@ -119,10 +79,9 @@ GtkWidget* create_zen_module() {
     module->content_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
     gtk_button_set_child(GTK_BUTTON(module->main_button), module->content_box);
 
-    module->glyph_label = gtk_label_new("?");
+    module->glyph_label = gtk_label_new("󰂚");
     gtk_widget_add_css_class(module->glyph_label, "glyph-label");
-    module->text_label = gtk_label_new("...");
-
+    module->text_label = gtk_label_new(" Alert");
     gtk_box_append(GTK_BOX(module->content_box), module->glyph_label);
     gtk_box_append(GTK_BOX(module->content_box), module->text_label);
 
@@ -132,10 +91,10 @@ GtkWidget* create_zen_module() {
     g_signal_connect(scroll_controller, "scroll", G_CALLBACK(on_zen_scroll), module);
     gtk_widget_add_controller(module->main_button, scroll_controller);
     
-    g_dbus_proxy_new_for_bus(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL,
-                             NOTIFY_DAEMON_BUS_NAME, NOTIFY_DAEMON_OBJECT_PATH,
-                             NOTIFY_DAEMON_BUS_NAME, NULL,
-                             (GAsyncReadyCallback)on_proxy_created, module);
+    module->signal_subscription_id = g_dbus_connection_signal_subscribe(g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL), NOTIFY_DAEMON_BUS_NAME, NOTIFY_DAEMON_INTERFACE, "DNDStateChanged", NOTIFY_DAEMON_OBJECT_PATH, NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_dnd_state_changed, module, NULL);
+    
+    g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL, NOTIFY_DAEMON_BUS_NAME, NOTIFY_DAEMON_OBJECT_PATH, NOTIFY_DAEMON_INTERFACE, NULL, NULL);
+    if(proxy) { g_dbus_proxy_call(proxy, "GetDNDState", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, (GAsyncReadyCallback)on_get_initial_dnd_state, module); }
 
     g_object_set_data_full(G_OBJECT(module->main_button), "module-state", module, zen_module_cleanup);
     return module->main_button;

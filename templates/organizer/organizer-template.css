@@ -65,7 +65,8 @@ window.background {
 #organizer-widget .notification-pane
 {
   padding: 12px;
-  border-right: 1px solid @gnome-highlight;
+  padding-right: 0px;
+  border-right: 0px solid @gnome-highlight;
   margin-top: 12px;
   margin-bottom: 12px;
   min-width: 400px;
@@ -195,14 +196,13 @@ window.background {
 {
   font-size: 1em;
   font-weight: bold;
-  text-align: center;
+ 
 }
 
 #organizer-widget .calendar-grid
 {
   padding: 0;
-  row-spacing: 6px;
-  column-spacing: 6px;
+
 }
 
 #organizer-widget .weekday-label
@@ -440,12 +440,6 @@ window.background {
 /* ---               LAYOUT OVERRIDE FOR PANES                     --- */
 /* =================================================================== */
 
-#organizer-widget .notification-pane
-{
-  /* This pane should be flexible and take all extra space. */
-  flex-grow: 1;
-  flex-shrink: 1;
-}
 
 #organizer-widget .calendar-pane
 {

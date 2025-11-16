@@ -1,7 +1,7 @@
 // ===== widgets/control-center/src/bluetooth_manager.c (WITH DEBUG LOGGING) =====
 #include "bluetooth_manager.h"
 #include <gio/gio.h>
-#include <string.h>
+// #include <string.h>
 
 // D-Bus constants for BlueZ
 #define BLUEZ_DBUS_SERVICE "org.bluez"
@@ -102,8 +102,36 @@ void set_bluetooth_powered_async(gboolean powered, BluetoothOperationCallback cb
 
 // --- Get Devices (from cache) ---
 static gint sort_devices(gconstpointer a, gconstpointer b) { const BluetoothDevice *da=a, *db=b; if (da->is_connected && !db->is_connected) return -1; if (!da->is_connected && db->is_connected) return 1; return g_strcmp0(da->name, db->name); }
-GList* get_available_bluetooth_devices() { if (!g_bt_context || !g_bt_context->object_manager) return NULL; GList *devices = NULL; g_autoptr(GList) objects = g_dbus_object_manager_get_objects(g_bt_context->object_manager); for (GList *l = objects; l != NULL; l = l->next) { g_autoptr(GDBusInterface) iface = g_dbus_object_get_interface(l->data, BLUEZ_DEVICE_INTERFACE); if (iface) { BluetoothDevice *dev=g_new0(BluetoothDevice,1); dev->object_path=g_strdup(g_dbus_object_get_object_path(l->data)); g_autoptr(GVariant) name=g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface),"Name"), addr=g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface),"Address"), conn=g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface),"Connected"); dev->name = name ? g_variant_dup_string(name,NULL) : g_strdup("Unknown"); dev->address = addr ? g_variant_dup_string(addr,NULL) : g_strdup("??:"); dev->is_connected = conn ? g_variant_get_boolean(conn) : FALSE; devices = g_list_prepend(devices,dev); } } return g_list_sort(devices, sort_devices); }
+GList* get_available_bluetooth_devices() {
+    if (!g_bt_context || !g_bt_context->object_manager) return NULL;
+    GList *devices = NULL;
+    g_autoptr(GList) objects = g_dbus_object_manager_get_objects(g_bt_context->object_manager);
+    for (GList *l = objects; l != NULL; l = l->next) {
+        g_autoptr(GDBusInterface) iface = g_dbus_object_get_interface(l->data, BLUEZ_DEVICE_INTERFACE);
+        if (iface) {
+            BluetoothDevice *dev = g_new0(BluetoothDevice, 1);
+            dev->object_path = g_strdup(g_dbus_object_get_object_path(l->data));
+            
+            // --- MODIFICATION: Fetch 'Paired' property ---
+            g_autoptr(GVariant) name = g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface), "Name");
+            g_autoptr(GVariant) addr = g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface), "Address");
+            g_autoptr(GVariant) conn = g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface), "Connected");
+            g_autoptr(GVariant) paired = g_dbus_proxy_get_cached_property(G_DBUS_PROXY(iface), "Paired");
+            // --- END MODIFICATION ---
 
+            dev->name = name ? g_variant_dup_string(name, NULL) : g_strdup("Unknown");
+            dev->address = addr ? g_variant_dup_string(addr, NULL) : g_strdup("??:");
+            dev->is_connected = conn ? g_variant_get_boolean(conn) : FALSE;
+            
+            // --- MODIFICATION: Set the is_paired flag ---
+            dev->is_paired = paired ? g_variant_get_boolean(paired) : FALSE;
+            // --- END MODIFICATION ---
+
+            devices = g_list_prepend(devices, dev);
+        }
+    }
+    return g_list_sort(devices, sort_devices);
+}
 // --- Connect/Disconnect ---
 static void connect_thread(GTask *t, gpointer s, gpointer d, GCancellable *c) {
     (void)s; (void)c; (void)d;

@@ -1,4 +1,4 @@
-// ===== widgets/control-center/src/network_manager.h (COMPLETE) =====
+
 #ifndef NETWORK_MANAGER_H
 #define NETWORK_MANAGER_H
 
@@ -11,26 +11,21 @@ void network_manager_shutdown();
 // --- Type Definitions ---
 typedef void (*NetworkOperationCallback)(gboolean success, gpointer user_data);
 
-// --- ADD THIS NEW ENUM ---
 typedef enum {
-    WIFI_STATE_DISCONNECTED,      // Not connected, but might be known/saved
-    WIFI_STATE_CONNECTING,        // In the process of connecting
-    WIFI_STATE_LIMITED,           // Connected to router, but no internet access
-    WIFI_STATE_CONNECTED          // Fully connected with internet access
+    WIFI_STATE_DISCONNECTED,
+    WIFI_STATE_CONNECTING,
+    WIFI_STATE_LIMITED,
+    WIFI_STATE_CONNECTED
 } WifiConnectivityState;
-// --- END NEW ENUM ---
 
 typedef struct {
     gchar *ssid;
-    gchar *object_path; // D-Bus object path of the Access Point
+    gchar *object_path;
     guint8 strength;
     gboolean is_secure;
     gboolean is_active;
-    gboolean is_known; // Is this a saved network profile?
-    
-    // --- ADD THIS NEW FIELD ---
+    gboolean is_known;
     WifiConnectivityState connectivity;
-
 } WifiNetwork;
 
 typedef struct {
@@ -41,7 +36,6 @@ typedef struct {
     gchar *mac_address;
 } WifiNetworkDetails;
 
-// NEW: Callback for the async details function
 typedef void (*WifiDetailsCallback)(WifiNetworkDetails *details, gpointer user_data);
 
 // --- Radio Control ---
@@ -62,9 +56,10 @@ void activate_wifi_connection_async(const gchar *connection_path,
                                     NetworkOperationCallback callback,
                                     gpointer user_data);
 
+// This function now correctly handles prompting for a password when `password` is NULL.
 void add_and_activate_wifi_connection_async(const gchar *ssid,
                                             const gchar *ap_path,
-                                            const gchar *password,
+                                            const gchar *password, // Can be NULL to trigger a prompt
                                             gboolean is_secure,
                                             NetworkOperationCallback callback,
                                             gpointer user_data);

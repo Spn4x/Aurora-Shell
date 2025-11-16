@@ -19,6 +19,9 @@ void wifi_scanner_start(WifiScanner *scanner, guint interval_seconds);
 // Stops the periodic scanning.
 void wifi_scanner_stop(WifiScanner *scanner);
 
+// Checks if the scanner is currently running.
+gboolean wifi_scanner_is_running(WifiScanner *scanner);
+
 // Triggers an immediate, one-time scan.
 void wifi_scanner_trigger_scan(WifiScanner *scanner);
 

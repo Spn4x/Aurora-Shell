@@ -15,6 +15,7 @@ typedef struct {
     gchar *address; // MAC address
     gchar *name;
     gboolean is_connected;
+       gboolean is_paired;
     gchar *object_path; // Internal D-Bus path
 } BluetoothDevice;
 

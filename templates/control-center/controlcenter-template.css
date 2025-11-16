@@ -5,11 +5,11 @@
 */
 
 /* --- Color Palette & Font (Placeholders from Theme) --- */
-@define-color background %%BACKGROUND%%;
-@define-color foreground %%FOREGROUND%%;
-@define-color accent     %%ACCENT%%;
-@define-color surface    %%SURFACE%%;
-@define-color warning    %%WARNING%%;
+@define-color background {{background}};
+@define-color foreground {{foreground}};
+@define-color accent     {{accent}};
+@define-color surface    {{surface}};
+@define-color warning    {{warning}};
 @define-color-font-main "JetBrainsMono Nerd Font";
 
 /* --- Custom Colors Derived from RGBA Values --- */
