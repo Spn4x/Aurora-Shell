@@ -7,6 +7,7 @@ sources = [
   'modules/sysinfo.c',
   'modules/audio.c',
   'modules/zen.c',
+  'modules/clock.c'
 ]
 
 dependencies = [

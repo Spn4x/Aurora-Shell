@@ -123,12 +123,21 @@ static void on_widget_mapped(GtkWidget *widget, gpointer user_data) {
     gtk_widget_grab_focus(state->entry);
 }
 
-// <<< THIS FUNCTION IS NOW FIXED >>>
 static void on_entry_changed(GtkEditable *entry, gpointer user_data) {
-    // The variable passed to the function is named `user_data`.
     LauncherState *state = (LauncherState *)user_data;
     const gchar *search_text = gtk_editable_get_text(entry);
     update_search_results(state, search_text);
+}
+
+// --- FIX: Helper to hide window on idle ---
+// This allows the current event processing (which sets the 'active' state)
+// to finish before we hide the window (which might confuse the state tracker).
+static gboolean hide_window_on_idle(gpointer user_data) {
+    GtkWidget *toplevel = GTK_WIDGET(user_data);
+    if (toplevel && GTK_IS_WIDGET(toplevel)) {
+        gtk_widget_set_visible(toplevel, FALSE);
+    }
+    return G_SOURCE_REMOVE;
 }
 
 static void on_result_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
@@ -166,7 +175,8 @@ static void on_result_activated(GtkListBox *box, GtkListBoxRow *row, gpointer us
     
     GtkWidget *toplevel = gtk_widget_get_ancestor(GTK_WIDGET(row), GTK_TYPE_WINDOW);
     if (toplevel) {
-        gtk_widget_set_visible(toplevel, FALSE);
+        // --- FIX: Use the idle helper instead of hiding immediately ---
+        g_idle_add(hide_window_on_idle, toplevel);
     }
 }
 
@@ -263,10 +273,6 @@ GtkWidget* create_widget(const char *config_string) {
     gtk_widget_add_css_class(state->main_box, "launcher-box");
     g_object_set_data_full(G_OBJECT(state->main_box), "launcher-state", state, free_launcher_state);
 
-    // --- The Correct Layout Fix ---
-    // The main_box is the child of the window. By setting its vertical alignment,
-    // we stop IT from stretching to fill the window. This forces the window
-    // to shrink-to-fit the box's natural, compact size. Using CENTER looks best.
     gtk_widget_set_valign(state->main_box, GTK_ALIGN_CENTER);
     
     g_signal_connect(state->main_box, "map", G_CALLBACK(on_widget_mapped), state);

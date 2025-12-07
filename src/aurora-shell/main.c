@@ -3,7 +3,7 @@
 // ===============================================
 
 #include <glib.h>
-#include <glib/gstdio.h> // Needed for g_remove
+#include <glib/gstdio.h> 
 #include <gtk/gtk.h>
 #include <gtk4-layer-shell.h>
 #include <dlfcn.h>
@@ -12,6 +12,7 @@
 #include <gio/gio.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <errno.h> 
 
 // ===============================================
 // --- Type Definitions ---
@@ -37,16 +38,18 @@ typedef struct {
     char *path;
 } CssReloadData;
 
-// *** NEW: Data for qscreen's "Capture First" logic ***
+// Data for qscreen's "Capture First" logic
 typedef struct {
     AuroraShell *shell;
     JsonObject *config_obj;
     gchar *temp_path;
 } QScreenLaunchData;
 
-static void load_all_widgets(AuroraShell *shell);
-static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_obj); // Forward declare
+// Global argv for restart logic
+static char **global_argv = NULL;
 
+static void load_all_widgets(AuroraShell *shell);
+static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_obj); 
 
 // ===============================================
 // --- Helper and Utility Functions ---
@@ -107,28 +110,38 @@ static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval, 
 // ===============================================
 // --- Core Shell Logic ---
 // ===============================================
-static void unload_all_widgets(AuroraShell *shell) {
-    g_print("Unloading all widgets...\n");
-    GHashTableIter iter;
-    gpointer key, value;
-    g_hash_table_iter_init(&iter, shell->widgets);
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
-        WidgetState *state = (WidgetState *)value;
-        if (GTK_IS_WINDOW(state->window)) { gtk_window_destroy(state->window); }
-    }
-    g_hash_table_remove_all(shell->widgets);
-    while (g_main_context_pending(NULL)) { g_main_context_iteration(NULL, FALSE); }
-    g_print("All widgets unloaded.\n");
-}
 
 static void on_config_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
-    (void)monitor; (void)file; (void)other_file;
+    (void)monitor; (void)file; (void)other_file; (void)user_data;
+    
+    // We wait for CHANGES_DONE_HINT to ensure the write is complete
     if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
-        g_print("Configuration file changed. Reloading shell...\n");
-        AuroraShell *shell = (AuroraShell *)user_data;
-        unload_all_widgets(shell);
-        if (shell->config_root) { json_node_free(shell->config_root); shell->config_root = NULL; }
-        load_all_widgets(shell);
+        g_print("\n>>> Configuration changed. PERFORMING HARD RESTART (execv) <<<\n");
+        
+        // 1. Kill the helper daemons rigorously.
+        // We use pkill -9 to ensure they die immediately without hanging on cleanup.
+        system("pkill -9 -x auroranotify-ui");
+        system("pkill -9 -x auroranotifyd");
+        system("pkill -9 -x aurora-insight-daemon");
+
+        // 2. Re-execute the current binary.
+        // This is the C equivalent of "kill me and start a new me instantly".
+        // It replaces the current process image, memory, and threads with a fresh instance.
+        // The PID remains the same, but the application state is reset completely.
+        
+        // "/proc/self/exe" is a reliable symlink to the current executable on Linux.
+        if (global_argv) {
+            execv("/proc/self/exe", global_argv);
+        } else {
+            // Fallback if argv wasn't captured (shouldn't happen)
+            execl("/proc/self/exe", "aurora-shell", NULL);
+        }
+
+        // If we reach this line, exec failed.
+        g_critical("FATAL: Failed to re-execute aurora-shell: %s", g_strerror(errno));
+        
+        // Fallback: Just die so systemd/user can restart us cleanly.
+        exit(1);
     }
 }
 
@@ -173,7 +186,6 @@ static void launch_daemon_if_needed(const char *command) {
     if (spawn_error) { g_warning("Failed to spawn daemon '%s': %s", command, spawn_error->message); }
 }
 
-// *** NEW: Create a widget from config. This is used by qscreen callback and load_all_widgets. ***
 static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_obj) {
     const char *name = json_object_get_string_member(item_obj, "name");
     const char *plugin_path = json_object_get_string_member(item_obj, "plugin");
@@ -186,12 +198,10 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(transparency_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(transparency_provider);
 
-    // *** THIS IS THE CRITICAL LOGIC FOR QSCREEN vs OTHER WIDGETS ***
     gboolean use_layer_shell = json_object_get_boolean_member_with_default(item_obj, "layer_shell", TRUE);
     if (use_layer_shell) {
         gtk_layer_init_for_window(window);
     } else {
-        // This path is for qscreen: a normal, non-layer-shell fullscreen window.
         gtk_window_fullscreen(window);
     }
     
@@ -260,24 +270,49 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
 static void load_all_widgets(AuroraShell *shell) {
     g_autoptr(JsonParser) parser = json_parser_new();
     g_autofree gchar *user_config_file_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "config.json", NULL);
-    if (!json_parser_load_from_file(parser, user_config_file_path, NULL)) { g_warning("Failed to load or parse user config: %s", user_config_file_path); return; }
+    
+    GError *error = NULL;
+    if (!json_parser_load_from_file(parser, user_config_file_path, &error)) {
+        g_warning("Failed to parse config: %s", error->message);
+        g_error_free(error);
+        return;
+    }
+    
     shell->config_root = json_parser_steal_root(parser);
-    if (!shell->config_root || !JSON_NODE_HOLDS_ARRAY(shell->config_root)) { g_warning("Config file root is not a valid JSON array."); if (shell->config_root) json_node_free(shell->config_root); shell->config_root = NULL; return; }
+    if (!shell->config_root || json_node_get_node_type(shell->config_root) != JSON_NODE_ARRAY) {
+        g_warning("Config root is not an array.");
+        return;
+    }
+
     JsonArray *config_array = json_node_get_array(shell->config_root);
-    for (guint i = 0; i < json_array_get_length(config_array); i++) {
-        if (!JSON_NODE_HOLDS_OBJECT(json_array_get_element(config_array, i))) continue;
-        JsonObject *item_obj = json_array_get_object_element(config_array, i);
+    guint len = json_array_get_length(config_array);
+
+    for (guint i = 0; i < len; i++) {
+        JsonNode *element_node = json_array_get_element(config_array, i);
+        if (!element_node || json_node_get_node_type(element_node) != JSON_NODE_OBJECT) {
+            continue; 
+        }
+
+        JsonObject *item_obj = json_node_get_object(element_node);
+        if (!item_obj) continue;
+
         const char *type = json_object_get_string_member_with_default(item_obj, "type", "widget");
-        if (g_strcmp0(type, "daemon") == 0) { const char *command = json_object_get_string_member(item_obj, "command"); if (command) launch_daemon_if_needed(command); continue; }
-        if (g_strcmp0(type, "widget") != 0) { continue; }
+        
+        if (g_strcmp0(type, "daemon") == 0) {
+            if (json_object_has_member(item_obj, "command")) {
+                launch_daemon_if_needed(json_object_get_string_member(item_obj, "command"));
+            }
+            continue;
+        }
+        
+        if (g_strcmp0(type, "widget") != 0) continue;
+        
+        if (!json_object_has_member(item_obj, "name")) continue;
         const char *name = json_object_get_string_member(item_obj, "name");
-        if (!name || !json_object_has_member(item_obj, "plugin")) continue;
         
         WidgetState *state = create_single_widget(shell, item_obj);
         if (state) {
-            if (json_object_get_boolean_member_with_default(item_obj, "visible_on_start", TRUE)) {
-                gtk_window_present(state->window);
-            }
+            if (json_object_get_boolean_member_with_default(item_obj, "visible_on_start", TRUE)) gtk_window_present(state->window);
             g_hash_table_insert(shell->widgets, g_strdup(name), state);
         }
     }
@@ -287,7 +322,6 @@ static void load_all_widgets(AuroraShell *shell) {
 // ===============================================
 // --- GApplication Signal Handlers ---
 // ===============================================
-// *** NEW: Callback for qscreen after grim finishes ***
 static void on_qscreen_pre_capture_finished(GPid pid, gint status, gpointer user_data) {
     g_spawn_close_pid(pid);
     QScreenLaunchData *data = (QScreenLaunchData *)user_data;
@@ -321,7 +355,6 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
             if (name && g_strcmp0(name, widget_name) == 0) { item_obj = current_obj; break; }
         }
         if (!item_obj) { g_warning("Command line: No config for '%s' found.", widget_name); }
-        // *** NEW: Special handling for qscreen ***
         else if (g_strcmp0(widget_name, "qscreen") == 0) {
             g_autofree gchar *temp_template = g_build_filename(g_get_tmp_dir(), "aurora-qscreen-XXXXXX.png", NULL);
             gint fd = g_mkstemp(temp_template);
@@ -335,7 +368,6 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
             g_autoptr(GError) error = NULL;
             GPid child_pid;
             g_spawn_command_line_async(command, &error);
-            // We need to wait for the command to finish. Let's use g_spawn_async_with_pipes and a watch.
             g_spawn_async(NULL, (gchar*[]){"/bin/sh", "-c", command, NULL}, NULL, G_SPAWN_DO_NOT_REAP_CHILD, NULL, NULL, &child_pid, &error);
             if (error) {
                 g_warning("Failed to spawn grim: %s", error->message);
@@ -398,6 +430,9 @@ static void free_widget_state(gpointer data) {
 // ===============================================
 
 int main(int argc, char **argv) {
+    // Capture argv for the restart mechanism
+    global_argv = argv;
+
     AuroraShell shell_data = {0};
     shell_data.widgets = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, free_widget_state);
     shell_data.app = gtk_application_new("com.meismeric.aurora.shell", G_APPLICATION_HANDLES_COMMAND_LINE);
