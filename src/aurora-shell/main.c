@@ -190,6 +190,11 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     const char *name = json_object_get_string_member(item_obj, "name");
     const char *plugin_path = json_object_get_string_member(item_obj, "plugin");
 
+    // --- FIX: DECLARATIONS MOVED TO THE TOP ---
+    gboolean is_exclusive = json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE);
+    gboolean is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
+    gboolean use_layer_shell = json_object_get_boolean_member_with_default(item_obj, "layer_shell", TRUE);
+
     GtkWindow *window = GTK_WINDOW(gtk_application_window_new(shell->app));
     gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
     GdkDisplay *display = gtk_widget_get_display(GTK_WIDGET(window));
@@ -197,18 +202,13 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     gtk_css_provider_load_from_string(transparency_provider, "window { background: transparent; }");
     gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(transparency_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(transparency_provider);
-
-    gboolean use_layer_shell = json_object_get_boolean_member_with_default(item_obj, "layer_shell", TRUE);
-    if (use_layer_shell) {
-        gtk_layer_init_for_window(window);
-    } else {
-        gtk_window_fullscreen(window);
-    }
     
     void* handle = dlopen(plugin_path, RTLD_LAZY);
     if (!handle) { g_warning("Failed to open plugin '%s' for widget '%s': %s", plugin_path, name, dlerror()); gtk_window_destroy(window); return NULL; }
+    
     CreateWidgetFunc create_widget = (CreateWidgetFunc)dlsym(handle, "create_widget");
     if (!create_widget) { g_warning("No 'create_widget' function in plugin '%s' for widget '%s'.", plugin_path, name); dlclose(handle); gtk_window_destroy(window); return NULL; }
+    
     g_autofree gchar *config_string_to_pass = NULL;
     JsonNode *widget_node = json_node_new(JSON_NODE_OBJECT);
     json_node_set_object(widget_node, item_obj);
@@ -216,14 +216,29 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     json_generator_set_root(generator, widget_node);
     config_string_to_pass = json_generator_to_data(generator, NULL);
     json_node_free(widget_node);
+    
     GtkWidget *widget = create_widget(config_string_to_pass);
     if (!widget) { g_warning("Plugin '%s' for widget '%s' returned a NULL widget.", plugin_path, name); dlclose(handle); gtk_window_destroy(window); return NULL; }
-    gtk_window_set_child(window, widget);
 
-    gboolean is_exclusive = json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE);
-    gboolean is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
-
+    // --- FIX: LOGIC FOR QSCREEN WINDOW AND SETTING THE CHILD ---
+    if (g_strcmp0(name, "qscreen") == 0) {
+        // For qscreen, we don't want a layer shell window.
+        // We override the default behavior to create a normal, floating window.
+        gtk_window_destroy(window); // Destroy the layer shell window we made
+        window = GTK_WINDOW(gtk_application_window_new(shell->app)); // Create a normal one
+        gtk_window_set_child(window, widget);
+        gtk_window_set_default_size(window, 600, 400); // Set a reasonable default size
+        gtk_window_set_title(window, "qscreen");
+        is_exclusive = FALSE; // It's not exclusive
+        use_layer_shell = FALSE; // We are not using layer shell
+    } else {
+        // Original behavior for all other widgets
+        gtk_window_set_child(window, widget);
+    }
+    
+    // The main use_layer_shell logic block
     if (use_layer_shell) {
+        gtk_layer_init_for_window(window);
         if (is_exclusive) {
             gtk_layer_auto_exclusive_zone_enable(window);
             gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
@@ -232,7 +247,11 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
         }
         gtk_layer_set_layer(window, parse_layer_string(json_object_get_string_member_with_default(item_obj, "layer", "top")));
         apply_anchor_and_margins(window, widget, item_obj);
+    } else if (g_strcmp0(name, "qscreen") != 0) {
+        // If it's not a layer shell widget AND it's not qscreen, it should be fullscreen.
+        gtk_window_fullscreen(window);
     }
+
 
     if (json_object_has_member(item_obj, "stylesheet")) {
         const char *stylesheet_name = json_object_get_string_member(item_obj, "stylesheet");
