@@ -6,13 +6,14 @@
 #include "modules/workspaces.h"
 #include "modules/audio.h"
 #include "modules/zen.h"
-#include "modules/clock.h" // <-- Include the new module
+#include "modules/clock.h" 
+#include "modules/popover_anim.h" // <-- Include the shared animation helper
 
-// TopbarState is no longer needed for the clock
 typedef struct {
     int placeholder;
 } TopbarState;
 
+// --- Forward Declarations ---
 static void load_module(JsonObject *module_config, TopbarState *state, GtkBox *target_box);
 static void topbar_cleanup(gpointer data);
 static void on_generic_module_clicked(GtkButton *button, gpointer user_data);
@@ -36,10 +37,15 @@ static void free_string_data(gpointer data, GClosure *closure) {
 }
 
 static void on_generic_module_clicked(GtkButton *button, gpointer user_data) {
-    (void)button;
     const char *command = (const char *)user_data;
     if (command && *command) {
         g_spawn_command_line_async(command, NULL);
+
+        // Auto-close popover after clicking an item for better UX
+        GtkWidget *ancestor = gtk_widget_get_ancestor(GTK_WIDGET(button), GTK_TYPE_POPOVER);
+        if (ancestor) {
+            gtk_popover_popdown(GTK_POPOVER(ancestor));
+        }
     }
 }
 
@@ -61,23 +67,34 @@ static GtkWidget* create_popover_module(JsonObject *config) {
         const char *name = json_object_get_string_member(config, "name");
         gtk_widget_add_css_class(button, name);
     }
+
     GtkWidget *popover = gtk_popover_new();
     gtk_widget_set_parent(popover, button);
-    GtkWidget *list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+
+    // Attach the shared animation gimmick
+    attach_popover_animation(GTK_POPOVER(popover), button);
+
+    GtkWidget *list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_margin_top(list_box, 5);
+    gtk_widget_set_margin_bottom(list_box, 5);
     gtk_popover_set_child(GTK_POPOVER(popover), list_box);
+    
     if (json_object_has_member(config, "items")) {
         JsonArray *items_array = json_object_get_array_member(config, "items");
         for (guint i = 0; i < json_array_get_length(items_array); i++) {
             JsonObject *item_obj = json_array_get_object_element(items_array, i);
             if (!item_obj) continue;
+            
             const char *label = json_object_get_string_member_with_default(item_obj, "label", "No Label");
             const char *command = json_object_has_member(item_obj, "on-click") ? json_object_get_string_member(item_obj, "on-click") : NULL;
             const char* glyph = json_object_has_member(item_obj, "glyph") ? json_object_get_string_member(item_obj, "glyph") : NULL;
+            
             GtkWidget *item_button = gtk_button_new();
             gtk_widget_add_css_class(item_button, "popover-item");
             gtk_widget_add_css_class(item_button, "flat");
-            GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+            GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
             gtk_button_set_child(GTK_BUTTON(item_button), box);
+            
             if (glyph) {
                 GtkWidget *glyph_label = gtk_label_new(glyph);
                 gtk_widget_add_css_class(glyph_label, "glyph-label");
@@ -87,12 +104,20 @@ static GtkWidget* create_popover_module(JsonObject *config) {
             gtk_label_set_xalign(GTK_LABEL(desc_label), 0.0);
             gtk_widget_set_hexpand(desc_label, TRUE);
             gtk_box_append(GTK_BOX(box), desc_label);
+            
             if (command) {
                 g_signal_connect_data(item_button, "clicked", G_CALLBACK(on_generic_module_clicked), g_strdup(command), free_string_data, 0);
             }
-            gtk_box_append(GTK_BOX(list_box), item_button);
+
+            GtkWidget *revealer = gtk_revealer_new();
+            gtk_revealer_set_child(GTK_REVEALER(revealer), item_button);
+            gtk_box_append(GTK_BOX(list_box), revealer);
         }
     }
+
+    // After populating, tell the animation helper to find the new items
+    reset_popover_animation(GTK_POPOVER(popover));
+
     g_signal_connect(button, "clicked", G_CALLBACK(on_popover_button_clicked), popover);
     g_object_set_data_full(G_OBJECT(button), "popover", popover, g_object_unref);
     return button;
