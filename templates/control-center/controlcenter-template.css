@@ -9,8 +9,6 @@
 @define-color foreground {{foreground}};
 @define-color accent     {{accent}};
 @define-color surface    {{surface}};
-@define-color warning    {{warning}};
-@define-color-font-main "JetBrainsMono Nerd Font";
 
 /* --- Custom Colors Derived from RGBA Values --- */
 @define-color white #FFFFFF;
@@ -255,7 +253,7 @@
 .control-center-widget .qr-info-label {
   font-size: 0.8em;
   color: alpha(white, 0.7);
-  text-align: center; /* Center the text if it wraps */
+ 
 }
 
 

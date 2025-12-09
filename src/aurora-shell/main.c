@@ -86,7 +86,7 @@ static void free_css_reload_data(gpointer data, GClosure *closure) {
 }
 
 static void hide_widget(WidgetState *state) {
-    if (state && gtk_widget_get_visible(GTK_WIDGET(state->window))) {
+    if (state && state->window && gtk_widget_get_visible(GTK_WIDGET(state->window))) {
         gtk_widget_set_visible(GTK_WIDGET(state->window), FALSE);
     }
 }
@@ -94,7 +94,9 @@ static void hide_widget(WidgetState *state) {
 static void on_mouse_enter(GtkEventControllerMotion *controller, double x, double y, gpointer user_data) {
     (void)controller; (void)x; (void)y;
     WidgetState *state = (WidgetState *)user_data;
-    gtk_widget_grab_focus(GTK_WIDGET(state->window));
+    if (state && state->window) {
+        gtk_widget_grab_focus(GTK_WIDGET(state->window));
+    }
 }
 
 static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval, guint keycode, GdkModifierType state, gpointer user_data) {
@@ -104,6 +106,30 @@ static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval, 
         return GDK_EVENT_STOP;
     }
     return GDK_EVENT_PROPAGATE;
+}
+
+// --- FIX: WidgetState Lifecycle Management ---
+
+// Callback for when the window is destroyed (e.g. by the widget itself)
+static void on_widget_window_destroyed(GtkWidget *widget, gpointer user_data) {
+    WidgetState *state = (WidgetState *)user_data;
+    // If the window currently stored in state matches the one being destroyed, clear it.
+    if (state->window == GTK_WINDOW(widget)) {
+        state->window = NULL;
+    }
+}
+
+// Function to free WidgetState, used by the HashTable
+static void free_widget_state(gpointer data) {
+    WidgetState *state = (WidgetState *)data;
+    if (state->window) {
+        // If the window is still alive, we must destroy it to prevent leaks and zombie windows.
+        // Disconnect our handler first to avoid recursion.
+        g_signal_handlers_disconnect_by_func(state->window, on_widget_window_destroyed, state);
+        gtk_window_destroy(state->window);
+        state->window = NULL;
+    }
+    g_free(state);
 }
 
 
@@ -119,28 +145,18 @@ static void on_config_changed(GFileMonitor *monitor, GFile *file, GFile *other_f
         g_print("\n>>> Configuration changed. PERFORMING HARD RESTART (execv) <<<\n");
         
         // 1. Kill the helper daemons rigorously.
-        // We use pkill -9 to ensure they die immediately without hanging on cleanup.
         system("pkill -9 -x auroranotify-ui");
         system("pkill -9 -x auroranotifyd");
         system("pkill -9 -x aurora-insight-daemon");
 
         // 2. Re-execute the current binary.
-        // This is the C equivalent of "kill me and start a new me instantly".
-        // It replaces the current process image, memory, and threads with a fresh instance.
-        // The PID remains the same, but the application state is reset completely.
-        
-        // "/proc/self/exe" is a reliable symlink to the current executable on Linux.
         if (global_argv) {
             execv("/proc/self/exe", global_argv);
         } else {
-            // Fallback if argv wasn't captured (shouldn't happen)
             execl("/proc/self/exe", "aurora-shell", NULL);
         }
 
-        // If we reach this line, exec failed.
         g_critical("FATAL: Failed to re-execute aurora-shell: %s", g_strerror(errno));
-        
-        // Fallback: Just die so systemd/user can restart us cleanly.
         exit(1);
     }
 }
@@ -190,7 +206,6 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     const char *name = json_object_get_string_member(item_obj, "name");
     const char *plugin_path = json_object_get_string_member(item_obj, "plugin");
 
-    // --- FIX: DECLARATIONS MOVED TO THE TOP ---
     gboolean is_exclusive = json_object_get_boolean_member_with_default(item_obj, "exclusive", FALSE);
     gboolean is_interactive = json_object_get_boolean_member_with_default(item_obj, "interactive", FALSE);
     gboolean use_layer_shell = json_object_get_boolean_member_with_default(item_obj, "layer_shell", TRUE);
@@ -220,23 +235,18 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     GtkWidget *widget = create_widget(config_string_to_pass);
     if (!widget) { g_warning("Plugin '%s' for widget '%s' returned a NULL widget.", plugin_path, name); dlclose(handle); gtk_window_destroy(window); return NULL; }
 
-    // --- FIX: LOGIC FOR QSCREEN WINDOW AND SETTING THE CHILD ---
     if (g_strcmp0(name, "qscreen") == 0) {
-        // For qscreen, we don't want a layer shell window.
-        // We override the default behavior to create a normal, floating window.
-        gtk_window_destroy(window); // Destroy the layer shell window we made
-        window = GTK_WINDOW(gtk_application_window_new(shell->app)); // Create a normal one
+        gtk_window_destroy(window); 
+        window = GTK_WINDOW(gtk_application_window_new(shell->app)); 
         gtk_window_set_child(window, widget);
-        gtk_window_set_default_size(window, 600, 400); // Set a reasonable default size
+        gtk_window_set_default_size(window, 600, 400);
         gtk_window_set_title(window, "qscreen");
-        is_exclusive = FALSE; // It's not exclusive
-        use_layer_shell = FALSE; // We are not using layer shell
+        is_exclusive = FALSE; 
+        use_layer_shell = FALSE; 
     } else {
-        // Original behavior for all other widgets
         gtk_window_set_child(window, widget);
     }
     
-    // The main use_layer_shell logic block
     if (use_layer_shell) {
         gtk_layer_init_for_window(window);
         if (is_exclusive) {
@@ -248,7 +258,6 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
         gtk_layer_set_layer(window, parse_layer_string(json_object_get_string_member_with_default(item_obj, "layer", "top")));
         apply_anchor_and_margins(window, widget, item_obj);
     } else if (g_strcmp0(name, "qscreen") != 0) {
-        // If it's not a layer shell widget AND it's not qscreen, it should be fullscreen.
         gtk_window_fullscreen(window);
     }
 
@@ -274,6 +283,9 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     
     WidgetState *state = g_new0(WidgetState, 1);
     state->window = window; state->widget = widget; state->is_interactive = is_interactive; state->config_obj = item_obj;
+
+    // FIX: Track window destruction
+    g_signal_connect(window, "destroy", G_CALLBACK(on_widget_window_destroyed), state);
 
     if (!is_exclusive) {
         GtkEventController *key_controller = gtk_event_controller_key_new();
@@ -351,6 +363,8 @@ static void on_qscreen_pre_capture_finished(GPid pid, gint status, gpointer user
         WidgetState *new_state = create_single_widget(data->shell, data->config_obj);
         if (new_state) {
             gtk_window_present(new_state->window);
+            // This replace call triggers free_widget_state for the old entry,
+            // which safely destroys the old window.
             g_hash_table_replace(data->shell->widgets, g_strdup(name), new_state);
         }
     } else {
@@ -369,9 +383,21 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
         JsonArray *config_array = json_node_get_array(shell->config_root);
         JsonObject *item_obj = NULL;
         for (guint i = 0; i < json_array_get_length(config_array); i++) {
-            JsonObject *current_obj = json_array_get_object_element(config_array, i);
+            // FIX: Safely retrieve the object node from the array
+            JsonNode *element_node = json_array_get_element(config_array, i);
+            if (!element_node || json_node_get_node_type(element_node) != JSON_NODE_OBJECT) {
+                continue; 
+            }
+            JsonObject *current_obj = json_node_get_object(element_node);
+            
+            // Now safe to access members
+            if (!json_object_has_member(current_obj, "name")) continue;
+            
             const char *name = json_object_get_string_member(current_obj, "name");
-            if (name && g_strcmp0(name, widget_name) == 0) { item_obj = current_obj; break; }
+            if (name && g_strcmp0(name, widget_name) == 0) { 
+                item_obj = current_obj; 
+                break; 
+            }
         }
         if (!item_obj) { g_warning("Command line: No config for '%s' found.", widget_name); }
         else if (g_strcmp0(widget_name, "qscreen") == 0) {
@@ -403,16 +429,19 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
             } else {
                 WidgetState *state = g_hash_table_lookup(shell->widgets, widget_name);
                 if (state) {
-                    gboolean is_visible = gtk_widget_get_visible(GTK_WIDGET(state->window));
-                    gtk_widget_set_visible(GTK_WIDGET(state->window), !is_visible);
-                    if (!is_visible) {
-                        if (state->is_interactive) { gtk_widget_grab_focus(GTK_WIDGET(state->window)); }
-                        if (json_object_has_member(item_obj, "close")) {
-                            JsonArray *widgets_to_close = json_object_get_array_member(item_obj, "close");
-                            for (guint j = 0; j < json_array_get_length(widgets_to_close); j++) {
-                                const char *name_to_close = json_array_get_string_element(widgets_to_close, j);
-                                WidgetState *other_state = g_hash_table_lookup(shell->widgets, name_to_close);
-                                if (other_state) hide_widget(other_state);
+                    // Check window validity before toggling
+                    if (state->window) {
+                        gboolean is_visible = gtk_widget_get_visible(GTK_WIDGET(state->window));
+                        gtk_widget_set_visible(GTK_WIDGET(state->window), !is_visible);
+                        if (!is_visible) {
+                            if (state->is_interactive) { gtk_widget_grab_focus(GTK_WIDGET(state->window)); }
+                            if (json_object_has_member(item_obj, "close")) {
+                                JsonArray *widgets_to_close = json_object_get_array_member(item_obj, "close");
+                                for (guint j = 0; j < json_array_get_length(widgets_to_close); j++) {
+                                    const char *name_to_close = json_array_get_string_element(widgets_to_close, j);
+                                    WidgetState *other_state = g_hash_table_lookup(shell->widgets, name_to_close);
+                                    if (other_state) hide_widget(other_state);
+                                }
                             }
                         }
                     }
@@ -437,10 +466,6 @@ static void activate_handler(GApplication *app, gpointer user_data) {
         g_signal_connect(shell->config_monitor, "changed", G_CALLBACK(on_config_changed), shell);
     } else { g_warning("Could not create file monitor for config file."); }
     g_object_unref(config_file);
-}
-
-static void free_widget_state(gpointer data) {
-    g_free(data);
 }
 
 

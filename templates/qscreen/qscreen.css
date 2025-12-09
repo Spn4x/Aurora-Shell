@@ -6,7 +6,7 @@
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
 @define-color text-color #E0E0E0;
-@define-color accent #9A6426; /* This is the ONLY dynamic color */
+@define-color accent #6D6D6C; /* This is the ONLY dynamic color */
 
 
 /* --- Main Control Panel --- */

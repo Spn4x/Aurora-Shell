@@ -1,16 +1,16 @@
 /* Cheatsheet Template for Wallust */
 
 /* --- Wallust Color Placeholders --- */
-@define-color background #252322;
-@define-color foreground #E4E3DE;
-@define-color accent #9A6426;
-@define-color surface #4B4947;
+@define-color background #111111;
+@define-color foreground #D7E0BB;
+@define-color accent #6D6D6C;
+@define-color surface #393939;
 
 
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
 
-* --- Main Styles --- */
+/* --- Main Styles --- */
 window {
     background-color: transparent;
 }

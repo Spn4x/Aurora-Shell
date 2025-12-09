@@ -443,9 +443,7 @@ window.background {
 
 #organizer-widget .calendar-pane
 {
-  /* This pane should have a fixed size and never grow or shrink. */
-  flex-grow: 0;
-  flex-shrink: 0;
+
 }
 
 popover {

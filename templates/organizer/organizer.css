@@ -3,10 +3,10 @@
 /* =================================================================== */
 
 /* --- Wallust Placeholders --- */
-@define-color background #252322;
-@define-color foreground #E4E3DE;
-@define-color accent     #9A6426;
-@define-color surface    #4B4947;
+@define-color background #111111;
+@define-color foreground #D7E0BB;
+@define-color accent     #6D6D6C;
+@define-color surface    #393939;
 
 /* --- Static Colors --- */
 @define-color gnome-bg #28282C;
@@ -443,9 +443,7 @@ window.background {
 
 #organizer-widget .calendar-pane
 {
-  /* This pane should have a fixed size and never grow or shrink. */
-  flex-grow: 0;
-  flex-shrink: 0;
+
 }
 
 popover {

@@ -28,7 +28,7 @@
   },
   {
     "name": "zen",
-    "on-click-right": "swaync-client --toggle-panel"
+    "on-click-right": "aurora-shell --toggle organizer"
   },
   {
     "type": "popover",
@@ -76,28 +76,11 @@
     "interactive": true
   },
   {
-    "name": "calendar",
-    "plugin": "/usr/local/lib/aurora-shell/widgets/calendar.so",
-    "stylesheet": "calendar.css",
-    "anchor": "top-center",
-    "layer": "top",
-    "visible_on_start": false,
-    "margin": { "top": 5 },
-    "animation": {
-      "property": "margin-top",
-      "from": -600,
-      "to": 15,
-      "duration": 500
-    },
-    "interactive": false,
-    "close": [ "control-center" ] 
-  },
-  {
     "name": "control-center",
     "plugin": "/usr/local/lib/aurora-shell/widgets/control-center.so",
     "stylesheet": "controlcenter.css",
     "anchor": "top-center",
-    "layer": "overlay",
+    "layer": "top",
     "margin": { "top": 5 },
     "visible_on_start": false,
     "size": {
@@ -105,7 +88,7 @@
       "height": 200
     },
     "interactive": false,
-    "close": [ "calendar" ] 
+    "close": [ "organizer" ] 
   },
   {
     "name": "mpris-player",
@@ -153,6 +136,7 @@
     "layer": "top",
     "anchor": "bottom-center",
     "visible_on_start": false,
+    "exclusive": false,
     "interactive": false,
     "margin": {
       "bottom": 0
@@ -172,15 +156,21 @@
    {
     "type": "daemon",
     "name": "aurora-insight-daemon",
-    "command": "aurora-insight-daemon"
+     "command": "/usr/local/bin/aurora-insight-daemon"
   },
      {
         "type": "daemon",
-        "command": "auroranotifyd"
+        "name": "aurora-notification-daemon",
+        "command": "/usr/local/bin/auroranotifyd"
     },
     {
         "type": "daemon",
-        "command": "auroranotify-ui"
+        "name": "aurora-notification-ui",
+        "command": "/usr/local/bin/auroranotify-ui"
+    },
+    {
+    "type": "daemon",
+    "command": "aurora-privacy-daemon"
     },
     {
         "type": "widget",
@@ -191,6 +181,8 @@
         "anchor": "top",
         "interactive": true,
         "visible_on_start": false,
-        "margin": { "top": 1 }
+        "margin": { "top": 1 },
+        "close": [ "control-center" ], 
+        "size": { "width": 400, "height": 400 }
     }
 ]

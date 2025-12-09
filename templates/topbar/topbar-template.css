@@ -6,10 +6,14 @@
 @define-color custom-accent {{color4}};        /* Primary accent */
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
-/* Note: 'custom-border' and 'custom-highlight' were defined but not used. */
-/* Note: 'battery-*', 'backlight-*', 'bluetooth-color' were defined but not used. */
 
 
+
+
+@define-color theme_unfocused_color @gnome-highlight;
+@define-color theme_selected_bg_color @custom-accent;
+@define-color theme_fg_color @custom-primary;
+@define-color theme_bg_color @custom-background;
 
 /* --- Main Bar Container --- */
 .aurora-topbar-widget {
@@ -32,40 +36,143 @@
     margin-left: 5px;
 }
 
-/* --- Workspaces Module Styling --- */
 .aurora-topbar-widget .workspace-module {
-    background: none;
+    margin: 0 8px;
+     min-width: 50px;
+    
+  
+}
+
+/* --- Clock Module Progress Bars --- */
+/* This targets the progress bars INSIDE the clock module specifically */
+.aurora-topbar-widget .clock-module progress,
+.aurora-topbar-widget .clock-module progressbar,
+.aurora-topbar-widget .clock-module trough {
+    /* Reset all default GTK styling to prevent thin lines */
+    min-height: 0;
+    min-width: 0;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
     padding: 0;
-    margin-left: 2px;
-    margin-right: 6px;
+    background-image: none; /* Crucial for overriding default themes */
 }
 
-.aurora-topbar-widget .workspace-module .workspace-button {
-   
-   background: @gnome-highlight;
-    padding: 4px 9px;
-    margin: 1px 2px;
+
+
+
+.aurora-topbar-widget .audio-module .album-art-bg {
     border-radius: 8px;
-    font-size: 10.5pt;
-    font-weight: bold;
+    filter: blur(1px);
+    opacity: 0.6;
+
 }
 
-.aurora-topbar-widget .workspace-module .workspace-button.active-ws {
-    background-color: alpha(@custom-accent, 0.85);
+/* This rule for the text label remains the same and is correct. */
+.aurora-topbar-widget .audio-module .song-title-overlay {
+    font-weight: bold;
+    font-size: 9pt;
+    color: white;
+    background: none; /* Make sure the label itself is transparent */
+    padding: 0 8px;
+}
+
+
+
+/* --- Zen Module --- */
+.aurora-topbar-widget .zen-module {
+    padding: 0;
+    margin-right: 3px;
+    background: none; /* Let Cairo draw the background */
+    border: none;
     box-shadow: none;
 }
 
+
+
+
+/* --- Sysinfo Module Styling --- */
+
+/* 1. Reset Container Logic */
+/* We remove padding and borders because the C drawing area needs to fill the space */
+.aurora-topbar-widget .sysinfo-module {
+    padding: 0;
+    margin: 0;
+    background: none; /* Crucial: Let the Cairo draw function handle the background */
+    border: none;
+    box-shadow: none;
+    min-width: 220px; /* Match the C code size request */
+}
+
+/* 2. Text Overlay Styling */
+/* This sits on top of your generated gauge bars */
+.aurora-topbar-widget .sysinfo-module .sys-text-overlay {
+    font-family: "JetBrainsMono Nerd Font", monospace;
+    font-size: 9pt;
+    font-weight: 800; /* Extra bold to pop against colors */
+    color: @theme_fg_color;
+    
+    /* 
+       A slight shadow helps readability if the accent color 
+       is very light and the text is white 
+    */
+    text-shadow: 0 1px 2px rgba(0,0,0,0.5); 
+    
+    /* Ensure it doesn't block the visual of the bars too much */
+    opacity: 0.95; 
+    margin: 0 1px;
+}
+
+/* 3. Ensure Overlay Container doesn't add weird spacing */
+.aurora-topbar-widget .sysinfo-module overlay {
+    padding: 0;
+}
+
+
+
+
+
+/* 
+ * The trough is the empty part of the progress bar.
+ * We want it to be the main background color of our module.
+ */
+.aurora-topbar-widget .clock-module trough {
+    background-color: @gnome-highlight;
+}
+
+/* Force the color of the FILLED part of the bars */
+.aurora-topbar-widget .clock-module .month-progress progressbar {
+    background-color: @custom-accent;
+}
+
+.aurora-topbar-widget .clock-module .day-progress progressbar {
+    background-color: alpha(@custom-accent, 0.6);
+}
+
+/* Ensure widgets inside the overlay have no background of their own */
+.aurora-topbar-widget .clock-module overlay,
+.aurora-topbar-widget .clock-module box,
+.aurora-topbar-widget .clock-module label {
+    background: none;
+}
+
+
 /* --- Clock & Generic "Pill" Modules --- */
 .aurora-topbar-widget .clock-module,
-.aurora-topbar-widget .sysinfo-module,
-.aurora-topbar-widget .audio-module,
-.aurora-topbar-widget .zen-module {
+.aurora-topbar-widget .audio-module {
     padding: 3px 7px;
     margin: 0px;
     border-radius: 8px;
     background: @gnome-highlight;
     font-weight: normal;
     min-width: 40px;
+    font-weight: bold;
+}
+
+.aurora-topbar-widget .clock-module {
+    margin-right: 8px;
+    padding: 0;
+    min-width: 50px;
 }
 
 .aurora-topbar-widget .popover-module {
@@ -78,22 +185,15 @@
     border-radius: 8px;
 }
 
-.aurora-topbar-widget .clock-module {
-    margin-right: 8px;
-}
-.aurora-topbar-widget .clock-module:hover,
-.aurora-topbar-widget .sysinfo-module:hover,
-.aurora-topbar-widget .audio-module:hover,
-.aurora-topbar-widget .zen-module:hover,
-.aurora-topbar-widget .workspace-module .workspace-button:hover {
-    background-color: @accent;
-}
+
+
+
+
+
 
 .aurora-topbar-widget .clock-module:active,
-.aurora-topbar-widget .sysinfo-module:active,
-.aurora-topbar-widget .audio-module:active,
-.aurora-topbar-widget .zen-module:checked,
-.aurora-topbar-widget .workspace-module .workspace-button:checked {
+
+.aurora-topbar-widget .audio-module:active {
     background-color: @accent;
 }
 
@@ -114,13 +214,16 @@
 }
 
 /* --- Audio Module Internals --- */
-.aurora-topbar-widget .audio-module .glyph-label {
+.aurora-topbar-widget .audio-module.glyph-label {
     font-size: 1.1em;
     opacity: 0.8;
+    padding: 0;
 }
-/* =======================================================================
-    !!! FINAL UNIVERSAL POPOVER STYLES !!!
-   ======================================================================= */
+
+.aurora-topbar-widget .audio-module {
+    padding: 0;
+}
+/* ======================================================================= */
 
 /* --- Part 1: Style for ALL Popover Containers --- */
 
@@ -193,8 +296,8 @@ popover .flat:hover {
 }
 /* --- Zen (DND) Module --- */
 .aurora-topbar-widget .zen-module .zen-active {
-    background-color: @custom-accent; /* FIXED */
-    color: @custom-background; /* FIXED */
+    background-color: @custom-accent;
+    color: @custom-background;
 }
 
 .aurora-topbar-widget .zen-module .glyph-label {

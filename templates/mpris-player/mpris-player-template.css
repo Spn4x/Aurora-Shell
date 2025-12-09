@@ -5,20 +5,18 @@
 */
 
 /* --- Color Palette & Font (Placeholders) --- */
-@define-color background %%BACKGROUND%%;
-@define-color foreground %%FOREGROUND%%;
-@define-color accent     %%ACCENT%%;
-@define-color surface    %%SURFACE%%;
-@define-color warning    %%WARNING%%;
+@define-color background {{background}};
+@define-color foreground {{foreground}};
+@define-color accent     {{accent}};
+@define-color surface    {{color0}};
 
-@define-color-font-main "JetBrainsMono Nerd Font";
 
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
 
 /* --- Main Widget Container --- */
 .mpris-player-widget {
-    font-family: @define-color-font-main, monospace;
+    font-family: JetBrainsMono Nerd Font, monospace;
     background-color: @gnome-bg;
     color: @foreground;
     border: 2px solid alpha(@accent, 0.2);

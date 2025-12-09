@@ -1,8 +1,8 @@
 /* --- Wallust Placeholders for Launcher --- */
-@define-color bg_color #252322;
-@define-color text_color #E4E3DE;
-@define-color accent_color #9A6426;
-@define-color surface_color #4B4947;
+@define-color bg_color #111111;
+@define-color text_color #D7E0BB;
+@define-color accent_color #6D6D6C;
+@define-color surface_color #393939;
 
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;

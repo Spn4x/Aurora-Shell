@@ -270,7 +270,14 @@ int main(int argc, char *argv[]) {
     if (json_parser_load_from_file(parser, main_config_path, NULL)) {
         JsonArray *root_array = json_node_get_array(json_parser_get_root(parser));
         for (guint i = 0; i < json_array_get_length(root_array); i++) {
-            JsonObject *widget_obj = json_array_get_object_element(root_array, i);
+            // FIX: Safely retrieve the object node from the array
+            JsonNode *element_node = json_array_get_element(root_array, i);
+            if (!element_node || json_node_get_node_type(element_node) != JSON_NODE_OBJECT) {
+                continue; 
+            }
+            JsonObject *widget_obj = json_node_get_object(element_node);
+            if (!json_object_has_member(widget_obj, "name")) continue;
+
             const char *name = json_object_get_string_member(widget_obj, "name");
             if (name && g_strcmp0(name, config_name) == 0) {
                 if (json_object_has_member(widget_obj, "config")) {
