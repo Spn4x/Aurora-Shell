@@ -342,10 +342,13 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
         g_warning("qscreen: Failed to parse config string."); return NULL;
     }
     JsonObject *root_obj = json_node_get_object(json_parser_get_root(parser));
-    const char *temp_path = json_object_get_string_member(root_obj, "temp_screenshot_path");
-    if (!temp_path) {
-        g_warning("qscreen: 'temp_screenshot_path' not provided in config. Cannot proceed."); return NULL;
+    
+    // FIX: Safely check for member existence before retrieval
+    if (!json_object_has_member(root_obj, "temp_screenshot_path")) {
+        // This is not an error; it just means the widget isn't ready to be shown yet.
+        return NULL;
     }
+    const char *temp_path = json_object_get_string_member(root_obj, "temp_screenshot_path");
 
     UIState *state = g_new0(UIState, 1);
     state->app_state = g_new0(QScreenState, 1);

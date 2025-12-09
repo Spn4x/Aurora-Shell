@@ -91,22 +91,39 @@ static gint compare_results_by_score(gconstpointer a, gconstpointer b) {
 static void update_search_results(LauncherState *state, const gchar *search_text) {
     g_list_store_remove_all(state->results_store);
 
+    // If search is empty, don't show anything (or show favorites if you implement that later)
+    if (!search_text || strlen(search_text) == 0) {
+        gtk_revealer_set_reveal_child(GTK_REVEALER(state->results_revealer), FALSE);
+        return;
+    }
+
     GList *command_results = get_command_results(search_text);
-    GList *app_results = get_app_results(search_text);
     GList *calc_results = get_calculator_results(search_text);
+    GList *app_results = get_app_results(search_text);
     
     GList *all_results = g_list_concat(command_results, g_list_concat(calc_results, app_results));
     all_results = g_list_sort(all_results, compare_results_by_score);
 
+    // --- OPTIMIZATION: RESULT LIMITING ---
+    // Only add the top 20 items to the UI store. 
+    // Adding UI widgets is expensive.
+    int count = 0;
+    const int MAX_RESULTS = 15; 
+
     for (GList *l = all_results; l != NULL; l = l->next) {
-        g_list_store_append(state->results_store, l->data);
-        g_object_unref(l->data);
+        if (count < MAX_RESULTS) {
+            g_list_store_append(state->results_store, l->data);
+        }
+        g_object_unref(l->data); // We must unref all, even those not added
+        count++;
     }
     g_list_free(all_results);
 
     guint n_items = g_list_model_get_n_items(G_LIST_MODEL(state->results_store));
     gtk_revealer_set_reveal_child(GTK_REVEALER(state->results_revealer), n_items > 0);
+    
     if (n_items > 0) {
+        // Select first item automatically
         GtkListBoxRow *first_row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(state->listbox), 0);
         gtk_list_box_select_row(GTK_LIST_BOX(state->listbox), first_row);
     }

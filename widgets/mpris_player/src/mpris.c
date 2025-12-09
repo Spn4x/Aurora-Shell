@@ -37,20 +37,59 @@ static void update_offset_label(MprisPopoutState *state);
 static void show_toast(MprisPopoutState *state, const gchar *message);
 static gboolean hide_toast_label(gpointer user_data);
 
+// --- NEW HELPER STRUCT ---
+typedef struct {
+    MprisPopoutState *state;
+    char *local_path;
+} ArtDownloadData;
+
+// --- NEW HELPER FUNCTION ---
+static void on_curl_finished(GObject *source, GAsyncResult *res, gpointer user_data) {
+    GSubprocess *proc = G_SUBPROCESS(source);
+    ArtDownloadData *data = (ArtDownloadData*)user_data;
+    
+    GError *error = NULL;
+    if (g_subprocess_wait_check_finish(proc, res, &error)) {
+        if (g_file_test(data->local_path, G_FILE_TEST_EXISTS)) {
+            // Success: Load it into the GtkImage
+            gtk_image_set_from_file(data->state->album_art_image, data->local_path);
+        }
+    } else {
+        if (error) g_error_free(error);
+    }
+    
+    g_free(data->local_path);
+    g_free(data);
+}
+
+// --- NEW HELPER FUNCTION ---
+static void ensure_cache_dir_exists(const char *path) {
+    g_autofree char *dir = g_path_get_dirname(path);
+    g_mkdir_with_parents(dir, 0755);
+}
+
 static void free_popout_state(gpointer data) {
     MprisPopoutState *state = data;
     if (!state) return;
     g_print("[LIFECYCLE] Destroying MPRIS view state for %s\n", state->bus_name);
+    
     stop_lyric_updates(state);
+    
     if (state->lyrics_cancellable) g_cancellable_cancel(state->lyrics_cancellable);
     g_clear_object(&state->lyrics_cancellable);
+    
     g_free(state->current_track_signature);
     destroy_lyrics_view(state->lyrics_view_state);
+    
     if (state->player_proxy) {
         if (state->properties_changed_id > 0) g_signal_handler_disconnect(state->player_proxy, state->properties_changed_id);
         if (state->seeked_id > 0) g_signal_handler_disconnect(state->player_proxy, state->seeked_id);
         g_clear_object(&state->player_proxy);
     }
+
+    // ADD THIS LINE:
+    g_free(state->last_art_url);
+
     g_free(state->bus_name);
     g_free(state);
 }
@@ -327,18 +366,71 @@ static void fetch_lyrics(MprisPopoutState *state) {
 
 static void update_display_metadata(MprisPopoutState *state, GVariantDict *dict) {
     if (!state || !dict) return;
-    const char *title = NULL, *art_url = NULL; gchar **artists = NULL;
+    
+    const char *title = NULL, *art_url = NULL; 
+    gchar **artists = NULL;
+    
     g_variant_dict_lookup(dict, "xesam:title", "&s", &title);
     g_variant_dict_lookup(dict, "xesam:artist", "^as", &artists);
     g_variant_dict_lookup(dict, "mpris:artUrl", "&s", &art_url);
+    
     gtk_label_set_text(state->title_label, title ? title : "Unknown Title");
     gtk_label_set_text(state->artist_label, (artists && artists[0]) ? artists[0] : "Unknown Artist");
-    if (art_url && g_str_has_prefix(art_url, "file://")) {
-        g_autofree gchar *path = g_filename_from_uri(art_url, NULL, NULL);
-        gtk_image_set_from_file(state->album_art_image, path);
-    } else {
-        gtk_image_set_from_icon_name(state->album_art_image, "audio-x-generic");
+
+    // --- START OF NEW ART LOGIC ---
+    if (g_strcmp0(art_url, state->last_art_url) != 0) {
+        g_free(state->last_art_url);
+        state->last_art_url = g_strdup(art_url);
+
+        if (!art_url) {
+            gtk_image_set_from_icon_name(state->album_art_image, "audio-x-generic");
+        } 
+        else if (g_str_has_prefix(art_url, "file://")) {
+            // Local file (mpd, local players)
+            g_autofree gchar *path = g_filename_from_uri(art_url, NULL, NULL);
+            if (g_file_test(path, G_FILE_TEST_EXISTS)) {
+                gtk_image_set_from_file(state->album_art_image, path);
+            } else {
+                gtk_image_set_from_icon_name(state->album_art_image, "audio-x-generic");
+            }
+        } 
+        else if (g_str_has_prefix(art_url, "http://") || g_str_has_prefix(art_url, "https://")) {
+            // Remote file (Spotify) - Check Cache first
+            g_autofree char *checksum = g_compute_checksum_for_string(G_CHECKSUM_SHA256, art_url, -1);
+            g_autofree char *cache_path = g_build_filename(g_get_user_cache_dir(), "aurora-shell", "art", checksum, NULL);
+            
+            if (g_file_test(cache_path, G_FILE_TEST_EXISTS)) {
+                // Found in cache, load immediately
+                gtk_image_set_from_file(state->album_art_image, cache_path);
+            } else {
+                // Not in cache, set placeholder and download
+                gtk_image_set_from_icon_name(state->album_art_image, "audio-x-generic");
+                ensure_cache_dir_exists(cache_path);
+                
+                GSubprocessLauncher *launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_NONE);
+                GError *err = NULL;
+                
+                // Spawn curl to download to cache_path
+                GSubprocess *proc = g_subprocess_launcher_spawn(launcher, &err, "curl", "-s", "-L", "-o", cache_path, art_url, NULL);
+                
+                if (proc) {
+                    ArtDownloadData *data = g_new(ArtDownloadData, 1);
+                    data->state = state;
+                    data->local_path = g_strdup(cache_path);
+                    g_subprocess_wait_async(proc, NULL, on_curl_finished, data);
+                    g_object_unref(proc);
+                } else {
+                    if (err) g_error_free(err);
+                }
+                g_object_unref(launcher);
+            }
+        } else {
+            // Unknown protocol
+            gtk_image_set_from_icon_name(state->album_art_image, "audio-x-generic");
+        }
     }
+    // --- END OF NEW ART LOGIC ---
+
     g_strfreev(artists);
 }
 
@@ -400,15 +492,12 @@ GtkWidget* create_mpris_view(const gchar *bus_name, MprisPopoutState **state_out
     
     GtkWidget *root_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
 
-    // =======================================================================
-    // THE FORCED METHOD IS BACK: This line forces the widget's size.
+    // Force the widget to respect the size from config/main.c
     gtk_widget_set_size_request(root_box, width, height); 
-    // =======================================================================
     
     state->root_widget = root_box;
     g_object_set_data_full(G_OBJECT(root_box), "mpris-state", state, free_popout_state);
 
-    // ... the rest of the function is exactly the same as you provided ...
     gtk_widget_set_margin_start(root_box, 15);
     gtk_widget_set_margin_end(root_box, 15);
     gtk_widget_set_margin_top(root_box, 15);
@@ -422,15 +511,35 @@ GtkWidget* create_mpris_view(const gchar *bus_name, MprisPopoutState **state_out
     GtkWidget *text_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
     gtk_widget_set_hexpand(text_box, TRUE); 
     gtk_widget_set_valign(text_box, GTK_ALIGN_CENTER);
+
+    // --- FIX: Label constraints to prevent expansion ---
+    
+    // 1. Title Label
     state->title_label = GTK_LABEL(gtk_label_new(""));
     gtk_widget_add_css_class(GTK_WIDGET(state->title_label), "title-label");
     gtk_label_set_xalign(state->title_label, 0.0);
+    
     gtk_label_set_wrap(state->title_label, TRUE);
+    gtk_label_set_wrap_mode(state->title_label, PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_ellipsize(state->title_label, PANGO_ELLIPSIZE_END);
+    gtk_label_set_lines(state->title_label, 2); // Limit to 2 lines max
+    // Crucial: Tells GTK it *can* be narrower than the text requires
+    gtk_label_set_max_width_chars(state->title_label, 1); 
+
+    // 2. Artist Label
     state->artist_label = GTK_LABEL(gtk_label_new(""));
     gtk_widget_add_css_class(GTK_WIDGET(state->artist_label), "artist-label");
     gtk_label_set_xalign(state->artist_label, 0.0);
+    
     gtk_label_set_wrap(state->artist_label, TRUE);
     gtk_label_set_wrap_mode(state->artist_label, PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_ellipsize(state->artist_label, PANGO_ELLIPSIZE_END);
+    gtk_label_set_lines(state->artist_label, 1); // Limit to 1 line
+    // Crucial: Tells GTK it *can* be narrower than the text requires
+    gtk_label_set_max_width_chars(state->artist_label, 1);
+
+    // --- END FIX ---
+
     gtk_box_append(GTK_BOX(text_box), GTK_WIDGET(state->title_label));
     gtk_box_append(GTK_BOX(text_box), GTK_WIDGET(state->artist_label));
     gtk_box_append(GTK_BOX(info_box), GTK_WIDGET(state->album_art_image));

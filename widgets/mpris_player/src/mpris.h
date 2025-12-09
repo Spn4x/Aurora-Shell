@@ -1,4 +1,5 @@
-// In mpris.h
+// widgets/mpris_player/src/mpris.h
+
 #ifndef MPRIS_H
 #define MPRIS_H
 
@@ -33,9 +34,11 @@ typedef struct _MprisPopoutState {
 
     gint64 current_sync_offset_ms;
     GtkLabel *offset_label;
+
+    // --- ADD THIS FIELD ---
+    gchar *last_art_url; 
 } MprisPopoutState;
 
-// Correct function signature
 GtkWidget* create_mpris_view(const gchar *bus_name, MprisPopoutState **state_out, gint width, gint height);
 
 #endif // MPRIS_H

@@ -30,7 +30,6 @@ typedef struct {
 
     double visual_alpha;     
     guint visual_timer_id;
-    guint delay_timer_id;
 
     GDBusProxy *battery_proxy;
     guint upower_watcher_id;
@@ -65,22 +64,14 @@ static gboolean visual_fade_tick(gpointer user_data) {
     return G_SOURCE_CONTINUE;
 }
 
-static gboolean start_fade_animation(gpointer user_data) {
-    SysInfoModule *mod = user_data;
-    mod->delay_timer_id = 0;
-    if (mod->visual_timer_id > 0) g_source_remove(mod->visual_timer_id);
-    mod->visual_timer_id = g_timeout_add(16, visual_fade_tick, mod);
-    return G_SOURCE_REMOVE;
-}
-
-static void on_style_updated(GtkWidget *widget, gpointer user_data) {
+// Replaced on_style_updated with on_map to trigger animation safely in GTK4
+static void on_map(GtkWidget *widget, gpointer user_data) {
     (void)widget;
     SysInfoModule *mod = user_data;
-    if (mod->visual_timer_id > 0) { g_source_remove(mod->visual_timer_id); mod->visual_timer_id = 0; }
-    if (mod->delay_timer_id > 0) { g_source_remove(mod->delay_timer_id); mod->delay_timer_id = 0; }
+    // Reset alpha and start fade in
     mod->visual_alpha = 0.0;
-    gtk_widget_queue_draw(mod->drawing_area);
-    mod->delay_timer_id = g_timeout_add(150, start_fade_animation, mod);
+    if (mod->visual_timer_id > 0) g_source_remove(mod->visual_timer_id);
+    mod->visual_timer_id = g_timeout_add(16, visual_fade_tick, mod);
 }
 
 // --- Helper: Draw Glyph at Bar Tip ---
@@ -96,9 +87,6 @@ static void draw_glyph_at_tip(cairo_t *cr, PangoLayout *layout, int total_width,
     double x = (total_width * pct);
     
     // Clamp so it doesn't fall off the right edge, but sits right on the tip
-    // If bar is full, x = width. We want it slightly inside: width - text_w - padding
-    // If bar is small, we want it just to the right? Or always inside?
-    // Let's try centered on the tip line.
     x = x - (text_w / 2.0);
 
     // Clamp bounds
@@ -120,6 +108,7 @@ static void draw_glyph_at_tip(cairo_t *cr, PangoLayout *layout, int total_width,
 // --- Drawing ---
 static void draw_sysinfo_gauge(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data) {
     SysInfoModule *mod = (SysInfoModule *)user_data;
+    // If fully invisible, skip drawing to save resources
     if (mod->visual_alpha <= 0.01) return;
 
     GtkStyleContext *ctx = gtk_widget_get_style_context(GTK_WIDGET(area));
@@ -181,17 +170,10 @@ static void draw_sysinfo_gauge(GtkDrawingArea *area, cairo_t *cr, int width, int
         // --- Glyphs (Only if NOT hovered) ---
         if (!mod->is_hovered) {
             PangoLayout *layout = gtk_widget_create_pango_layout(GTK_WIDGET(area), NULL);
-            // Use standard FG color for glyphs so they pop
-            
-            // Draw order: Front to back (or back to front? Overlapping glyphs might be messy)
-            // Let's draw them front to back to ensure the most opaque bars' glyphs are on top if they collide?
-            // Actually, Battery (front) glyph should probably be drawn LAST so it's on top.
-            
             draw_glyph_at_tip(cr, layout, width, height, mod->cpu_pct, "󰍛", fg_col);
             draw_glyph_at_tip(cr, layout, width, height, mod->ram_pct, "󰾆", fg_col);
             draw_glyph_at_tip(cr, layout, width, height, mod->temp_pct, "󰔏", fg_col);
             draw_glyph_at_tip(cr, layout, width, height, mod->bat_pct, "󰁹", fg_col);
-
             g_object_unref(layout);
         }
 
@@ -361,7 +343,6 @@ static void sysinfo_module_cleanup(gpointer data) {
     SysInfoModule *module = data;
     if (module->poll_timer_id > 0) g_source_remove(module->poll_timer_id);
     if (module->visual_timer_id > 0) g_source_remove(module->visual_timer_id);
-    if (module->delay_timer_id > 0) g_source_remove(module->delay_timer_id);
     if (module->upower_watcher_id > 0) g_bus_unwatch_name(module->upower_watcher_id);
     g_clear_object(&module->battery_proxy);
     g_free(module->temp_file_path);
@@ -389,7 +370,10 @@ GtkWidget* create_sysinfo_module() {
     module->drawing_area = gtk_drawing_area_new();
     gtk_widget_set_size_request(module->drawing_area, 220, 28); 
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(module->drawing_area), draw_sysinfo_gauge, module, NULL);
-    g_signal_connect(module->drawing_area, "style-updated", G_CALLBACK(on_style_updated), module);
+    
+    // FIX: Use on_map instead of invalid style-updated signal
+    g_signal_connect(module->drawing_area, "map", G_CALLBACK(on_map), module);
+    
     gtk_overlay_set_child(GTK_OVERLAY(overlay), module->drawing_area);
 
     module->content_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 15);
