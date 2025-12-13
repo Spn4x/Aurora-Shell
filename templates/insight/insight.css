@@ -2,13 +2,12 @@
  * Aurora Insight - Template
  * Provides named colors for both GTK widgets and Cairo drawing.
 */
-@define-color accent #6D6D6C;
-@define-color background #111111;
-@define-color foreground #D7E0BB; /* <-- THIS IS THE CRITICAL ADDITION */
+@define-color accent @aurora_accent;
+@define-color background @aurora_bg;
+@define-color foreground @aurora_fg;
 
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
-
 
 #aurora-insight {
     background: @gnome-bg;
@@ -36,7 +35,6 @@
 }
 
 /* --- Rules for Bottom Navigation Buttons --- */
-
 #aurora-insight .bottom-nav button {
     background-image: none;
     background-color: transparent;

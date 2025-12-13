@@ -1,188 +1,238 @@
 [
   {
-    "name": "topbar",
-    "plugin": "/usr/local/lib/aurora-shell/widgets/topbar.so",
-    "stylesheet": "topbar.css",
-    "layer": "top",
-    "anchor": "top",
-    "exclusive": true,
-    "visible_on_start": true,
-    "interactive": true,
-    "margin": {
-      "top": 4,
-      "bottom": 0,
-      "left": 5,
-      "right": 5
+    "name" : "topbar",
+    "plugin" : "/usr/local/lib/aurora-shell/widgets/topbar.so",
+    "stylesheet" : "topbar.css",
+    "layer" : "top",
+    "anchor" : "top",
+    "exclusive" : true,
+    "visible_on_start" : true,
+    "interactive" : true,
+    "margin" : {
+      "top" : 4,
+      "bottom" : 0,
+      "left" : 5,
+      "right" : 5
     },
-    "config": {
-      "modules": {
-        "left": [ { "name": "workspaces" } ],
-        "center": [ { "name": "clock", "on-click": "aurora-shell --toggle organizer" } ],
-       "right": [
-  {
-    "name": "sysinfo",
-    "on-click": "aurora-shell --toggle control-center"
+    "config" : {
+      "modules" : {
+        "left" : [
+          {
+            "name" : "workspaces"
+          }
+        ],
+        "center" : [
+          {
+            "name" : "clock",
+            "on-click" : "aurora-shell --toggle organizer"
+          }
+        ],
+        "right" : [
+          {
+            "name" : "sysinfo",
+            "on-click" : "aurora-shell --toggle control-center"
+          },
+          {
+            "name" : "audio"
+          },
+          {
+            "name" : "zen",
+            "on-click-right" : "aurora-shell --toggle organizer"
+          },
+          {
+            "type" : "popover",
+            "symbol" : "",
+            "name" : "popover-module",
+            "items" : [
+              {
+                "label" : "  MPRIS Player",
+                "glyph" : "",
+                "on-click" : "aurora-shell --toggle mpris-player"
+              },
+              {
+                "label" : "  Insight",
+                "glyph" : "",
+                "on-click" : "aurora-shell --toggle insight"
+              },
+              {
+                "label" : " Cheatsheet",
+                "glyph" : "",
+                "on-click" : "aurora-shell --toggle cheatsheet"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "size" : {
+      "width" : 0,
+      "height" : 0
+    }
   },
   {
-    "name": "audio"
+    "name" : "uptime",
+    "plugin" : "/usr/local/lib/aurora-shell/widgets/uptime.so",
+    "stylesheet" : "archbadge.css",
+    "anchor" : "bottom-center",
+    "layer" : "bottom",
+    "margin" : {
+      "bottom" : 3
+    },
+    "text" : "{distro}  ·  Uptime: {uptime}",
+    "visible_on_start" : true
   },
   {
-    "name": "zen",
-    "on-click-right": "aurora-shell --toggle organizer"
+    "name" : "cheatsheet",
+    "plugin" : "/usr/local/lib/aurora-shell/widgets/cheatsheet.so",
+    "stylesheet" : "cheatsheet.css",
+    "anchor" : "center",
+    "layer" : "top",
+    "visible_on_start" : false,
+    "interactive" : true
   },
   {
-    "type": "popover",
-     "symbol": "",
-    "name": "popover-module",
-   "items": [
- {
-    "label": "  MPRIS Player",
-    "glyph": "",
-    "on-click": "aurora-shell --toggle mpris-player"
+    "name" : "control-center",
+    "plugin" : "/usr/local/lib/aurora-shell/widgets/control-center.so",
+    "stylesheet" : "controlcenter.css",
+    "anchor" : "top",
+    "layer" : "overlay",
+    "margin" : {
+      "top" : 5,
+      "bottom" : 0,
+      "left" : 0,
+      "right" : 0
+    },
+    "visible_on_start" : false,
+    "size" : {
+      "width" : 600,
+      "height" : 200
+    },
+    "interactive" : true,
+    "close" : [
+      "organizer"
+    ],
+    "exclusive" : false
   },
   {
-    "label": "  Insight",
-    "glyph": "",
-    "on-click": "aurora-shell --toggle insight"
+    "name" : "mpris-player",
+    "plugin" : "/usr/local/lib/aurora-shell/widgets/mpris_player.so",
+    "stylesheet" : "mpris-player.css",
+    "anchor" : "left",
+    "layer" : "overlay",
+    "margin" : {
+      "left" : 5,
+      "top" : 0,
+      "bottom" : 0,
+      "right" : 0
+    },
+    "interactive" : false,
+    "visible_on_start" : false,
+    "size" : {
+      "width" : 275,
+      "height" : 450
+    },
+    "exclusive" : true
   },
   {
-    "label": " Cheatsheet",
-    "glyph": "",
-    "on-click": "aurora-shell --toggle cheatsheet"
-  }
-]
-  }
-]
+    "name" : "launcher",
+    "plugin" : "/usr/local/lib/aurora-shell/widgets/launcher.so",
+    "stylesheet" : "launcher.css",
+    "layer" : "overlay",
+    "anchor" : "center",
+    "visible_on_start" : false,
+    "interactive" : true
+  },
+  {
+    "name" : "cachy-selector",
+    "type" : "command",
+    "command" : "toggle-selector.sh",
+    "config" : {
+      "stylesheet" : "cachy-selector.css",
+      "size" : {
+        "width" : 810,
+        "height" : 210
+      },
+      "margin" : {
+        "top" : 50
       }
     }
   },
   {
-    "name": "uptime",
-    "plugin": "/usr/local/lib/aurora-shell/widgets/uptime.so",
-    "stylesheet": "archbadge.css",
-    "anchor": "bottom-center",
-    "layer": "bottom",
-    "margin": { "bottom": 3 },
-    "text": "{distro}  ·  Uptime: {uptime}",
-    "visible_on_start": true
+    "type" : "themer-config",
+    "name" : "global-themer-settings",
+    "wallpaper_dir" : "~/Pictures/Wallpapers"
   },
   {
-    "name": "cheatsheet",
-    "plugin": "/usr/local/lib/aurora-shell/widgets/cheatsheet.so",
-    "stylesheet": "cheatsheet.css",
-    "anchor": "center",
-    "layer": "top",
-    "visible_on_start": false,
-    "interactive": true
-  },
-  {
-    "name": "control-center",
-    "plugin": "/usr/local/lib/aurora-shell/widgets/control-center.so",
-    "stylesheet": "controlcenter.css",
-    "anchor": "top-center",
-    "layer": "top",
-    "margin": { "top": 5 },
-    "visible_on_start": false,
-    "size": {
-      "width": 600,
-      "height": 200
+    "name" : "insight",
+    "plugin" : "/usr/local/lib/aurora-shell/widgets/aurora-insight.so",
+    "stylesheet" : "insight.css",
+    "layer" : "overlay",
+    "anchor" : "bottom",
+    "visible_on_start" : false,
+    "exclusive" : false,
+    "interactive" : false,
+    "margin" : {
+      "bottom" : 0,
+      "top" : 0,
+      "left" : 0,
+      "right" : 0
     },
-    "interactive": false,
-    "close": [ "organizer" ] 
-  },
-  {
-    "name": "mpris-player",
-    "plugin": "/usr/local/lib/aurora-shell/widgets/mpris_player.so",
-    "stylesheet": "mpris-player.css",
-    "anchor": "center-left",
-    "layer": "top",
-    "margin": { "left": 5 },
-    "visible_on_start": false,
-    "size": {
-      "width": 275,
-      "height": 450
-    },
-    "exclusive": false,
-    "interactive": true
-  },
-  {
-    "name": "launcher",
-    "plugin": "/usr/local/lib/aurora-shell/widgets/launcher.so",
-    "stylesheet": "launcher.css",
-    "layer": "overlay",
-    "anchor": "center",
-    "visible_on_start": false,
-    "interactive": true
-  },
-  {
-    "name": "cachy-selector",
-    "type": "command",
-    "command": "toggle-selector.sh",
-    "config": {
-        "stylesheet": "cachy-selector.css",
-        "size": { "width": 810, "height": 210 },
-        "margin": { "top": 50 }
-    }
-},
-{
-    "type": "themer-config",
-    "name": "global-themer-settings",
-    "wallpaper_dir": "~/Pictures/Wallpapers"
-},
-  {
-    "name": "insight",
-    "plugin": "/usr/local/lib/aurora-shell/widgets/aurora-insight.so",
-    "stylesheet": "insight.css",
-    "layer": "top",
-    "anchor": "bottom-center",
-    "visible_on_start": false,
-    "exclusive": false,
-    "interactive": false,
-    "margin": {
-      "bottom": 0
-
+    "size" : {
+      "width" : 0,
+      "height" : 0
     }
   },
   {
-  "name": "qscreen",
-  "plugin": "/usr/local/lib/aurora-shell/widgets/qscreen.so",
-  "stylesheet": "qscreen.css",
-  "layer": "overlay",
-  "exclusive": true,
-  "visible_on_start": false,
-  "interactive": true,
-  "layer_shell": false
-},
-   {
-    "type": "daemon",
-    "name": "aurora-insight-daemon",
-     "command": "/usr/local/bin/aurora-insight-daemon"
+    "name" : "qscreen",
+    "plugin" : "/usr/local/lib/aurora-shell/widgets/qscreen.so",
+    "stylesheet" : "qscreen.css",
+    "layer" : "overlay",
+    "exclusive" : true,
+    "visible_on_start" : false,
+    "interactive" : true,
+    "layer_shell" : false
   },
-     {
-        "type": "daemon",
-        "name": "aurora-notification-daemon",
-        "command": "/usr/local/bin/auroranotifyd"
+  {
+    "type" : "daemon",
+    "name" : "aurora-insight-daemon",
+    "command" : "/usr/local/bin/aurora-insight-daemon"
+  },
+  {
+    "type" : "daemon",
+    "name" : "aurora-notification-daemon",
+    "command" : "/usr/local/bin/auroranotifyd"
+  },
+  {
+    "type" : "daemon",
+    "name" : "aurora-notification-ui",
+    "command" : "/usr/local/bin/auroranotify-ui"
+  },
+  {
+    "type" : "daemon",
+    "command" : "aurora-privacy-daemon"
+  },
+  {
+    "type" : "widget",
+    "name" : "organizer",
+    "plugin" : "/usr/local/lib/aurora-shell/widgets/organizer.so",
+    "stylesheet" : "organizer.css",
+    "layer" : "overlay",
+    "anchor" : "top",
+    "interactive" : true,
+    "visible_on_start" : false,
+    "margin" : {
+      "top" : 1,
+      "bottom" : 0,
+      "left" : 0,
+      "right" : 0
     },
-    {
-        "type": "daemon",
-        "name": "aurora-notification-ui",
-        "command": "/usr/local/bin/auroranotify-ui"
+    "close" : [
+      "control-center"
+    ],
+    "size" : {
+      "width" : 400,
+      "height" : 400
     },
-    {
-    "type": "daemon",
-    "command": "aurora-privacy-daemon"
-    },
-    {
-        "type": "widget",
-        "name": "organizer",
-        "plugin": "/usr/local/lib/aurora-shell/widgets/organizer.so",
-        "stylesheet": "organizer.css",
-        "layer": "top",
-        "anchor": "top",
-        "interactive": true,
-        "visible_on_start": false,
-        "margin": { "top": 1 },
-        "close": [ "control-center" ], 
-        "size": { "width": 400, "height": 400 }
-    }
+    "exclusive" : false
+  }
 ]

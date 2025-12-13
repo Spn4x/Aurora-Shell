@@ -4,19 +4,18 @@
 ================================================================================
 */
 
-/* --- Color Palette & Font (Placeholders) --- */
-@define-color background #111111;
-@define-color foreground #D7E0BB;
-@define-color accent     #6D6D6C;
-@define-color surface    #393939;
-
+/* --- Color Palette & Font --- */
+@define-color background @aurora_bg;
+@define-color foreground @aurora_fg;
+@define-color accent     @aurora_accent;
+@define-color surface    @aurora_surface;
 
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
 
 /* --- Main Widget Container --- */
 .mpris-player-widget {
-    font-family: JetBrainsMono Nerd Font, monospace;
+    font-family: Inter, monospace;
     background-color: @gnome-bg;
     color: @foreground;
     border: 2px solid alpha(@accent, 0.2);
@@ -27,18 +26,15 @@
 /* --- Player Info & Album Art --- */
 .mpris-player-widget .album-art {
   border-radius: 8px;
-  
 }
 .mpris-player-widget .title-label {
   font-size: 1.2em;
   font-weight: bold;
-  color: @white;
-  
+  color: #FFFFFF;
 }
 .mpris-player-widget .artist-label {
   font-size: 1em;
   color: @foreground;
- 
 }
 /* --- Media Control Buttons --- */
 .mpris-player-widget .linked button {
@@ -48,11 +44,11 @@
   color: #e0e0e0;
   transition: all 0.2s ease-in-out;
   padding: 8px;
-  border-radius: 99px; /* Make them circular */
+  border-radius: 99px;
 }
 .mpris-player-widget .linked button:hover {
   background-color: rgba(255, 255, 255, 0.1);
-  color: @white;
+  color: #FFFFFF;
 }
 .mpris-player-widget .linked button:active {
   background-color: rgba(255, 255, 255, 0.15);

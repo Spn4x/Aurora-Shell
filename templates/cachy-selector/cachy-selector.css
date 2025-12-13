@@ -3,36 +3,30 @@
  *  Theme based on the "Wallust Cheatsheet Template" aesthetic
  */
 
-/* --- Wallust Placeholders for Cachy Selector --- */
-@define-color background #111111;
-@define-color foreground #D7E0BB;
-@define-color accent #6D6D6C;
-@define-color surface #393939;
-
+/* --- Color Palette --- */
+@define-color background @aurora_bg;
+@define-color foreground @aurora_fg;
+@define-color accent @aurora_accent;
+@define-color surface @aurora_surface;
 
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
 
-/* The main application window.
-   Styled to match the target's .main-container for a cohesive "glassmorphism" look. */
+/* The main application window. */
 #main-window {
     background-color: @gnome-bg;
     border: 2px solid alpha(@accent, 0.2);
     border-radius: 16px;
     box-shadow: none;
-    /* This padding creates a nice inner margin from the border */
     padding: 6px;
 }
 
-
 /* The scrolled area containing the items */
 .scrolled-window {
-    /* Remove the default ugly outline when focused */
     outline: none;
 }
 
-/* The main horizontal box that holds all the previews.
-   Useful for adding padding inside the window. */
+/* The main horizontal box that holds all the previews. */
 #main-hbox {
     padding: 10px 10px;
 }
@@ -40,30 +34,28 @@
 /* The individual preview item (EventBox) */
 .preview-item {
     padding: 10px;
-    border: 2px solid transparent; /* Transparent border to prevent layout shift on selection */
+    border: 2px solid transparent; 
     border-radius: 12px;
     background-color: @gnome-highlight;
     transition: background-color 0.2s ease-in-out, border-color 0.2s ease-in-out;
 }
 
-/* State when the mouse is hovering over an item.
-   Use a slightly more visible version of the surface color for a subtle hover. */
+/* State when the mouse is hovering over an item. */
 .preview-item:hover {
     background-color: alpha(@surface, 0.4);
 }
 
-/* State for the currently selected/focused item. This is where the accent shines. */
+/* State for the currently selected/focused item. */
 .preview-item.selected, .preview-item:focus {
     background-color: @gnome-highlight;
     border-color: @accent;
     outline: none;
-    background-color: alpha(@surface, 0.3); /* remove focus ring since we have a strong border */
+    background-color: alpha(@surface, 0.3);
 }
 
 /* The image widget itself */
 .preview-image {
-    border-radius: 8px; /* Give the image itself rounded corners */
-    /* A subtle shadow adds depth and makes the image pop from the background */
+    border-radius: 8px;
     padding: 0;
 }
 
@@ -73,10 +65,10 @@
     font-family: "JetBrainsMono Nerd Font", "monospace";
     font-size: 11pt;
     font-weight: bold;
-    margin-bottom: 6px; /* Bolded for better contrast and style match */
+    margin-bottom: 6px;
 }
 
-/* Styling for scrollbars, using the accent color for a consistent theme */
+/* Styling for scrollbars */
 scrollbar {
     min-width: 10px;
     min-height: 10px;
@@ -90,7 +82,6 @@ scrollbar slider {
     min-height: 10px;
 }
 
-/* A subtle effect for when the scrollbar is being dragged */
 scrollbar slider:hover {
     background-color: alpha(@accent, 0.8);
 }

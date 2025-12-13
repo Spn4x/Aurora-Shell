@@ -54,6 +54,93 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
 // ===============================================
 // --- Helper and Utility Functions ---
 // ===============================================
+
+// --- GLOBAL THEME MANAGEMENT ---
+
+typedef struct {
+    GtkCssProvider *provider;
+    char *path;
+    AuroraShell *shell;
+} GlobalThemeData;
+
+// THE FIX: Recursively force every single child widget to redraw.
+// This guarantees that GtkDrawingAreas (like SysInfo bars) update instantly.
+static void recursive_force_redraw(GtkWidget *widget) {
+    if (!widget) return;
+    
+    // Force this specific widget to redraw
+    gtk_widget_queue_draw(widget);
+    
+    // Iterate over children (GTK4 style) and force them too
+    GtkWidget *child = gtk_widget_get_first_child(widget);
+    while (child) {
+        recursive_force_redraw(child);
+        child = gtk_widget_get_next_sibling(child);
+    }
+}
+
+static void on_global_theme_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
+    (void)monitor; (void)file; (void)other_file;
+    
+    // Wait for the write to finish completely
+    if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
+        GlobalThemeData *data = (GlobalThemeData *)user_data;
+        g_print("Global theme colors changed. Reloading from: %s\n", data->path);
+        
+        // 1. Reload the CSS definitions into the global display context
+        gtk_css_provider_load_from_path(data->provider, data->path);
+
+        // 2. NUCLEAR REDRAW: Force every pixel of every widget to repaint right now.
+        if (data->shell && data->shell->widgets) {
+            GHashTableIter iter;
+            gpointer key, value;
+            g_hash_table_iter_init(&iter, data->shell->widgets);
+            while (g_hash_table_iter_next(&iter, &key, &value)) {
+                WidgetState *ws = (WidgetState *)value;
+                if (ws && ws->window) {
+                    recursive_force_redraw(GTK_WIDGET(ws->window));
+                }
+            }
+        }
+    }
+}
+
+static void load_global_theme(AuroraShell *shell) {
+    g_autofree gchar *colors_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "aurora-colors.css", NULL);
+    
+    if (!g_file_test(colors_path, G_FILE_TEST_EXISTS)) {
+        g_print("Creating default global colors file at %s\n", colors_path);
+        g_file_set_contents(colors_path, 
+            "@define-color aurora_bg #1e1e2e;\n"
+            "@define-color aurora_fg #cdd6f4;\n"
+            "@define-color aurora_accent #89b4fa;\n"
+            "@define-color aurora_surface #313244;\n", 
+            -1, NULL);
+    }
+
+    GtkCssProvider *provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_path(provider, colors_path);
+
+    gtk_style_context_add_provider_for_display(
+        gdk_display_get_default(), 
+        GTK_STYLE_PROVIDER(provider), 
+        GTK_STYLE_PROVIDER_PRIORITY_USER
+    );
+
+    GFile *file = g_file_new_for_path(colors_path);
+    GFileMonitor *monitor = g_file_monitor_file(file, G_FILE_MONITOR_NONE, NULL, NULL);
+    
+    if (monitor) {
+        GlobalThemeData *data = g_new(GlobalThemeData, 1);
+        data->provider = provider;
+        data->path = g_strdup(colors_path);
+        data->shell = shell; 
+        g_signal_connect(monitor, "changed", G_CALLBACK(on_global_theme_changed), data);
+    }
+    
+    g_object_unref(file);
+}
+
 static void ensure_user_config_exists() {
     g_autofree gchar *user_config_dir_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", NULL);
     g_autofree gchar *user_config_file_path = g_build_filename(user_config_dir_path, "config.json", NULL);
@@ -108,23 +195,16 @@ static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval, 
     return GDK_EVENT_PROPAGATE;
 }
 
-// --- FIX: WidgetState Lifecycle Management ---
-
-// Callback for when the window is destroyed (e.g. by the widget itself)
 static void on_widget_window_destroyed(GtkWidget *widget, gpointer user_data) {
     WidgetState *state = (WidgetState *)user_data;
-    // If the window currently stored in state matches the one being destroyed, clear it.
     if (state->window == GTK_WINDOW(widget)) {
         state->window = NULL;
     }
 }
 
-// Function to free WidgetState, used by the HashTable
 static void free_widget_state(gpointer data) {
     WidgetState *state = (WidgetState *)data;
     if (state->window) {
-        // If the window is still alive, we must destroy it to prevent leaks and zombie windows.
-        // Disconnect our handler first to avoid recursion.
         g_signal_handlers_disconnect_by_func(state->window, on_widget_window_destroyed, state);
         gtk_window_destroy(state->window);
         state->window = NULL;
@@ -140,22 +220,17 @@ static void free_widget_state(gpointer data) {
 static void on_config_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
     (void)monitor; (void)file; (void)other_file; (void)user_data;
     
-    // We wait for CHANGES_DONE_HINT to ensure the write is complete
     if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
         g_print("\n>>> Configuration changed. PERFORMING HARD RESTART (execv) <<<\n");
-        
-        // 1. Kill the helper daemons rigorously.
         system("pkill -9 -x auroranotify-ui");
         system("pkill -9 -x auroranotifyd");
         system("pkill -9 -x aurora-insight-daemon");
 
-        // 2. Re-execute the current binary.
         if (global_argv) {
             execv("/proc/self/exe", global_argv);
         } else {
             execl("/proc/self/exe", "aurora-shell", NULL);
         }
-
         g_critical("FATAL: Failed to re-execute aurora-shell: %s", g_strerror(errno));
         exit(1);
     }
@@ -270,7 +345,7 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
             g_print("Loading stylesheet: %s\n", stylesheet_path);
             GtkCssProvider *provider = gtk_css_provider_new();
             gtk_css_provider_load_from_path(provider, stylesheet_path);
-            gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_USER);
+            gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
             GFile *css_file = g_file_new_for_path(stylesheet_path);
             GFileMonitor *monitor = g_file_monitor_file(css_file, G_FILE_MONITOR_NONE, NULL, NULL);
             CssReloadData *reload_data = g_new(CssReloadData, 1);
@@ -284,7 +359,6 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     WidgetState *state = g_new0(WidgetState, 1);
     state->window = window; state->widget = widget; state->is_interactive = is_interactive; state->config_obj = item_obj;
 
-    // FIX: Track window destruction
     g_signal_connect(window, "destroy", G_CALLBACK(on_widget_window_destroyed), state);
 
     if (!is_exclusive) {
@@ -363,8 +437,6 @@ static void on_qscreen_pre_capture_finished(GPid pid, gint status, gpointer user
         WidgetState *new_state = create_single_widget(data->shell, data->config_obj);
         if (new_state) {
             gtk_window_present(new_state->window);
-            // This replace call triggers free_widget_state for the old entry,
-            // which safely destroys the old window.
             g_hash_table_replace(data->shell->widgets, g_strdup(name), new_state);
         }
     } else {
@@ -383,14 +455,12 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
         JsonArray *config_array = json_node_get_array(shell->config_root);
         JsonObject *item_obj = NULL;
         for (guint i = 0; i < json_array_get_length(config_array); i++) {
-            // FIX: Safely retrieve the object node from the array
             JsonNode *element_node = json_array_get_element(config_array, i);
             if (!element_node || json_node_get_node_type(element_node) != JSON_NODE_OBJECT) {
                 continue; 
             }
             JsonObject *current_obj = json_node_get_object(element_node);
             
-            // Now safe to access members
             if (!json_object_has_member(current_obj, "name")) continue;
             
             const char *name = json_object_get_string_member(current_obj, "name");
@@ -429,7 +499,6 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
             } else {
                 WidgetState *state = g_hash_table_lookup(shell->widgets, widget_name);
                 if (state) {
-                    // Check window validity before toggling
                     if (state->window) {
                         gboolean is_visible = gtk_widget_get_visible(GTK_WIDGET(state->window));
                         gtk_widget_set_visible(GTK_WIDGET(state->window), !is_visible);
@@ -457,14 +526,18 @@ static void activate_handler(GApplication *app, gpointer user_data) {
     (void)app;
     AuroraShell *shell = (AuroraShell *)user_data;
     ensure_user_config_exists();
+    
+    // NEW: Load global theme colors before creating any widgets
+    load_global_theme(shell);
+    
     load_all_widgets(shell);
+    
     g_autofree gchar *user_config_file_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "config.json", NULL);
     GFile *config_file = g_file_new_for_path(user_config_file_path);
     shell->config_monitor = g_file_monitor_file(config_file, G_FILE_MONITOR_NONE, NULL, NULL);
     if (shell->config_monitor) {
-        g_print("Monitoring config file for changes: %s\n", user_config_file_path);
         g_signal_connect(shell->config_monitor, "changed", G_CALLBACK(on_config_changed), shell);
-    } else { g_warning("Could not create file monitor for config file."); }
+    }
     g_object_unref(config_file);
 }
 
@@ -474,7 +547,6 @@ static void activate_handler(GApplication *app, gpointer user_data) {
 // ===============================================
 
 int main(int argc, char **argv) {
-    // Capture argv for the restart mechanism
     global_argv = argv;
 
     AuroraShell shell_data = {0};

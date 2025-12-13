@@ -4,26 +4,26 @@
 ================================================================================
 */
 
-/* --- Color Palette & Font (Placeholders from Theme) --- */
-@define-color background #111111;
-@define-color foreground #D7E0BB;
-@define-color accent     #6D6D6C;
-@define-color surface    #393939;
+/* --- Color Palette & Font (Mapped to Global) --- */
+@define-color background @aurora_bg;
+@define-color foreground @aurora_fg;
+@define-color accent     @aurora_accent;
+@define-color surface    @aurora_surface;
 
 /* --- Custom Colors Derived from RGBA Values --- */
 @define-color white #FFFFFF;
 @define-color black #000000;
-@define-color custom-grey-dark #363636; /* Original: rgb(54, 54, 54) */
-@define-color custom-grey-medium #808080; /* Original: rgb(128, 128, 128) */
-@define-color lyrics-bg #141619; /* Original: rgb(20, 22, 25) */
+@define-color custom-grey-dark #363636;
+@define-color custom-grey-medium #808080;
+@define-color lyrics-bg #141619;
 
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
+
 /* ==============================================================================
-   ---      NEW: Launch Animation & Main Container Styling (Converted)      ---
+   ---      NEW: Launch Animation & Main Container Styling                  ---
    ============================================================================== */
 
-/* Keyframes definition remains global, which is correct */
 @keyframes cinematic-bounce-controls {
   0% {
     min-width: 150px;
@@ -44,11 +44,10 @@
   }
 }
 
-/* CONVERTED: The main container now uses the .control-center-widget class */
 .control-center-widget {
     background-color: @gnome-bg;
     border: 2px solid alpha(@accent, 0.2);
-    transition: all 400ms cubic-bezier(0.34, 1.56, 0.64, 1); /* Fallback for shrinking */
+    transition: all 400ms cubic-bezier(0.34, 1.56, 0.64, 1);
     
     /* Initial Pill State */
     border-radius: 15px;
@@ -57,16 +56,13 @@
     padding: 12px;
 }
 
-/* CONVERTED: The expanded state is also applied to the class */
 .control-center-widget.expanded {
     animation: cinematic-bounce-controls 600ms forwards;
-    /* Explicitly set final state to match keyframes */
     min-width: 600px;
     border-radius: 16px;
     padding: 12px;
 }
 
-/* CONVERTED: All internal styles are now prefixed with .control-center-widget */
 .control-center-widget .pill-label {
     font-size: 1.1rem;
     font-weight: 600;
@@ -74,12 +70,12 @@
 }
 
 /* ==============================================================================
-   ---          Internal Component Styling (Converted & Scoped)             ---
+   ---          Internal Component Styling                                  ---
    ============================================================================== */
 
 .control-center-widget .main-popup {
     border-radius: 16px;
-    padding: 0; /* Padding is handled by the animated container now */
+    padding: 0;
 }
 
 /* --- Top Toggle Grid --- */
@@ -112,7 +108,7 @@
 .control-center-widget .sliders-box > label { font-size: 0.8em; font-weight: bold; opacity: 0.7; margin-bottom: 2px; }
 .control-center-widget .pill-slider { background-color: @gnome-highlight; border-radius: 8px; padding: 6px 12px; min-height: 36px; margin-bottom: 8px; }
 .control-center-widget .pill-slider image { font-size: 1.1em; }
-/* This is a CRITICAL fix: Scoping the generic 'scale' and 'trough' types */
+
 .control-center-widget scale slider { background: alpha(@accent, 1.0); border: none; }
 .control-center-widget scale trough { background-color: alpha(@accent, 0.2); border-radius: 4px; min-height: 8px; border: none; }
 .control-center-widget scale trough highlight { background-color: alpha(@accent, 0.9); border-radius: 4px; }
@@ -138,14 +134,9 @@
 .control-center-widget .fade-in-slide-up { animation: fade-in-slide-up 0.3s ease-out forwards; }
 @keyframes fade-in-slide-up { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
-
 .active-symbol {
-  /* This will color the checkmark icon with your theme's accent color */
-  color: @accent_color;
+  color: @accent;
 }
-
-
-/* Add this to your controlcenter.css */
 
 .popover-action-button {
   background: transparent;
@@ -163,25 +154,18 @@
   padding: 12px;
 }
 
-/* Make the key labels in the details grid bold and less prominent */
 .details-grid > label:first-child {
   font-weight: bold;
   opacity: 0.7;
 }
 
 .expandable-content-area > overlay {
-  /* This creates a smooth transition for the dimming effect */
   transition: background-color 0.2s ease-in-out;
 }
 
-/* 
-  When we set the overlay to be insensitive (while connecting),
-  this style will apply, dimming the list behind the spinner.
-*/
 .expandable-content-area > overlay:disabled {
   background-color: alpha(black, 0.4);
 }
-
 
 .control-center-widget .disconnect-button {
   background: none;
@@ -201,7 +185,7 @@
 
 .control-center-widget .disconnect-button:active {
   background-color: @accent;
-  color: white; /* Assumes accent color needs a light foreground */
+  color: white; 
 }
 
 .control-center-widget .connect-button {
@@ -222,17 +206,15 @@
 
 .control-center-widget .connect-button:active {
   background-color: @accent;
-  color: white; /* Assumes accent color needs a light foreground */
+  color: white;
 }
 
 .control-center-widget .bt-header {
-   
     font-size: 0.9em;
     opacity: 0.7;
 }
 
 .control-center-widget .bt-header spinner {
-   
     -gtk-icon-size: 12px;
 }
 
@@ -244,54 +226,33 @@
   margin-bottom: 4px; 
 }
 
-.control-center-widget .qr-code-popover {
-  /* Set a fixed size for the popover */
-}
-
-
-/* Style the new info label below the QR code */
 .control-center-widget .qr-info-label {
   font-size: 0.8em;
   color: alpha(white, 0.7);
- 
 }
 
-
-/*
-================================================================================
-  Wi-Fi Row Action Buttons (QR and Disconnect)
-================================================================================
-*/
-
-/* --- Base style for both QR and Disconnect buttons --- */
 .control-center-widget .wifi-qr-button,
 .control-center-widget .disconnect-button {
-  /* Reset button appearance to be flat and transparent */
   background: none;
   border: none;
   box-shadow: none;
-  
   border-radius: 8px; 
-
   min-width: 32px;
   min-height: 32px;
   padding: 0;
-  
   -gtk-icon-size: 16px; 
   transition: all 0.2s ease-in-out;
 }
 
-/* --- Hover State --- */
 .control-center-widget .wifi-qr-button:hover,
 .control-center-widget .disconnect-button:hover {
   background-color: alpha(@foreground, 0.1);
-  color: @foreground; /* Make icon fully opaque on hover */
+  color: @foreground; 
 }
 
-/* --- Active/Pressed State --- */
 .control-center-widget .wifi-qr-button:active,
 .control-center-widget .disconnect-button:active {
   background-color: @accent;
-  color: @background; /* Make icon contrast with the accent color */
+  color: @background; 
   transition-duration: 0.05s;
 }

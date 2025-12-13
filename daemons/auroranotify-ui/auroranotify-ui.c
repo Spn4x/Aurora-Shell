@@ -28,6 +28,12 @@ typedef struct {
     gchar *path;
 } CssReloadData;
 
+// --- NEW STRUCT FOR GLOBAL THEME MONITORING ---
+typedef struct {
+    GtkCssProvider *provider;
+    char *path;
+} GlobalThemeData;
+
 static GtkApplication *app = NULL;
 static GtkWindow *main_window = NULL;
 static IslandWidget *island = NULL;
@@ -246,11 +252,9 @@ static void on_island_clicked(GtkGestureClick *g G_GNUC_UNUSED, int n G_GNUC_UNU
     }
 }
 
-// --- NEW RIGHT CLICK HANDLER ---
 static void on_island_right_clicked(GtkGestureClick *g G_GNUC_UNUSED, int n G_GNUC_UNUSED, double x G_GNUC_UNUSED, double y G_GNUC_UNUSED, gpointer u G_GNUC_UNUSED) {
     if (is_transitioning) return;
     
-    // Only dismiss if there is an active notification or we are in an expanded/pill state
     if (current_notification_data || is_busy) {
         g_print("UI: Right-click detected. Dismissing notification immediately.\n");
         dismiss_or_transition(NULL);
@@ -374,13 +378,11 @@ void create_main_window() {
     
     gtk_window_set_child(main_window, wrapper_box);
 
-    // Left Click (Primary) - Expand
     GtkGesture *click = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
     g_signal_connect(click, "pressed", G_CALLBACK(on_island_clicked), NULL);
     gtk_widget_add_controller(GTK_WIDGET(island), GTK_EVENT_CONTROLLER(click));
 
-    // Right Click (Secondary) - Dismiss
     GtkGesture *right_click = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right_click), GDK_BUTTON_SECONDARY);
     g_signal_connect(right_click, "pressed", G_CALLBACK(on_island_right_clicked), NULL);
@@ -445,7 +447,54 @@ static void free_css_reload_data(gpointer data) {
     g_free(reload_data);
 }
 
+// ===================================================================
+//  Global Theme Loading & Monitoring (The Fix)
+// ===================================================================
+
+static void on_global_theme_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
+    (void)monitor; (void)file; (void)other_file;
+    if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
+        GlobalThemeData *data = (GlobalThemeData *)user_data;
+        g_print("Daemon Global theme colors changed. Reloading from: %s\n", data->path);
+        gtk_css_provider_load_from_path(data->provider, data->path);
+    }
+}
+
+static void load_global_theme_colors(GApplication *app_instance) {
+    g_autofree gchar *colors_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "aurora-colors.css", NULL);
+    
+    if (g_file_test(colors_path, G_FILE_TEST_EXISTS)) {
+        GtkCssProvider *provider = gtk_css_provider_new();
+        gtk_css_provider_load_from_path(provider, colors_path);
+        
+        // Add with USER priority
+        gtk_style_context_add_provider_for_display(
+            gdk_display_get_default(), 
+            GTK_STYLE_PROVIDER(provider), 
+            GTK_STYLE_PROVIDER_PRIORITY_USER
+        );
+
+        // SETUP MONITORING
+        GFile *file = g_file_new_for_path(colors_path);
+        GFileMonitor *monitor = g_file_monitor_file(file, G_FILE_MONITOR_NONE, NULL, NULL);
+        if (monitor) {
+            GlobalThemeData *data = g_new(GlobalThemeData, 1);
+            data->provider = provider; // keep ref
+            data->path = g_strdup(colors_path);
+            
+            g_signal_connect(monitor, "changed", G_CALLBACK(on_global_theme_changed), data);
+            
+            // Attach monitor to the app to keep it alive
+            g_object_set_data_full(G_OBJECT(app_instance), "global-theme-monitor", monitor, g_object_unref);
+        }
+        g_object_unref(file);
+    }
+}
+
 static void on_app_startup(GApplication *a, gpointer ud G_GNUC_UNUSED) {
+    // --- CALL IT HERE, FIRST THING ---
+    load_global_theme_colors(a);
+
     persistent_statuses = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, free_persistent_status);
     
     GtkCssProvider *p = gtk_css_provider_new();

@@ -1,8 +1,8 @@
 /* --- Wallust Placeholders for Launcher --- */
-@define-color bg_color #111111;
-@define-color text_color #D7E0BB;
-@define-color accent_color #6D6D6C;
-@define-color surface_color #393939;
+@define-color bg_color @aurora_bg;
+@define-color text_color @aurora_fg;
+@define-color accent_color @aurora_accent;
+@define-color surface_color @aurora_surface;
 
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
@@ -17,17 +17,13 @@
     background-color: @gnome-bg;
     border: 2px solid alpha(@accent_color, 0.2);
     border-radius: 12px;
-    
-    /* THE CHANGE: Reduced padding and width */
     padding: 5px;
     min-width: 350px;
-
     transition: all 0.25s ease-in-out;
 }
 
 /* --- Search Entry --- */
 .launcher-entry {
-    /* THE CHANGE: Reduced font size and padding */
     font-size: 10.5pt;
     font-weight: bold;
     padding: 5px;
@@ -44,24 +40,22 @@
     border-color: @accent_color;
 }
 
-/* launcher.css */
-
 /* --- "Spotlight" Style Results List --- */
-
-/* This targets the GtkScrolledWindow and its internal GtkViewport.
-   Both must be transparent to remove the default background. */
 .results-scroller,
 .results-scroller viewport {
     background: transparent;
     border: none;
-  
 }
 
-/* This now targets our GtkListBox directly using the class we added.
-   This is much more reliable than the generic 'listbox' type selector. */
 .results-listbox {
     background: transparent;
     border: none;
+}
+
+.results-listbox row:selected {
+    background-color: @accent_color;
+    color: #1e1e2e;
+    border-radius: 8px;
 }
 
 /* Style each row in the list */

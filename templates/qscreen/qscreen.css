@@ -6,11 +6,10 @@
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
 @define-color text-color #E0E0E0;
-@define-color accent #6D6D6C; /* This is the ONLY dynamic color */
+@define-color accent @aurora_accent; /* This is the ONLY dynamic color */
 
 
 /* --- Main Control Panel --- */
-/* The panel itself is completely transparent and invisible. */
 #qscreen-widget frame.panel,
 #qscreen-widget frame.panel > box {
   background-color: transparent;
@@ -19,9 +18,7 @@
   padding: 0;
 }
 
-
 /* --- Button Styles --- */
-/* Buttons carry all the visual styling. */
 #qscreen-widget button {
   background-image: none;
   background-color: @gnome-bg;
@@ -36,7 +33,7 @@
 /* Hover state for all buttons */
 #qscreen-widget button:hover {
   background-color: @gnome-highlight;
-  border-color: @accent; /* Border becomes accent color on hover */
+  border-color: @accent;
 }
 
 /* Clicked state for all buttons */
@@ -59,12 +56,10 @@
   border-color: lighten(@accent, 5%);
 }
 
-
 /* --- Other UI Elements --- */
-/* Style for the vertical separator in the control panel */
 #qscreen-widget separator {
   min-width: 1px;
-  margin: 8px 0; /* Vertical margin to align with buttons */
+  margin: 8px 0;
   background-color: @gnome-highlight;
 }
 

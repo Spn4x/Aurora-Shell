@@ -1,11 +1,14 @@
 # daemons/auroranotifyd/meson.build
 
-# This daemon only needs GIO for D-Bus communication.
+# Define dependencies
+# We need SQLite for the history feature, plus GIO/GLib for D-Bus
+sqlite_dep = dependency('sqlite3')
 gio_dep = dependency('gio-2.0')
+glib_dep = dependency('glib-2.0')
 
-# Define the executable to be built and installed.
+# Define the executable
 executable('auroranotifyd',
-  'auroranotifyd.c',
-  dependencies: [gio_dep],
-  install: true
+           'auroranotifyd.c',
+           dependencies: [gio_dep, glib_dep, sqlite_dep],
+           install: true
 )

@@ -26,6 +26,27 @@ static void app_populate_from_list(Application *app, GList *paths);
 static void free_string_list(gpointer data);
 
 // ===================================================================
+//  Global Theme Loading (The Fix)
+// ===================================================================
+static void load_global_theme(GApplication *app, gpointer user_data) {
+    (void)app; (void)user_data;
+    g_autofree gchar *colors_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "aurora-colors.css", NULL);
+    
+    if (g_file_test(colors_path, G_FILE_TEST_EXISTS)) {
+        GtkCssProvider *provider = gtk_css_provider_new();
+        gtk_css_provider_load_from_path(provider, colors_path);
+        
+        // Load with USER priority to define variables globally for this process
+        gtk_style_context_add_provider_for_display(
+            gdk_display_get_default(), 
+            GTK_STYLE_PROVIDER(provider), 
+            GTK_STYLE_PROVIDER_PRIORITY_USER
+        );
+        g_object_unref(provider);
+    }
+}
+
+// ===================================================================
 //  Core Application Logic
 // ===================================================================
 
@@ -94,9 +115,6 @@ static void on_item_clicked(GtkGestureClick *gesture, int n, double x, double y,
     app_select_and_quit(w, app);
 }
 
-// ===================================================================
-// THIS IS THE ORIGINAL, WORKING IMAGE LOADING LOGIC
-// ===================================================================
 static void on_image_loaded_cb(GObject *s, GAsyncResult *res, gpointer user_data) {
     (void)s; 
     GtkPicture *pic = GTK_PICTURE(user_data); 
@@ -129,7 +147,7 @@ static GtkWidget* ui_create_wallpaper_preview(Application *app, const char* path
     GtkWidget *pic = gtk_picture_new();
     gtk_widget_add_css_class(pic, "preview-image");
     gtk_picture_set_can_shrink(GTK_PICTURE(pic), FALSE);
-    gtk_picture_set_keep_aspect_ratio(GTK_PICTURE(pic), TRUE); // Reverted to old working function
+    gtk_picture_set_keep_aspect_ratio(GTK_PICTURE(pic), TRUE);
     gtk_widget_set_vexpand(pic, TRUE);
     gtk_widget_set_valign(pic, GTK_ALIGN_FILL);
 
@@ -180,6 +198,7 @@ static void activate(GtkApplication *gtk_app, JsonObject *config_obj) {
     GList *paths = g_object_get_data(G_OBJECT(gtk_app), "paths-data");
     const char *config_name = g_object_get_data(G_OBJECT(gtk_app), "config-name");
 
+    // Load widget specific CSS (which will use the global variables loaded in startup)
     const char *css_filename = json_object_get_string_member_with_default(config_obj, "stylesheet", NULL);
     g_autofree gchar *css_path = NULL;
     if (css_filename) {
@@ -212,6 +231,7 @@ static void activate(GtkApplication *gtk_app, JsonObject *config_obj) {
     gtk_widget_set_valign(GTK_WIDGET(app->hbox), GTK_ALIGN_CENTER);
     gtk_scrolled_window_set_child(app->scrolled_window, GTK_WIDGET(app->hbox));
 
+    // Load the specific widget styling
     GtkCssProvider *provider = gtk_css_provider_new();
     if (css_path && g_file_test(css_path, G_FILE_TEST_IS_REGULAR)) {
         gtk_css_provider_load_from_path(provider, css_path);
@@ -220,6 +240,7 @@ static void activate(GtkApplication *gtk_app, JsonObject *config_obj) {
         else g_warning("No CSS path specified. Using fallback.");
         gtk_css_provider_load_from_string(provider, "#main-window{background-color:rgba(30,30,46,0.85);}");
     }
+    // Application Priority allows overriding global defaults if needed, but uses them if not
     gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(provider);
 
@@ -259,6 +280,9 @@ int main(int argc, char *argv[]) {
     app->cancellable = g_cancellable_new();
     app->gtk_app = gtk_application_new(NULL, G_APPLICATION_DEFAULT_FLAGS); 
     
+    // THE FIX: Hook up the global theme loader here
+    g_signal_connect(app->gtk_app, "startup", G_CALLBACK(load_global_theme), NULL);
+
     g_object_set_data(G_OBJECT(app->gtk_app), "app-data", app);
     g_object_set_data_full(G_OBJECT(app->gtk_app), "paths-data", paths, free_string_list);
     g_object_set_data(G_OBJECT(app->gtk_app), "config-name", (gpointer)config_name);
@@ -270,7 +294,6 @@ int main(int argc, char *argv[]) {
     if (json_parser_load_from_file(parser, main_config_path, NULL)) {
         JsonArray *root_array = json_node_get_array(json_parser_get_root(parser));
         for (guint i = 0; i < json_array_get_length(root_array); i++) {
-            // FIX: Safely retrieve the object node from the array
             JsonNode *element_node = json_array_get_element(root_array, i);
             if (!element_node || json_node_get_node_type(element_node) != JSON_NODE_OBJECT) {
                 continue; 

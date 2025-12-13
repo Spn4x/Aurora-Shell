@@ -1,24 +1,16 @@
 #!/bin/bash
 #
 # wallpaper.sh - A comprehensive wallpaper and theming script for Hyprland.
-#
-# This script sets a wallpaper using swww, generates a color palette with wallust,
-# and then applies the theme to various applications including the Aurora Shell suite.
-#
-# Dependencies: swww, wallust, cachy-selector, notify-send, jq
+# Optimized to use a global color file architecture.
 #
 
 set -o pipefail
-# Do not set -e or -u globally, as we handle errors and unbound variables locally.
 
 # ===================================================================
 # --- SCRIPT CONFIGURATION ---
 # ===================================================================
-# This serves as a FALLBACK if the Aurora Shell config is not found or lacks the setting.
 readonly WALLPAPER_DIR_DEFAULT="$HOME/Pictures/Wallpapers"
-# This will be set dynamically in the main() function.
 WALLPAPER_DIR=""
-
 readonly LOCK_FILE="/tmp/wallpaper.lock"
 
 # --- SWWW TRANSITION OPTIONS ---
@@ -43,42 +35,13 @@ readonly KITTY_LIGHTEN_FACTOR="1.5"
 
 # --- AURORA SHELL CONFIGURATION ---
 readonly AURORA_CONFIG_DIR="$HOME/.config/aurora-shell"
-# Using arrays makes it trivial to add/remove Aurora widgets to theme
-readonly AURORA_WIDGET_NAMES=(
-    "Uptime" "Cheatsheet" "Control Center" "Launcher"
-    "MPRIS Player" "Topbar" "Cachy Selector" "Insight" "QScreen" "Organizer"
-)
-readonly AURORA_TEMPLATE_FILES=(
-    "$AURORA_CONFIG_DIR/templates/uptime/archbadge-template.css"
-   # "$AURORA_CONFIG_DIR/templates/calendar/calendar-template.css"
-    "$AURORA_CONFIG_DIR/templates/cheatsheet/cheatsheet-template.css"
-    "$AURORA_CONFIG_DIR/templates/control-center/controlcenter-template.css"
-    "$AURORA_CONFIG_DIR/templates/launcher/launcher-template.css"
-    "$AURORA_CONFIG_DIR/templates/mpris-player/mpris-player-template.css"
-    "$AURORA_CONFIG_DIR/templates/topbar/topbar-template.css"
-    "$AURORA_CONFIG_DIR/templates/cachy-selector/cachy-selector-template.css"
-    "$AURORA_CONFIG_DIR/templates/insight/insight-template.css"
-    "$AURORA_CONFIG_DIR/templates/qscreen/qscreen-template.css"
-    "$AURORA_CONFIG_DIR/templates/organizer/organizer-template.css"
-)
-readonly AURORA_OUTPUT_FILES=(
-    "$AURORA_CONFIG_DIR/templates/uptime/archbadge.css"
-   # "$AURORA_CONFIG_DIR/templates/calendar/calendar.css"
-    "$AURORA_CONFIG_DIR/templates/cheatsheet/cheatsheet.css"
-    "$AURORA_CONFIG_DIR/templates/control-center/controlcenter.css"
-    "$AURORA_CONFIG_DIR/templates/launcher/launcher.css"
-    "$AURORA_CONFIG_DIR/templates/mpris-player/mpris-player.css"
-    "$AURORA_CONFIG_DIR/templates/topbar/topbar.css"
-    "$AURORA_CONFIG_DIR/templates/cachy-selector/cachy-selector.css"
-    "$AURORA_CONFIG_DIR/templates/insight/insight.css"
-    "$AURORA_CONFIG_DIR/templates/qscreen/qscreen.css"
-    "$AURORA_CONFIG_DIR/templates/organizer/organizer.css"
-)
 
+# NEW: Only one global template is needed for Aurora Shell
+readonly GLOBAL_COLOR_TEMPLATE="$AURORA_CONFIG_DIR/templates/aurora-colors-template.css"
+readonly GLOBAL_COLOR_OUTPUT="$AURORA_CONFIG_DIR/aurora-colors.css"
 
 # --- GLOBAL STATE ---
 NOTIFICATIONS_MUTED=false
-
 
 # ===================================================================
 # --- HELPER FUNCTIONS ---
@@ -103,41 +66,20 @@ hex_to_rgba() {
     echo "rgba($r, $g, $b, $alpha)"
 }
 
-# Reads the wallpaper directory from the Aurora Shell config file.
-# Falls back to the default if not found or if an error occurs.
 get_wallpaper_dir() {
-    log_info "Attempting to read wallpaper directory from config..."
     if [[ ! -f "$AURORA_CONFIG_FILE" ]]; then
-        log_warn "Aurora config not found at '$AURORA_CONFIG_FILE'."
-        log_warn "FALLBACK: Using default directory: '$WALLPAPER_DIR_DEFAULT'"
         echo "$WALLPAPER_DIR_DEFAULT"
         return
     fi
-
-    # Use jq to find the object with type "themer-config" and get its "wallpaper_dir".
     local config_dir
     config_dir=$(jq -r '.[] | select(.type == "themer-config") | .wallpaper_dir' "$AURORA_CONFIG_FILE")
-    
-    # --- DEBUGGING LINE ---
-    log_info "Raw value from jq: '$config_dir'"
-
-    # Check if jq found anything. It will output "null" or be empty if not found or on JSON error.
     if [[ -z "$config_dir" || "$config_dir" == "null" ]]; then
-        log_warn "No 'wallpaper_dir' found in config, or config has a syntax error."
-        log_warn "FALLBACK: Using default directory: '$WALLPAPER_DIR_DEFAULT'"
         echo "$WALLPAPER_DIR_DEFAULT"
         return
     fi
-    
-    # Handle tilde expansion (e.g., `~/Pictures` -> `/home/user/Pictures`)
-    local expanded_dir
-    expanded_dir=$(eval echo "$config_dir")
-    
-    log_info "SUCCESS: Using wallpaper directory from config: '$expanded_dir'"
-    echo "$expanded_dir"
+    eval echo "$config_dir"
 }
 
-# Ensure required commands are available
 check_dependencies() {
     for cmd in swww wallust cachy-selector notify-send jq; do
         if ! command -v "$cmd" &>/dev/null; then
@@ -147,12 +89,10 @@ check_dependencies() {
     done
 }
 
-
 # ===================================================================
 # --- THEMING LOGIC ---
 # ===================================================================
 
-# Sets the wallpaper and generates the color palette file
 set_wallpaper_and_generate_colors() {
     local wallpaper_path="$1"
     log_info "Setting wallpaper: $wallpaper_path"
@@ -168,45 +108,27 @@ set_wallpaper_and_generate_colors() {
         ${TRANSITION_BEZIER:+--transition-bezier "$TRANSITION_BEZIER"}
 
     log_info "Generating color palette with wallust..."
-    # Ensure cache directory exists
     mkdir -p "$(dirname "$SCRIPT_COLORS_RAW")"
     wallust run --backend wal --quiet "$wallpaper_path"
-    if [[ $? -ne 0 ]]; then
+    if [[ $? -ne 0 ]] || [[ ! -f "$SCRIPT_COLORS_RAW" ]]; then
         log_error "Wallust failed to generate colors."
-        send_notification -u critical "Wallust Error" "Failed to generate color palette."
+        send_notification -u critical "Themer Error" "Failed to generate color palette."
         return 1
     fi
-    
-    if [[ ! -f "$SCRIPT_COLORS_RAW" ]]; then
-        log_error "Wallust did not create the color file: $SCRIPT_COLORS_RAW"
-        send_notification -u critical "Themer Error" "Wallust did not generate colors."
-        return 1
-    fi
-    
     return 0
 }
 
-# Sources the color file generated by wallust
-# Sources the color file generated by wallust
 source_colors() {
-    log_info "Sourcing color variables from $SCRIPT_COLORS_RAW"
-    set +u # Temporarily disable unbound variable check
-    # shellcheck source=/dev/null
+    set +u
     source "$SCRIPT_COLORS_RAW"
-    set -u # Re-enable it
-
-    # *** THE FIX IS HERE ***
-    # Verify that the variables were actually loaded.
+    set -u
     if [[ -z "$background" || -z "$color4" ]]; then
-        log_error "Failed to source color variables. The color file might be empty or malformed."
-        log_error "File path: $SCRIPT_COLORS_RAW"
-        send_notification -u critical "Themer Error" "Could not read colors from Wallust file."
+        log_error "Failed to source color variables."
         return 1
     fi
-    return 0 # Explicitly return success
+    return 0
 }
 
-# Themes a generic CSS/JSON template file
 theme_generic_template() {
     local template_file="$1"
     local output_file="$2"
@@ -217,14 +139,10 @@ theme_generic_template() {
         return
     fi
 
-    log_info "Generating theme for $component_name..."
-    # Ensure output directory exists before writing
     mkdir -p "$(dirname "$output_file")"
-    
     local tmp_file
     tmp_file=$(mktemp)
     
-    # Temporarily disable unbound variable check for the sed command
     set +u
     sed -e "s/{{background}}/$background/g" \
         -e "s/{{foreground}}/$foreground/g" \
@@ -242,25 +160,23 @@ theme_generic_template() {
         "$template_file" > "$tmp_file"
     set -u
     
-    mv "$tmp_file" "$output_file"
+    if ! cmp -s "$tmp_file" "$output_file"; then
+        mv "$tmp_file" "$output_file"
+    else
+        rm "$tmp_file"
+    fi
 }
 
-# Themes all configured Aurora Shell widgets
+# --- NEW FUNCTION: Only updates the global color file ---
 theme_aurora_shell() {
-    log_info "Theming Aurora Shell widgets..."
-    for i in "${!AURORA_WIDGET_NAMES[@]}"; do
-        theme_generic_template "${AURORA_TEMPLATE_FILES[i]}" "${AURORA_OUTPUT_FILES[i]}" "${AURORA_WIDGET_NAMES[i]}"
-    done
+    log_info "Updating global Aurora colors..."
+    theme_generic_template "$GLOBAL_COLOR_TEMPLATE" "$GLOBAL_COLOR_OUTPUT" "Global Colors"
 }
 
-# Themes all other system applications
 theme_system_apps() {
     log_info "Theming system applications..."
-    
-    set +u # Temporarily disable unbound variable check for this block
-
-    # --- Hyprland ---
-    log_info "Generating Hyprland colors..."
+    set +u
+    # Hyprland
     mkdir -p "$(dirname "$HYPR_COLORS_OUTPUT")"
     local active_border_col1_hex=${color4#\#}
     local active_border_col2_hex=${color6#\#}
@@ -277,12 +193,11 @@ general {
 }
 EOF
 
-    # --- Kitty ---
+    # Kitty
     if [[ -x "$HELPER_SCRIPT_PATH" ]]; then
-        log_info "Generating lighter Kitty theme..."
         mkdir -p "$(dirname "$KITTY_THEME_OUTPUT")"
         {
-            echo "# Kitty colors generated by wallpaper.sh (Lighter Variant)"
+            echo "# Kitty colors generated by wallpaper.sh"
             echo "foreground          $("$HELPER_SCRIPT_PATH" "$foreground" "$KITTY_LIGHTEN_FACTOR")"
             echo "cursor              $("$HELPER_SCRIPT_PATH" "$cursor" "$KITTY_LIGHTEN_FACTOR")"
             for i in {0..15}; do
@@ -292,9 +207,8 @@ EOF
         } > "$KITTY_THEME_OUTPUT"
     fi
 
-    # --- SwayNC ---
+    # SwayNC
     if [[ -f "$SWAYNC_STYLE_BASE" ]]; then
-        log_info "Generating SwayNC CSS..."
         mkdir -p "$(dirname "$SWAYNC_STYLE_OUTPUT")"
         local tmp_swaync_css
         tmp_swaync_css=$(mktemp)
@@ -307,159 +221,83 @@ EOF
             "$SWAYNC_STYLE_BASE" > "$tmp_swaync_css"
         mv "$tmp_swaync_css" "$SWAYNC_STYLE_OUTPUT"
     fi
-    
-    set -u # Re-enable check
+    set -u
 
-    # --- Ironbar & Vicinae (using the generic function) ---
     theme_generic_template "$IRONBAR_STYLE_TEMPLATE" "$IRONBAR_STYLE_OUTPUT" "Ironbar"
     theme_generic_template "$VICINAE_THEME_TEMPLATE" "$VICINAE_THEME_OUTPUT" "Vicinae"
 }
 
-# Reloads services to apply the new theme
 reload_services() {
     log_info "Reloading applications..."
     hyprctl reload &
-    
-    if pgrep -x "swaync" > /dev/null; then
-        swaync-client -rs
-        log_info "Reloaded SwayNC style."
-    fi
+    if pgrep -x "swaync" > /dev/null; then swaync-client -rs; fi
 }
 
-
-# ===================================================================
-# --- MAIN ORCHESTRATION FUNCTION ---
-# ===================================================================
-
-# This is the main function that runs the entire theming process
 apply_theme_and_reload() {
     local selected_wallpaper="$1"
-
     if [[ -z "$selected_wallpaper" || ! -f "$selected_wallpaper" ]]; then
-        log_error "Invalid wallpaper path provided: '$selected_wallpaper'"
-        send_notification -u critical "Wallpaper Script Error" "Invalid wallpaper path provided."
+        log_error "Invalid wallpaper path."
         return 1
     fi
 
     send_notification -u low "🎨 Generating Palette..."
-    if ! set_wallpaper_and_generate_colors "$selected_wallpaper"; then
-        return 1
-    fi
+    if ! set_wallpaper_and_generate_colors "$selected_wallpaper"; then return 1; fi
     
     source_colors
-
     send_notification -u low "🖌️ Applying Themes..."
     theme_aurora_shell
     theme_system_apps
     reload_services
-
     send_notification -i "$selected_wallpaper" "✅ Theme Applied" "Your new desktop theme is now active!"
 }
 
-
-# ===================================================================
-# --- SCRIPT EXECUTION LOGIC ---
-# ===================================================================
-
 main() {
-    # --- Pre-flight Checks ---
     check_dependencies
-    
-    # Set the wallpaper directory by reading the config file.
     WALLPAPER_DIR=$(get_wallpaper_dir)
-
-    # Handle single-instance lock
-    if [[ -e "$LOCK_FILE" ]]; then
-        log_info "Script is already running. Exiting."
-        exit 1
-    fi
+    if [[ -e "$LOCK_FILE" ]]; then exit 1; fi
     touch "$LOCK_FILE"
     trap 'rm -f "$LOCK_FILE"' EXIT
 
-    # First, check if the script was called with a direct path to a file.
-    # This is the non-interactive mode triggered by toggle-selector.sh
     if [[ -n "$1" && -f "$1" ]]; then
-        log_info "Direct mode: Applying theme for '$1'."
         apply_theme_and_reload "$1"
         exit 0
     fi
 
-    # --- Argument Parsing ---
     case "$1" in
         --startup)
-            log_info "Startup mode: Ensuring swww-daemon is running."
-            if ! swww-daemon >/dev/null 2>&1; then
-                if ! swww init >/dev/null 2>&1 && sleep 0.5; then
-                    log_error "Failed to start swww-daemon on startup."
-                    exit 1
-                fi
-            fi
-            log_info "swww-daemon is running. Startup script finished."
+            if ! swww-daemon >/dev/null 2>&1; then swww init >/dev/null 2>&1; fi
             exit 0
             ;;
         --next|--prev)
-            log_info "Cycling mode: $1"
             local wall_files
             mapfile -t wall_files < <(find "$WALLPAPER_DIR" -type f \( -iname '*.png' -o -iname '*.jpeg' -o -iname '*.jpg' -o -iname '*.gif' -o -iname '*.webp' \) | sort)
-            
-            if [[ ${#wall_files[@]} -eq 0 ]]; then
-                log_error "No image files found in '$WALLPAPER_DIR'."
-                send_notification "Error" "No image files found in '$WALLPAPER_DIR'."
-                exit 1
-            fi
-            
+            if [[ ${#wall_files[@]} -eq 0 ]]; then exit 1; fi
             local current_wallpaper
             current_wallpaper=$(swww query | head -n 1 | sed 's/.*: //')
-            
             local current_index=-1
             for i in "${!wall_files[@]}"; do
-                if [[ "${wall_files[$i]}" == "$current_wallpaper" ]]; then
-                    current_index=$i
-                    break
-                fi
+                if [[ "${wall_files[$i]}" == "$current_wallpaper" ]]; then current_index=$i; break; fi
             done
             [[ $current_index -eq -1 ]] && current_index=0
-            
             local new_index
             local count=${#wall_files[@]}
-            if [[ "$1" == "--next" ]]; then
-                new_index=$(( (current_index + 1) % count ))
-            else
-                new_index=$(( (current_index - 1 + count) % count ))
-            fi
-            
+            if [[ "$1" == "--next" ]]; then new_index=$(( (current_index + 1) % count )); else new_index=$(( (current_index - 1 + count) % count )); fi
             apply_theme_and_reload "${wall_files[$new_index]}"
             ;;
         --mute)
-            log_info "Notifications will be muted."
             NOTIFICATIONS_MUTED=true
-            # This allows calling like "./script.sh --mute --next"
-            shift # Remove --mute and process the next argument
-            main "$@" 
+            shift
+            main "$@"
             ;;
-        ""|*) # Default interactive mode
-            log_info "Interactive mode: Launching selector..."
+        ""|*)
             local wall_files
             wall_files=$(find "$WALLPAPER_DIR" -type f \( -iname '*.png' -o -iname '*.jpeg' -o -iname '*.jpg' -o -iname '*.gif' -o -iname '*.webp' \) | sort)
-            
-            if [[ -z "$wall_files" ]]; then
-                log_error "No image files found in '$WALLPAPER_DIR'."
-                send_notification "Error" "No image files found in '$WALLPAPER_DIR'."
-                exit 1
-            fi
-            
+            if [[ -z "$wall_files" ]]; then exit 1; fi
             local selected_wallpaper
             selected_wallpaper=$(echo "$wall_files" | cachy-selector "cachy-selector")
-
-            if [[ -z "$selected_wallpaper" ]]; then
-                log_info "No wallpaper selected. Exiting."
-                exit 0
-            fi
-            
-            apply_theme_and_reload "$selected_wallpaper"
+            if [[ -n "$selected_wallpaper" ]]; then apply_theme_and_reload "$selected_wallpaper"; fi
             ;;
     esac
 }
 
-# Run the main function with all provided script arguments
 main "$@"
