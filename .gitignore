@@ -16,3 +16,4 @@ uninstall
 *.swp
 debug_log.txt
 project_dump.txt
+target/

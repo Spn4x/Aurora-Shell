@@ -1,0 +1,17 @@
+[package]
+name = "aurora_launcher_backend"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+libc = "0.2"
+# Powerful math evaluator (replaces 'bc')
+evalexpr = "11.3" 
+# For fuzzy string matching apps
+fuzzy-matcher = "0.3"
+# To interact with .desktop files (GIO bindings)
+gio = "0.18"
+glib = "0.18"
