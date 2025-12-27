@@ -17,6 +17,7 @@ struct _SystemMonitor {
     GPid       pactl_pid;
     GIOChannel *pactl_channel;
     guint      pactl_watch_id;
+    guint      volume_debounce_id; // Added: Timer ID for debouncing
 
     // Brightness
     GFileMonitor *brightness_monitor;
@@ -24,8 +25,19 @@ struct _SystemMonitor {
 };
 
 // --- FORWARD DECLARATION ---
-// This tells the compiler that this function exists before it is used.
 static void on_brightness_file_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data);
+
+// --- Debounce Logic for Volume ---
+// This ensures we only refresh the UI *once* after a burst of events,
+// preventing the UI from freezing while dragging the slider.
+static gboolean trigger_volume_update(gpointer user_data) {
+    SystemMonitor *sm = user_data;
+    if (sm->callback) {
+        sm->callback(SYSTEM_EVENT_VOLUME_CHANGED, sm->user_data);
+    }
+    sm->volume_debounce_id = 0;
+    return G_SOURCE_REMOVE;
+}
 
 // --- pactl (Volume) Monitor Logic ---
 static gboolean on_pactl_output(GIOChannel *source, GIOCondition condition, gpointer user_data) {
@@ -35,8 +47,18 @@ static gboolean on_pactl_output(GIOChannel *source, GIOCondition condition, gpoi
     gsize len;
 
     if (g_io_channel_read_line(source, &line, &len, NULL, NULL) == G_IO_STATUS_NORMAL) {
+        // pactl often outputs multiple lines for one logical change.
+        // We catch them all, but delay the update slightly.
         if (strstr(line, "on sink #") || strstr(line, "on server")) {
-            sm->callback(SYSTEM_EVENT_VOLUME_CHANGED, sm->user_data);
+            
+            // If a timer is already running, kill it (reset the clock)
+            if (sm->volume_debounce_id > 0) {
+                g_source_remove(sm->volume_debounce_id);
+            }
+            
+            // Wait 50ms. If no new events come in, update the UI.
+            // 50ms is imperceptible to the eye but filters out the burst traffic.
+            sm->volume_debounce_id = g_timeout_add(50, trigger_volume_update, sm);
         }
     }
     return G_SOURCE_CONTINUE;
@@ -48,7 +70,8 @@ static void start_volume_monitor(SystemMonitor *sm) {
         g_warning("'pactl' not found at %s", pactl_path);
         return;
     }
-    gchar *argv[] = { (gchar *)pactl_path, "subscribe", NULL };
+    // We strictly monitor sinks to reduce noise
+    gchar *argv[] = { (gchar *)pactl_path, "subscribe", "sink", NULL };
     gint stdout_fd;
     GError *error = NULL;
 
@@ -66,7 +89,6 @@ static void start_volume_monitor(SystemMonitor *sm) {
 
 // --- Asynchronous Brightness Monitor Logic ---
 
-// This function is run in a background thread to avoid blocking the UI.
 static void find_brightness_device_thread_func(GTask *task, gpointer source_object, gpointer task_data, GCancellable *cancellable) {
     (void)task; (void)source_object; (void)task_data; (void)cancellable;
     const char *cmd = "sh -c \"brightnessctl -l -m | head -n1 | cut -d, -f1\"";
@@ -80,14 +102,12 @@ static void find_brightness_device_thread_func(GTask *task, gpointer source_obje
         }
         if (all_digits || strlen(device) == 0) {
             g_free(device);
-            device = NULL; // Will trigger fallback in the finish function
+            device = NULL; 
         }
     }
-    // Return the found device name (or NULL) as the result of the task.
     g_task_return_pointer(task, g_strdup(device), g_free);
 }
 
-// Helper to find a fallback device if brightnessctl fails.
 static gchar* fallback_brightness_device(void) {
     DIR *d = opendir("/sys/class/backlight");
     if (!d) return NULL;
@@ -101,24 +121,18 @@ static gchar* fallback_brightness_device(void) {
     return NULL;
 }
 
-// This function is called on the main thread when the background task is finished.
 static void on_brightness_device_found(GObject *source_object, GAsyncResult *res, gpointer user_data) {
+    (void)source_object;
     SystemMonitor *sm = user_data;
     g_autoptr(GError) error = NULL;
     g_autofree gchar *device_name = g_task_propagate_pointer(G_TASK(res), &error);
 
-    if (error) {
-        g_warning("Could not find brightness device: %s", error->message);
-        return;
-    }
-    
-    // If the command failed, try a fallback method.
-    if (device_name == NULL) {
+    if (error || !device_name) {
         device_name = fallback_brightness_device();
     }
     
     if (device_name == NULL) {
-        g_warning("Could not determine brightness device name at all.");
+        g_warning("Could not determine brightness device name.");
         return;
     }
 
@@ -127,18 +141,14 @@ static void on_brightness_device_found(GObject *source_object, GAsyncResult *res
     g_print("Monitoring brightness at: %s\n", path);
 
     GFile *file = g_file_new_for_path(path);
-    // Note: GFileMonitor must be created and used on the same thread, which is why we do it here.
     sm->brightness_monitor = g_file_monitor_file(file, G_FILE_MONITOR_NONE, NULL, NULL);
     g_object_unref(file);
 
-    if (!sm->brightness_monitor) {
-        g_warning("Failed to create file monitor for %s", path);
-        return;
+    if (sm->brightness_monitor) {
+        g_signal_connect(sm->brightness_monitor, "changed", G_CALLBACK(on_brightness_file_changed), sm);
     }
-    g_signal_connect(sm->brightness_monitor, "changed", G_CALLBACK(on_brightness_file_changed), sm);
 }
 
-// Brightness-change handler (the actual event callback)
 static void on_brightness_file_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
     (void)monitor; (void)file; (void)other_file;
     if (event_type == G_FILE_MONITOR_EVENT_CHANGED) {
@@ -147,11 +157,10 @@ static void on_brightness_file_changed(GFileMonitor *monitor, GFile *file, GFile
     }
 }
 
-// This function now starts the *asynchronous* process. It returns instantly.
 static void start_brightness_monitor_async(SystemMonitor *sm) {
     GTask *task = g_task_new(NULL, NULL, on_brightness_device_found, sm);
     g_task_run_in_thread(task, find_brightness_device_thread_func);
-    g_object_unref(task); // The task will hold a ref to itself until it's done.
+    g_object_unref(task);
 }
 
 // --- Public API ---
@@ -161,13 +170,16 @@ SystemMonitor* system_monitor_new(SystemEventCallback callback, gpointer user_da
     sm->user_data = user_data;
 
     start_volume_monitor(sm);
-    start_brightness_monitor_async(sm); // Use the new non-blocking function
+    start_brightness_monitor_async(sm); 
     
     return sm;
 }
 
 void system_monitor_free(SystemMonitor *sm) {
     if (!sm) return;
+
+    if (sm->volume_debounce_id > 0)
+        g_source_remove(sm->volume_debounce_id);
 
     if (sm->pactl_watch_id > 0)
         g_source_remove(sm->pactl_watch_id);

@@ -3,8 +3,12 @@
 #include <gtk/gtk.h>
 #include <string.h>
 #include <gio/gio.h>
-#include <graphene.h> // Required for rect calculations
+#include <graphene.h>
 #include "launcher.h"
+
+// Approximate height of one row in pixels (Icon 32px + Padding)
+#define ROW_HEIGHT 54
+#define MAX_VISIBLE_ROWS 7
 
 // ===================================================================
 //  Type Definitions & Rust FFI
@@ -100,26 +104,15 @@ static void free_launcher_state(gpointer data) {
 
 static void ensure_row_visible(LauncherState *state, GtkWidget *row) {
     if (!state->scrolled_window || !row) return;
-
     GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(state->scrolled_window);
     double val = gtk_adjustment_get_value(adj);
     double page = gtk_adjustment_get_page_size(adj);
-
-    // Calculate row bounds relative to the listbox (the scrollable content)
     graphene_rect_t bounds;
     if (!gtk_widget_compute_bounds(row, state->listbox, &bounds)) return;
-
     double y = bounds.origin.y;
     double h = bounds.size.height;
-
-    // If row is above visible area, scroll up
-    if (y < val) {
-        gtk_adjustment_set_value(adj, y);
-    } 
-    // If row is below visible area, scroll down
-    else if (y + h > val + page) {
-        gtk_adjustment_set_value(adj, y + h - page);
-    }
+    if (y < val) gtk_adjustment_set_value(adj, y);
+    else if (y + h > val + page) gtk_adjustment_set_value(adj, y + h - page);
 }
 
 // ===================================================================
@@ -159,16 +152,27 @@ static void update_search_results(LauncherState *state, const gchar *search_text
 
     guint n_items = g_list_model_get_n_items(G_LIST_MODEL(state->results_store));
     
-    gtk_revealer_set_reveal_child(GTK_REVEALER(state->results_revealer), n_items > 0);
-    
     if (n_items > 0) {
+        gtk_revealer_set_reveal_child(GTK_REVEALER(state->results_revealer), TRUE);
+        
+        // --- FIX: Manual Height Calculation ---
+        // We force the ScrolledWindow to be exactly n_items * height (up to max).
+        // This solves the issue of it sticking to a wrong size.
+        int visible_rows = (n_items > MAX_VISIBLE_ROWS) ? MAX_VISIBLE_ROWS : n_items;
+        int target_height = visible_rows * ROW_HEIGHT;
+        
+        // We set the min content height to force it to expand/shrink immediately
+        gtk_scrolled_window_set_min_content_height(state->scrolled_window, target_height);
+        
+        // Reset Scroll
+        GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(state->scrolled_window);
+        gtk_adjustment_set_value(adj, 0);
+
+        // Auto-select first
         GtkListBoxRow *first_row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(state->listbox), 0);
-        if (first_row) {
-            gtk_list_box_select_row(GTK_LIST_BOX(state->listbox), first_row);
-            // Reset scroll to top on new search
-            GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(state->scrolled_window);
-            gtk_adjustment_set_value(adj, 0);
-        }
+        if (first_row) gtk_list_box_select_row(GTK_LIST_BOX(state->listbox), first_row);
+    } else {
+        gtk_revealer_set_reveal_child(GTK_REVEALER(state->results_revealer), FALSE);
     }
 }
 
@@ -193,9 +197,7 @@ static void on_result_activated(GtkListBox *box, GtkListBoxRow *row, gpointer us
                     break;
                 }
             }
-            if (target_app) {
-                g_app_info_launch(target_app, NULL, NULL, NULL);
-            }
+            if (target_app) g_app_info_launch(target_app, NULL, NULL, NULL);
             g_list_free_full(all_apps, g_object_unref);
             break;
         }
@@ -208,7 +210,6 @@ static void on_result_activated(GtkListBox *box, GtkListBoxRow *row, gpointer us
         default: break;
     }
     g_object_unref(result);
-    
     GtkWidget *toplevel = gtk_widget_get_ancestor(GTK_WIDGET(row), GTK_TYPE_WINDOW);
     if (toplevel) gtk_widget_set_visible(toplevel, FALSE);
 }
@@ -238,19 +239,12 @@ static gboolean on_key_pressed_nav(GtkEventControllerKey *c, guint keyval, guint
     if (keyval == GDK_KEY_Up || keyval == GDK_KEY_Down) {
         guint n = g_list_model_get_n_items(G_LIST_MODEL(state->results_store));
         if (n == 0) return GDK_EVENT_PROPAGATE;
-        
         GtkListBoxRow *row = gtk_list_box_get_selected_row(GTK_LIST_BOX(state->listbox));
         gint idx = row ? gtk_list_box_row_get_index(row) : -1;
         gint next = (keyval == GDK_KEY_Down) ? (idx + 1) % n : (idx - 1 + n) % n;
-        
         GtkListBoxRow *next_row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(state->listbox), next);
         gtk_list_box_select_row(GTK_LIST_BOX(state->listbox), next_row);
-        
-        // --- NEW: Force scroll to ensure visibility ---
-        if (next_row) {
-            ensure_row_visible(state, GTK_WIDGET(next_row));
-        }
-        
+        if (next_row) ensure_row_visible(state, GTK_WIDGET(next_row));
         return GDK_EVENT_STOP;
     }
     return GDK_EVENT_PROPAGATE;
@@ -262,9 +256,12 @@ static gboolean on_key_pressed_nav(GtkEventControllerKey *c, guint keyval, guint
 
 static GtkWidget* create_result_row_ui(AuroraResultObject *result) {
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-    // REMOVED MARGINS to fix height calculation issues
+    // Margins removed to ensure math for height calculation is accurate
     gtk_widget_set_margin_start(main_box, 8);
     gtk_widget_set_margin_end(main_box, 8);
+    
+    // Explicitly set height for the row content to match ROW_HEIGHT calc
+    gtk_widget_set_size_request(main_box, -1, 42); 
 
     GtkWidget *icon = NULL;
     if (result->icon_name && g_path_is_absolute(result->icon_name)) {
@@ -276,13 +273,13 @@ static GtkWidget* create_result_row_ui(AuroraResultObject *result) {
     gtk_box_append(GTK_BOX(main_box), icon);
 
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_widget_set_valign(vbox, GTK_ALIGN_CENTER); 
+    gtk_widget_set_valign(vbox, GTK_ALIGN_CENTER);
 
     GtkWidget *name_label = gtk_label_new(result->name);
     gtk_label_set_xalign(GTK_LABEL(name_label), 0.0);
     gtk_widget_add_css_class(name_label, "result-name");
     gtk_label_set_ellipsize(GTK_LABEL(name_label), PANGO_ELLIPSIZE_END);
-    gtk_label_set_max_width_chars(GTK_LABEL(name_label), 40); 
+    gtk_label_set_max_width_chars(GTK_LABEL(name_label), 40);
     gtk_widget_set_hexpand(name_label, TRUE);
     gtk_widget_set_halign(name_label, GTK_ALIGN_START);
 
@@ -291,7 +288,7 @@ static GtkWidget* create_result_row_ui(AuroraResultObject *result) {
     gtk_widget_add_css_class(desc_label, "result-desc");
     gtk_widget_set_opacity(desc_label, 0.7);
     gtk_label_set_ellipsize(GTK_LABEL(desc_label), PANGO_ELLIPSIZE_END);
-    gtk_label_set_max_width_chars(GTK_LABEL(desc_label), 50); 
+    gtk_label_set_max_width_chars(GTK_LABEL(desc_label), 50);
     gtk_widget_set_hexpand(desc_label, TRUE);
     gtk_widget_set_halign(desc_label, GTK_ALIGN_START);
 
@@ -306,6 +303,10 @@ static GtkWidget* bind_model_create_widget_func(gpointer item, gpointer user_dat
     (void)user_data;
     GtkListBoxRow *row = GTK_LIST_BOX_ROW(gtk_list_box_row_new());
     gtk_widget_add_css_class(GTK_WIDGET(row), "app-row");
+    // Add internal padding to row to space things out nicely (totals ~54px with content)
+    gtk_widget_set_margin_top(GTK_WIDGET(row), 4);
+    gtk_widget_set_margin_bottom(GTK_WIDGET(row), 4);
+    
     GtkWidget *content = create_result_row_ui(AURORA_RESULT_OBJECT(item));
     gtk_list_box_row_set_child(row, content);
     return GTK_WIDGET(row);
@@ -322,7 +323,7 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     gtk_widget_set_valign(state->main_box, GTK_ALIGN_CENTER);
     g_signal_connect(state->main_box, "map", G_CALLBACK(on_widget_mapped), state);
 
-    // --- FORCE HIDE SCROLLBAR VIA CSS INJECTION ---
+    // CSS Injection to hide scrollbars
     GtkCssProvider *css_provider = gtk_css_provider_new();
     const char *css = 
         ".launcher-scroll scrollbar { opacity: 0; min-width: 0px; min-height: 0px; }"
@@ -346,14 +347,14 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     gtk_widget_add_css_class(GTK_WIDGET(state->scrolled_window), "launcher-scroll");
 
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(state->scrolled_window), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(state->scrolled_window), TRUE);
-    gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(state->scrolled_window), 400);
+    // We handle sizing manually now, but keep this to allow shrinkage if needed
+    gtk_scrolled_window_set_propagate_natural_height(state->scrolled_window, FALSE);
     
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(state->scrolled_window), GTK_WIDGET(state->listbox));
 
     state->results_revealer = gtk_revealer_new();
     gtk_revealer_set_transition_type(GTK_REVEALER(state->results_revealer), GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
-    gtk_revealer_set_transition_duration(GTK_REVEALER(state->results_revealer), 200);
+    gtk_revealer_set_transition_duration(GTK_REVEALER(state->results_revealer), 150);
     gtk_revealer_set_child(GTK_REVEALER(state->results_revealer), GTK_WIDGET(state->scrolled_window));
 
     gtk_box_append(GTK_BOX(state->main_box), state->entry);

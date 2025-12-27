@@ -1,0 +1,16 @@
+[package]
+name = "aurora_control_center_backend"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+nmrs = "1.1.0"
+# We need raw zbus to fetch saved connections since nmrs is missing that method
+zbus = { version = "3", features = ["tokio"] }
+zvariant = "3"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.28", features = ["full"] }
+lazy_static = "1.4"
