@@ -155,15 +155,33 @@ static void update_workspace_display(WorkspacesModule *module) {
 }
 
 static void on_level_bar_clicked(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) {
-    (void)n_press; (void)y;
-    WorkspacesModule *module = user_data;
+    (void)n_press; 
+    (void)y;
+    
+    WorkspacesModule *module = (WorkspacesModule *)user_data;
+    
+    // Safety check: ensure we have workspaces to switch to
     if (module->max_workspace_id == 0) return;
 
-    int width = gtk_widget_get_width(gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture)));
-    int clicked_id = (int)((x / width) * module->max_workspace_id) + 1;
+    // Get the widget width to calculate relative click position
+    GtkWidget *widget = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(gesture));
+    int width = gtk_widget_get_width(widget);
+    
+    // Prevent division by zero if widget hasn't realized size yet
+    if (width <= 0) return;
 
+    // Calculate the clicked ID based on X position relative to total width
+    int clicked_id = (int)((x / (double)width) * module->max_workspace_id) + 1;
+
+    // Construct the Hyprland command
     g_autofree gchar *command = g_strdup_printf("hyprctl dispatch workspace %d", clicked_id);
-    system(command);
+
+    // FIX: Use async spawn instead of system() to prevent UI freezing
+    GError *error = NULL;
+    if (!g_spawn_command_line_async(command, &error)) {
+        g_warning("Workspaces Module: Failed to switch to workspace %d: %s", clicked_id, error->message);
+        g_error_free(error);
+    }
 }
 
 static void on_hyprland_event(GObject *source, GAsyncResult *res, gpointer user_data) {

@@ -1,10 +1,8 @@
-# widgets/organizer/meson.build
-
-# Source files are now inside the 'src' subdirectory.
 organizer_sources = [
   'src/organizer.c',
   'src/calendar_widget.c',
-   'src/eds_event_source.c',
+  'src/eds_event_source.c',
+  'src/mpris_widget.c',
 ]
 
 organizer_deps = [
@@ -15,6 +13,7 @@ organizer_deps = [
   dependency('libedataserver-1.2'),
   dependency('libecal-2.0'),
   dependency('libical'),
+  dependency('libadwaita-1'),
 ]
 
 shared_library('organizer',
@@ -23,12 +22,4 @@ shared_library('organizer',
   name_prefix: '',
   install: true,
   install_dir: get_option('libdir') / 'aurora-shell' / 'widgets'
-)
-
-# Install the data files for the calendar
-install_data(
-  'data/events.json',
-  'data/permanent_events.json',
-  install_dir: get_option('datadir') / 'aurora-shell' / 'calendar',
-  install_mode: 'rw-r--r--'
 )

@@ -57,8 +57,6 @@ static void log_notification_to_db(const char *app, const char *summary, const c
     g_free(path);
 }
 
-// ... (DBus logic remains identical to previous, copy-paste below if needed, otherwise keep existing) ...
-
 // --- DBUS LOGIC START ---
 static const gchar introspection_xml[] =
     "<node>"
@@ -103,7 +101,10 @@ static void handle_method_call(GDBusConnection *connection, const gchar *sender,
         if (!is_center_visible && !is_dnd_active) {
             g_dbus_connection_call(connection, UI_BUS_NAME, UI_OBJECT_PATH, UI_INTERFACE_NAME, "ShowNotification", g_variant_new("(sss)", app_icon, summary, body), NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
         }
-        g_dbus_connection_call(connection, CENTER_BUS_NAME, CENTER_OBJECT_PATH, CENTER_INTERFACE_NAME, "AddNotification", g_variant_new("(sss)", app_icon, summary, body), NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+        
+        // UPDATED: Sending app_name as the 2nd argument (ss ss) -> icon, app_name, summary, body
+        g_dbus_connection_call(connection, CENTER_BUS_NAME, CENTER_OBJECT_PATH, CENTER_INTERFACE_NAME, "AddNotification", g_variant_new("(ssss)", app_icon, app_name, summary, body), NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+        
         g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", g_random_int()));
     } 
     else if (g_strcmp0(method_name, "SetDND") == 0) {

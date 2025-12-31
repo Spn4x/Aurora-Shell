@@ -45,7 +45,7 @@ void island_widget_transition_to_pill_child(IslandWidget *self, GtkWidget *child
 
     gtk_widget_set_hexpand(center_box, TRUE);
     gtk_center_box_set_center_widget(GTK_CENTER_BOX(center_box), child);
-    
+
     gtk_stack_add_child(GTK_STACK(self->pill_stack), center_box);
     gtk_stack_set_visible_child(GTK_STACK(self->pill_stack), center_box);
     self->current_pill_child = center_box;
