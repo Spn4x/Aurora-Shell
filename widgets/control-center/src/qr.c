@@ -1,6 +1,7 @@
 #include "qr.h"
 #include <qrencode.h>
 #include <cairo.h>
+#include "utils.h"
 
 // D-Bus constants
 #define NM_DBUS_SERVICE "org.freedesktop.NetworkManager"
@@ -89,89 +90,47 @@ static GdkPixbuf* qrcode_to_pixbuf(const QRcode *qrcode) {
     return pixbuf;
 }
 
-// Main background thread logic (IMPROVED)
+// Main background thread logic
 static void qr_code_thread_func(GTask *task, gpointer source_object, gpointer task_data, GCancellable *cancellable) {
     (void)source_object; (void)cancellable;
     QRTaskData *data = task_data;
-    g_autoptr(GError) error = NULL;
-    g_autofree gchar *password = NULL;
-    g_autofree gchar *security_type = NULL;
     g_autoptr(GdkPixbuf) result_pixbuf = NULL;
     
-    g_print("[QR BACKEND] 3. Background thread started for SSID: '%s'\n", data->ssid);
-    
-    g_autoptr(GDBusConnection) bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
-    if (error) {
-        g_warning("[QR BACKEND]    -> FAILURE: Could not connect to the system D-Bus. Error: %s\n", error->message);
-        g_task_return_error(task, g_error_copy(error));
-        return;
-    }
-    g_print("[QR BACKEND]    -> Successfully connected to D-Bus.\n");
+    g_print("[QR BACKEND] Using nmcli to fetch password for: '%s'\n", data->ssid);
 
-    g_autofree gchar *connection_path = find_connection_path_for_ssid(bus, data->ssid, &error);
-    if (error) {
-        g_warning("[QR BACKEND]    -> FAILURE: Error while searching for connection profile. Error: %s\n", error->message);
-        g_task_return_error(task, g_error_copy(error));
-        return;
-    }
-    if (!connection_path) {
-        g_warning("[QR BACKEND]    -> FAILURE: No saved connection profile found for SSID '%s'. Cannot get password.\n", data->ssid);
-        g_task_return_error(task, g_error_new(G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "No saved connection profile found for SSID '%s'", data->ssid));
-        return;
-    }
-    g_print("[QR BACKEND]    -> Found connection profile at D-Bus path: %s\n", connection_path);
+    // Use nmcli to get the PSK directly. 
+    // -s: show secrets, -g: get specifically the psk field
+    gchar *cmd = g_strdup_printf("nmcli -s -g 802-11-wireless-security.psk connection show \"%s\"", data->ssid);
+    gchar *password = run_command(cmd); // This uses your existing utility!
+    g_free(cmd);
 
-    g_print("[QR BACKEND] 4. Asking NetworkManager for secrets. This requires Polkit authentication!\n");
-    g_autoptr(GVariant) secrets_variant = g_dbus_connection_call_sync(bus,
-        NM_DBUS_SERVICE, connection_path, NM_SETTINGS_CONNECTION_INTERFACE, "GetSecrets",
-        g_variant_new("(s)", "802-11-wireless-security"), NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-    
-    if (error) {
-        g_warning("[QR BACKEND]    -> D-Bus call to 'GetSecrets' FAILED! This is the most common failure point.\n");
-        g_warning("[QR BACKEND]    -> Reason: %s\n", error->message);
-        g_warning("[QR BACKEND]    -> This usually means a Polkit agent is not running or permissions were denied.\n");
-        g_task_return_error(task, g_error_copy(error));
-        return;
-    }
-
-    g_print("[QR BACKEND]    -> Successfully received secrets from NetworkManager.\n");
-    
-    g_autoptr(GVariant) secrets_dict_outer = g_variant_get_child_value(secrets_variant, 0);
-    g_autoptr(GVariant) secrets_dict = g_variant_lookup_value(secrets_dict_outer, "802-11-wireless-security", G_VARIANT_TYPE_VARDICT);
-    if (secrets_dict) {
-        g_print("[QR BACKEND]    -> Parsing secrets dictionary...\n");
-        g_autoptr(GVariant) psk_variant = g_variant_lookup_value(secrets_dict, "psk", G_VARIANT_TYPE_STRING);
-        if (psk_variant) {
-            password = g_variant_dup_string(psk_variant, NULL);
-            security_type = g_strdup("WPA");
-            g_print("[QR BACKEND]    -> Success! Found WPA password (psk).\n");
-        } else {
-             g_warning("[QR BACKEND]    -> NOTE: Password (psk) not found in secrets. This might be an enterprise network (PEAP/EAP) or open network.\n");
-        }
-    } else {
-         g_warning("[QR BACKEND]    -> NOTE: '802-11-wireless-security' dictionary not found. This is likely an open (unsecured) network.\n");
+    if (password) {
+        g_strstrip(password); 
     }
 
     gchar *qr_string = NULL;
-    if (password && security_type) {
-        qr_string = g_strdup_printf("WIFI:S:%s;T:%s;P:%s;;", data->ssid, security_type, password);
+    if (password && strlen(password) > 0) {
+        g_print("[QR BACKEND] -> Password found successfully.\n");
+        // Most routers use WPA/WPA2, so T:WPA is the safest standard for the QR
+        qr_string = g_strdup_printf("WIFI:S:%s;T:WPA;P:%s;;", data->ssid, password);
     } else {
+        g_print("[QR BACKEND] -> No password found (Open network).\n");
         qr_string = g_strdup_printf("WIFI:S:%s;T:nopass;;", data->ssid);
     }
 
-    
+    // Generate the QR code as you were doing before
     QRcode *qrcode = QRcode_encodeString(qr_string, 0, QR_ECLEVEL_L, QR_MODE_8, 1);
     result_pixbuf = qrcode_to_pixbuf(qrcode);
+    
     QRcode_free(qrcode);
     g_free(qr_string);
-    
+    g_free(password);
+
     if (result_pixbuf) {
-        g_print("[QR BACKEND]    -> QR Code generated and converted to pixbuf successfully.\n");
+        g_task_return_pointer(task, g_object_ref(result_pixbuf), g_object_unref);
     } else {
-        g_warning("[QR BACKEND]    -> FAILURE: QR code generation returned a NULL pixbuf.\n");
+        g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_FAILED, "QR generation failed");
     }
-    
-    g_task_return_pointer(task, g_object_ref(result_pixbuf), g_object_unref);
 }
 
 // Main thread callback

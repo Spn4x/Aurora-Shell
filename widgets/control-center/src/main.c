@@ -875,21 +875,44 @@ static void on_bt_devices_updated(GList *devices, gpointer user_data) {
     on_bt_scan_results(devices, user_data);
 }
 
-// The final callback that displays the QR code
+// 1. THE CLEANUP HANDLER (With extra safety checks)
+static void on_qr_popover_closed(GtkPopover *popover, gpointer user_data) {
+    GtkWidget *button = GTK_WIDGET(user_data);
+    
+    // Safety check: only clear the "active" reference if THIS popover 
+    // is actually the one currently stored on the button.
+    if (g_object_get_data(G_OBJECT(button), "active-qr-popover") == popover) {
+        g_object_set_data(G_OBJECT(button), "active-qr-popover", NULL);
+    }
+
+    if (GTK_IS_WIDGET(popover) && gtk_widget_get_parent(GTK_WIDGET(popover))) {
+        gtk_widget_unparent(GTK_WIDGET(popover));
+    }
+}
+
+// 2. THE RECEIVER (Updated to swap popovers safely)
 static void on_qr_code_received(GdkPixbuf *pixbuf, gpointer user_data) {
     QRCodeCallbackContext *context = user_data;
-    
-    if (context->spinner_popover) {
-        gtk_popover_popdown(context->spinner_popover);
+    GtkWidget *button = context->parent_widget;
+
+    // Remove the spinner popover immediately so it doesn't trigger extra signals
+    if (context->spinner_popover && GTK_IS_WIDGET(context->spinner_popover)) {
+        gtk_widget_unparent(GTK_WIDGET(context->spinner_popover));
+        // If the spinner was the active one, clear it before setting the new one
+        if (g_object_get_data(G_OBJECT(button), "active-qr-popover") == context->spinner_popover) {
+            g_object_set_data(G_OBJECT(button), "active-qr-popover", NULL);
+        }
     }
 
     GtkPopover *qr_popover = GTK_POPOVER(gtk_popover_new());
-    gtk_widget_add_css_class(GTK_WIDGET(qr_popover), "qr-code-popover"); // Add class to popover
-    g_signal_connect(qr_popover, "closed", G_CALLBACK(on_popover_closed), NULL);
+    gtk_widget_add_css_class(GTK_WIDGET(qr_popover), "qr-code-popover");
+    
+    // Save the new QR popover reference
+    g_object_set_data(G_OBJECT(button), "active-qr-popover", qr_popover);
+    g_signal_connect(qr_popover, "closed", G_CALLBACK(on_qr_popover_closed), button);
 
     if (pixbuf) {
         GtkWidget *popover_content_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-        
         GdkPaintable *paintable = GDK_PAINTABLE(gdk_texture_new_for_pixbuf(pixbuf));
         GtkWidget *qr_image = gtk_image_new_from_paintable(paintable);
         gtk_image_set_pixel_size(GTK_IMAGE(qr_image), 256);
@@ -897,22 +920,19 @@ static void on_qr_code_received(GdkPixbuf *pixbuf, gpointer user_data) {
         g_autofree gchar *label_text = g_strdup_printf("Scan to connect to \"%s\"", context->ssid);
         GtkWidget *info_label = gtk_label_new(label_text);
         gtk_label_set_wrap(GTK_LABEL(info_label), TRUE);
-        gtk_widget_add_css_class(info_label, "dim-label"); // Keep for fallback
-        gtk_widget_add_css_class(info_label, "qr-info-label"); // Add our specific class
+        gtk_widget_add_css_class(info_label, "qr-info-label");
 
         gtk_box_append(GTK_BOX(popover_content_box), qr_image);
         gtk_box_append(GTK_BOX(popover_content_box), info_label);
 
-        gtk_widget_set_margin_top(popover_content_box, 15);
-        gtk_widget_set_margin_bottom(popover_content_box, 15);
         gtk_widget_set_margin_start(popover_content_box, 15);
         gtk_widget_set_margin_end(popover_content_box, 15);
+        gtk_widget_set_margin_top(popover_content_box, 15);
+        gtk_widget_set_margin_bottom(popover_content_box, 15);
 
         gtk_popover_set_child(qr_popover, popover_content_box);
-
     } else {
-        GtkWidget *error_label = gtk_label_new("Could not retrieve Wi-Fi password.\nCheck terminal for D-Bus or Polkit errors.");
-        gtk_label_set_wrap(GTK_LABEL(error_label), TRUE);
+        GtkWidget *error_label = gtk_label_new("Could not retrieve Wi-Fi password.");
         gtk_widget_set_margin_start(error_label, 15);
         gtk_widget_set_margin_end(error_label, 15);
         gtk_widget_set_margin_top(error_label, 15);
@@ -920,27 +940,40 @@ static void on_qr_code_received(GdkPixbuf *pixbuf, gpointer user_data) {
         gtk_popover_set_child(qr_popover, error_label);
     }
 
-    gtk_widget_set_parent(GTK_WIDGET(qr_popover), context->parent_widget);
+    gtk_widget_set_parent(GTK_WIDGET(qr_popover), button);
     gtk_popover_popup(qr_popover);
     
     g_free(context->ssid);
     g_free(context);
 }
 
-
+// 3. THE CLICK HANDLER (Updated with validation checks)
 static void on_qr_button_clicked(GtkButton *button, gpointer user_data) {
     (void)user_data;
+
+    // Check if we have a valid, living popover currently attached
+    gpointer active = g_object_get_data(G_OBJECT(button), "active-qr-popover");
+    if (active && GTK_IS_POPOVER(active)) {
+        gtk_popover_popdown(GTK_POPOVER(active));
+        return;
+    }
+
     WifiNetwork *net = g_object_get_data(G_OBJECT(button), "wifi-network-data");
     if (!net) return;
     
     GtkPopover *spinner_popover = GTK_POPOVER(gtk_popover_new());
     GtkWidget *spinner = gtk_spinner_new();
     gtk_spinner_start(GTK_SPINNER(spinner));
-    gtk_widget_set_margin_start(spinner, 15);
-    gtk_widget_set_margin_end(spinner, 15);
-    gtk_widget_set_margin_top(spinner, 15);
-    gtk_widget_set_margin_bottom(spinner, 15);
+    gtk_widget_set_margin_start(spinner, 20);
+    gtk_widget_set_margin_end(spinner, 20);
+    gtk_widget_set_margin_top(spinner, 20);
+    gtk_widget_set_margin_bottom(spinner, 20);
     gtk_popover_set_child(spinner_popover, spinner);
+    
+    // Store the spinner popover temporarily
+    g_object_set_data(G_OBJECT(button), "active-qr-popover", spinner_popover);
+    g_signal_connect(spinner_popover, "closed", G_CALLBACK(on_qr_popover_closed), button);
+
     gtk_widget_set_parent(GTK_WIDGET(spinner_popover), GTK_WIDGET(button));
     gtk_popover_popup(spinner_popover);
 
