@@ -66,12 +66,27 @@ static void draw_clock(GtkDrawingArea *area, cairo_t *cr, int width, int height,
     GtkStyleContext *context = gtk_widget_get_style_context(GTK_WIDGET(area));
     
     GdkRGBA bg_color, fg_color, accent_color;
+
+    // --- 1. Colors Setup ---
     
-    if (!gtk_style_context_lookup_color(context, "theme_unfocused_bg_color", &bg_color)) {
-        gtk_style_context_lookup_color(context, "window_bg_color", &bg_color);
+    // Default fallback for background (Dark Grey/Blueish)
+    gdk_rgba_parse(&bg_color, "#3E3E41");
+    // Default fallback for foreground (White)
+    gdk_rgba_parse(&fg_color, "#ffffff");
+    // Default fallback for accent (Red/Pinkish)
+    gdk_rgba_parse(&accent_color, "#e78284");
+
+    // Look up Background Color (Priority: theme_unfocused_color -> theme_unfocused_bg_color -> window_bg_color)
+    if (!gtk_style_context_lookup_color(context, "theme_unfocused_color", &bg_color)) {
+        if (!gtk_style_context_lookup_color(context, "theme_unfocused_bg_color", &bg_color)) {
+            gtk_style_context_lookup_color(context, "window_bg_color", &bg_color);
+        }
     }
+
+    // Look up Foreground Color
     gtk_style_context_lookup_color(context, "theme_fg_color", &fg_color);
     
+    // Look up Accent Color
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     if (!gtk_style_context_lookup_color(context, "custom-accent", &accent_color)) {
@@ -79,12 +94,12 @@ static void draw_clock(GtkDrawingArea *area, cairo_t *cr, int width, int height,
     }
     #pragma GCC diagnostic pop
 
-    // --- 1. Draw Background ---
+    // --- 2. Draw Background ---
     gdk_cairo_set_source_rgba(cr, &bg_color);
     cairo_rounded_rectangle(cr, 0, 0, width, height, 8.0);
     cairo_fill(cr);
 
-    // --- 2. Draw Progress Bars ---
+    // --- 3. Draw Progress Bars ---
     cairo_save(cr);
     cairo_rounded_rectangle(cr, 0, 0, width, height, 8.0);
     cairo_clip(cr);
@@ -111,7 +126,7 @@ static void draw_clock(GtkDrawingArea *area, cairo_t *cr, int width, int height,
 
     cairo_restore(cr);
 
-    // --- 3. Draw Text ---
+    // --- 4. Draw Text ---
     PangoLayout *layout = gtk_widget_create_pango_layout(GTK_WIDGET(area), NULL);
     int text_w, text_h;
 
