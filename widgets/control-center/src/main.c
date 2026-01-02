@@ -428,7 +428,7 @@ static void on_audio_sink_clicked(GtkButton *button, AudioSink *sink) {
     if(!widgets) {
         return;
     }
-    set_default_sink_async(sink->id, on_sink_set_finished, widgets);
+    set_default_sink_async(sink->name, on_sink_set_finished, widgets);
 }
 
 static void toggle_airplane_mode(GtkToggleButton *button, AppWidgets *widgets) {
@@ -849,19 +849,28 @@ static void update_audio_device_list(AppWidgets *widgets) {
     while ((child = gtk_widget_get_first_child(list_box))) {
         gtk_box_remove(GTK_BOX(list_box), child);
     }
+
     GList *sinks = get_audio_sinks();
     if (g_list_length(sinks) == 0) {
         gtk_box_append(GTK_BOX(list_box), gtk_label_new("No audio devices found."));
     } else {
         for (GList *l = sinks; l != NULL; l = l->next) {
             AudioSink *sink_from_scan = l->data;
-            AudioSink *sink_copy = g_new0(AudioSink, 1);
-            *sink_copy = *sink_from_scan;
-            sink_copy->name = g_strdup(sink_from_scan->name);
+            
+            // FIX 1: Use the helper function for deep copying (prevents crashes!)
+            AudioSink *sink_copy = audio_sink_copy(sink_from_scan);
 
-            GtkWidget *entry_button = create_list_entry("audio-card-symbolic", sink_copy->name, sink_copy->is_default);
+            // FIX 2: Pass 'description' (Human Name) instead of 'name' (ID) to the UI
+            GtkWidget *entry_button = create_list_entry(
+                "audio-card-symbolic", 
+                sink_copy->description, 
+                sink_copy->is_default
+            );
+            
+            // The signal handler still uses the whole struct, so it has access to sink_copy->name for switching
             g_signal_connect(entry_button, "clicked", G_CALLBACK(on_audio_sink_clicked), sink_copy);
             g_signal_connect_swapped(entry_button, "destroy", G_CALLBACK(audio_sink_free), sink_copy);
+            
             gtk_box_append(GTK_BOX(list_box), entry_button);
         }
     }

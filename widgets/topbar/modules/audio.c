@@ -13,8 +13,10 @@
 // --- Type Definitions ---
 typedef struct _AudioModule AudioModule;
 
+// FIXED: Added 'name' to struct so we can switch by string instead of ID
 typedef struct {
     uint32_t id;
+    gchar *name;
     gchar *description;
 } AudioSink;
 
@@ -72,8 +74,10 @@ static void cairo_rounded_rectangle(cairo_t *cr, double x, double y, double widt
     cairo_close_path(cr);
 }
 
+// FIXED: Free the name string
 static void audio_sink_free(gpointer data) {
     AudioSink *sink = (AudioSink*)data;
+    g_free(sink->name);
     g_free(sink->description);
     g_free(sink);
 }
@@ -442,14 +446,16 @@ static gboolean on_scroll(GtkEventControllerScroll* controller, double dx, doubl
     return TRUE;
 }
 
+// FIXED: Uses 'pactl set-default-sink NAME'
 static void on_sink_button_clicked(GtkButton *button, gpointer data) {
     AudioSink *sink = (AudioSink*)data;
-    g_autofree gchar *command = g_strdup_printf("wpctl set-default %u", sink->id);
+    g_autofree gchar *command = g_strdup_printf("pactl set-default-sink '%s'", sink->name);
     system(command);
     GtkPopover* popover = GTK_POPOVER(gtk_widget_get_ancestor(GTK_WIDGET(button), GTK_TYPE_POPOVER));
     if (popover) gtk_popover_popdown(popover);
 }
 
+// FIXED: Parses 'pactl list sinks' to get stable Names
 static void update_sink_list_ui(AudioModule *module) {
     // 1. Clear old children
     GtkWidget *child;
@@ -457,22 +463,36 @@ static void update_sink_list_ui(AudioModule *module) {
         gtk_box_remove(GTK_BOX(module->sink_list_box), child); 
     }
     
-    // 2. Populate List
-    FILE *fp = popen("wpctl status | awk '/Sinks:/, /Sources:/' | grep -E '[0-9]+\\.' | sed -e 's/[│]//g' -e 's/ \\[[^]]*\\]//'", "r");
+    // 2. Get current default sink name
+    char default_sink[256] = {0};
+    FILE *fp_def = popen("pactl get-default-sink", "r");
+    if (fp_def) {
+        if (fgets(default_sink, sizeof(default_sink), fp_def)) {
+            g_strstrip(default_sink);
+        }
+        pclose(fp_def);
+    }
+    
+    // 3. Populate List (Using pactl to get stable names)
+    FILE *fp = popen("pactl list sinks | grep -E 'Name:|Description:' | awk 'NR%2{printf $2 \"|\"} NR%2==0{$1=\"\"; print substr($0,2)}'", "r");
     if (!fp) return;
-    char line[256];
+    
+    char line[512];
     while (fgets(line, sizeof(line), fp)) {
-        gboolean is_default = FALSE;
-        char* current_pos = line;
-        while (g_ascii_isspace(*current_pos)) current_pos++;
-        if (*current_pos == '*') { is_default = TRUE; current_pos++; while (g_ascii_isspace(*current_pos)) current_pos++; }
-        char *id_str = strtok(current_pos, ".");
-        char *desc_str = strtok(NULL, "");
-        if (id_str && desc_str) {
-            g_strstrip(desc_str);
-            AudioSink *sink = g_new0(AudioSink, 1);
-            sink->id = atoi(id_str); sink->description = g_strdup(desc_str);
+        char *name = strtok(line, "|");
+        char *desc = strtok(NULL, "\n");
+        
+        if (name && desc) {
+            g_strstrip(name);
+            g_strstrip(desc);
             
+            AudioSink *sink = g_new0(AudioSink, 1);
+            sink->name = g_strdup(name);
+            sink->description = g_strdup(desc);
+            
+            gboolean is_default = (g_strcmp0(name, default_sink) == 0);
+
+            // Build UI
             GtkWidget *button = gtk_button_new(); gtk_widget_add_css_class(button, "sink-button"); gtk_widget_add_css_class(button, "flat");
             GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6); gtk_button_set_child(GTK_BUTTON(button), box);
             GtkWidget *glyph_label = gtk_label_new(get_glyph_for_sink(sink->description)); gtk_widget_add_css_class(glyph_label, "glyph-label");
@@ -483,7 +503,6 @@ static void update_sink_list_ui(AudioModule *module) {
             g_object_set_data_full(G_OBJECT(button), "sink-data", sink, audio_sink_free);
             g_signal_connect(button, "clicked", G_CALLBACK(on_sink_button_clicked), sink);
 
-            // Add button directly to the box (No animation for now)
             gtk_box_append(GTK_BOX(module->sink_list_box), button);
         }
     }

@@ -17,9 +17,6 @@ gchar* run_command(const char *command_line) {
         return NULL;
     }
 
-    // You might want to check exit_status as well
-    // if (exit_status != 0) { ... }
-    
     // The buffer is null-terminated by GLib.
     return stdout_buf;
 }
