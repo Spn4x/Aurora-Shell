@@ -268,6 +268,7 @@ static void on_wifi_operation_finished(gboolean success, gpointer user_data) {
 }
 
 
+
 // The callback that runs AFTER the background connect/disconnect thread finishes.
 static void on_bt_operation_finished(gboolean success, gpointer user_data) {
     g_print("[UI DEBUG] on_bt_operation_finished callback received. Success: %s\n", success ? "TRUE" : "FALSE");
