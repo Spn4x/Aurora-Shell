@@ -58,6 +58,11 @@
                 "label" : " Cheatsheet",
                 "glyph" : "",
                 "on-click" : "aurora-shell --toggle cheatsheet"
+              },
+              {
+                "label" : " Thinkfan",
+                "glyph" : "",
+                "on-click" : "aurora-shell --toggle thinkfan"
               }
             ]
           }
@@ -234,5 +239,16 @@
       "height" : 400
     },
     "exclusive" : false
-  }
+  },
+  {
+    "name": "thinkfan",
+    "plugin": "/usr/local/lib/aurora-shell/widgets/thinkfan.so",
+    "stylesheet": "thinkfan.css",
+    "layer": "top",
+    "anchor": "right-center",
+    "margin": { "top": 0, "right": 6  },
+    "interactive" : true,
+    "visible_on_start" : false,
+    "exclusive" : false
+}
 ]

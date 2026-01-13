@@ -1,0 +1,106 @@
+/* Define Colors */
+@define-color gnome_bg #28282C;
+@define-color gnome_highlight #3E3E41;
+@define-color aurora_fg #ffffff; 
+
+/* Window Background */
+window.layer-shell { background-color: transparent; }
+
+.hud-card {
+   background-color: alpha(@gnome_bg, 0.95);
+   border: 2px solid alpha(@aurora_accent, 0.2);
+   border-radius: 20px;
+   padding: 24px;
+   color: white; /* Ensure global text is white on dark bg */
+}
+
+/* --- Typography --- */
+.hero-val { 
+    font-size: 2.0em; 
+    font-weight: 800; 
+    font-feature-settings: 'tnum'; 
+    margin-bottom: -4px; 
+}
+
+.hero-lbl { 
+    font-size: 0.75em; 
+    opacity: 0.5; 
+    text-transform: uppercase; 
+    letter-spacing: 1.5px; 
+    font-weight: bold; 
+}
+
+/* --- Controls Styling --- */
+
+/* FIX: Correct selector for Active Toggle Buttons */
+button.toggle:checked {
+    background-color: @aurora_accent;
+    border-color: @aurora_accent;
+    color: @aurora_fg;
+}
+
+/* Optional: Slight tint on hover for unselected buttons */
+button.toggle:hover:not(:checked) {
+    background-color: alpha(@aurora_accent, 0.15);
+    color: white;
+}
+
+/* FIX: Make the Slider (Scale) match the accent */
+scale highlight {
+    background-color: @aurora_accent;
+}
+
+/* --- Stat Boxes --- */
+.stat-box {
+   background-color: alpha(#ffffff, 0.05); /* Generic white alpha works better on dark themes */
+   border-radius: 16px;
+   padding: 12px;
+   margin-left: 6px; 
+   margin-right: 6px;
+}
+
+.status-text { 
+    opacity: 0.8; 
+    font-weight: bold; 
+    font-size: 0.9em; 
+    margin-top: 8px; 
+    margin-bottom: 8px; 
+}
+
+/* --- Graphs --- */
+.graph-container {
+    background-color: alpha(#ffffff, 0.03);
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 8px;
+    border: 1px solid alpha(#ffffff, 0.05);
+}
+
+.graph-label {
+    font-size: 0.8em;
+    opacity: 0.6;
+    font-weight: bold;
+    margin-bottom: 4px;
+}
+
+.graph-value {
+    font-weight: 800;
+    font-feature-settings: 'tnum';
+    font-size: 1.1em;
+}
+
+/* Switcher Buttons */
+stackswitcher button {
+    padding-top: 8px;
+    padding-bottom: 8px;
+}
+
+/* Selected switcher tab accent */
+stackswitcher button:checked {
+    color: @aurora_accent; 
+}
+
+/* Temp Colors */
+.temp-hot { color: #ff7b63; }
+.temp-warm { color: #f8e45c; }
+.temp-ok { color: #8ff0a4; }
