@@ -377,19 +377,26 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
     self->last_frame_time = 0;
     gdk_rgba_parse(&self->fan_color, "#ffffff");
 
-    for(int i=0; i<HISTORY_LEN; i++) { self->hist_rpm[i] = 0; self->hist_temp[i] = 0; }
+    // Initialize history arrays
+    for(int i=0; i<HISTORY_LEN; i++) { 
+        self->hist_rpm[i] = 0; 
+        self->hist_temp[i] = 0; 
+    }
 
-    // Load icons from GResource (icons should stay in resource for portability)
+    // Load icons from the GResource compiled into the plugin
     GtkIconTheme *theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
     gtk_icon_theme_add_resource_path(theme, "/com/zocker/thinkfan/icons");
     
-    // Configure self (Box)
-    gtk_widget_set_size_request(GTK_WIDGET(self), 280, -1);
+    // --- CONFIGURE ROOT CONTAINER ---
+    // We add 'thinkfan-root' so we can sandbox the CSS
+    gtk_widget_add_css_class(GTK_WIDGET(self), "thinkfan-root");
     gtk_widget_add_css_class(GTK_WIDGET(self), "hud-card");
+    
+    gtk_widget_set_size_request(GTK_WIDGET(self), 280, -1);
     gtk_orientable_set_orientation(GTK_ORIENTABLE(self), GTK_ORIENTATION_VERTICAL);
     gtk_box_set_spacing(GTK_BOX(self), 12);
 
-    // --- VIEW SWITCHER ---
+    // --- VIEW SWITCHER & STACK ---
     self->stack = ADW_VIEW_STACK(adw_view_stack_new());
     gtk_widget_set_vexpand(GTK_WIDGET(self->stack), TRUE);
     
@@ -399,6 +406,7 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
     AdwViewSwitcher *switcher = ADW_VIEW_SWITCHER(adw_view_switcher_new());
     adw_view_switcher_set_stack(switcher, self->stack);
     adw_view_switcher_set_policy(switcher, ADW_VIEW_SWITCHER_POLICY_WIDE); 
+    
     gtk_box_append(GTK_BOX(self), GTK_WIDGET(switcher));
     gtk_box_append(GTK_BOX(self), GTK_WIDGET(self->stack));
 
@@ -406,6 +414,7 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
     gtk_widget_set_valign(GTK_WIDGET(self->page_dash), GTK_ALIGN_CENTER);
     gtk_widget_set_vexpand(GTK_WIDGET(self->page_dash), TRUE);
 
+        // Fan Animation Area
         self->fan_drawing_area = gtk_drawing_area_new();
         gtk_widget_set_size_request(self->fan_drawing_area, 180, 180);
         gtk_widget_set_halign(self->fan_drawing_area, GTK_ALIGN_CENTER);
@@ -415,6 +424,7 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
         gtk_widget_add_tick_callback(self->fan_drawing_area, on_fan_tick, self, NULL);
         gtk_box_append(GTK_BOX(self->page_dash), self->fan_drawing_area);
 
+        // Stats Row (RPM and Temp)
         GtkWidget *hero_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
         gtk_box_set_homogeneous(GTK_BOX(hero_box), TRUE);
         
@@ -443,6 +453,7 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
         gtk_widget_set_margin_top(hero_box, 12);
         gtk_box_append(GTK_BOX(self->page_dash), hero_box);
 
+        // Bottom Status Text
         self->lbl_status_text = GTK_LABEL(gtk_label_new("Mode: --"));
         gtk_widget_add_css_class(GTK_WIDGET(self->lbl_status_text), "status-text");
         gtk_box_append(GTK_BOX(self->page_dash), GTK_WIDGET(self->lbl_status_text));
@@ -453,10 +464,10 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
     // --- PAGE 2: GRAPHS ---
     gtk_widget_set_margin_top(GTK_WIDGET(self->page_graphs), 10);
     
+        // RPM Graph
         GtkWidget *cnt_rpm = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
         gtk_widget_add_css_class(cnt_rpm, "graph-container");
         gtk_widget_set_vexpand(cnt_rpm, TRUE); 
-
         GtkWidget *head_rpm = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
         GtkWidget *lbl_rpm_title = gtk_label_new("RPM");
         gtk_widget_add_css_class(lbl_rpm_title, "graph-label");
@@ -467,7 +478,6 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
         gtk_box_append(GTK_BOX(head_rpm), lbl_rpm_title);
         gtk_box_append(GTK_BOX(head_rpm), GTK_WIDGET(self->lbl_rpm_graph_val));
         gtk_box_append(GTK_BOX(cnt_rpm), head_rpm);
-
         self->graph_rpm_area = gtk_drawing_area_new();
         gtk_widget_set_vexpand(self->graph_rpm_area, TRUE);
         gtk_widget_set_size_request(self->graph_rpm_area, -1, 100);
@@ -475,10 +485,10 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
         gtk_box_append(GTK_BOX(cnt_rpm), self->graph_rpm_area);
         gtk_box_append(GTK_BOX(self->page_graphs), cnt_rpm);
 
+        // Temp Graph
         GtkWidget *cnt_temp = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
         gtk_widget_add_css_class(cnt_temp, "graph-container");
         gtk_widget_set_vexpand(cnt_temp, TRUE); 
-
         GtkWidget *head_temp = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
         GtkWidget *lbl_temp_title = gtk_label_new("Temp");
         gtk_widget_add_css_class(lbl_temp_title, "graph-label");
@@ -489,7 +499,6 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
         gtk_box_append(GTK_BOX(head_temp), lbl_temp_title);
         gtk_box_append(GTK_BOX(head_temp), GTK_WIDGET(self->lbl_temp_graph_val));
         gtk_box_append(GTK_BOX(cnt_temp), head_temp);
-
         self->graph_temp_area = gtk_drawing_area_new();
         gtk_widget_set_vexpand(self->graph_temp_area, TRUE);
         gtk_widget_set_size_request(self->graph_temp_area, -1, 100);
@@ -500,7 +509,7 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
     AdwViewStackPage *p2 = adw_view_stack_add_titled(self->stack, GTK_WIDGET(self->page_graphs), "graphs", "Graphs");
     adw_view_stack_page_set_icon_name(p2, "tf-graphs-symbolic");
 
-    // --- CONTROLS ---
+    // --- CONTROLS SECTION ---
     GtkWidget *ctrl_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_add_css_class(ctrl_box, "linked");
     gtk_widget_set_halign(ctrl_box, GTK_ALIGN_CENTER);
@@ -509,6 +518,7 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
     self->btn_full = GTK_TOGGLE_BUTTON(gtk_toggle_button_new_with_label("Full"));
     self->btn_manual = GTK_TOGGLE_BUTTON(gtk_toggle_button_new_with_label("Manual"));
     
+    // Group them so only one can be active
     gtk_toggle_button_set_group(self->btn_full, self->btn_auto);
     gtk_toggle_button_set_group(self->btn_manual, self->btn_auto);
 
@@ -517,7 +527,7 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
     gtk_box_append(GTK_BOX(ctrl_box), GTK_WIDGET(self->btn_manual));
     gtk_box_append(GTK_BOX(self), ctrl_box);
 
-    // --- SLIDER ---
+    // --- MANUAL SLIDER ---
     self->slider_container = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8));
     gtk_widget_set_margin_top(GTK_WIDGET(self->slider_container), 8);
     
@@ -534,11 +544,13 @@ static void thinkfan_widget_init(ThinkfanWidget *self) {
     gtk_box_append(GTK_BOX(self->slider_container), GTK_WIDGET(self->slider_val_label));
     gtk_box_append(GTK_BOX(self), GTK_WIDGET(self->slider_container));
 
+    // --- SIGNAL CONNECTIONS ---
     g_signal_connect(self->btn_auto, "toggled", G_CALLBACK(on_mode_toggled), self);
     g_signal_connect(self->btn_full, "toggled", G_CALLBACK(on_mode_toggled), self);
     g_signal_connect(self->btn_manual, "toggled", G_CALLBACK(on_mode_toggled), self);
     g_signal_connect(self->slider, "value-changed", G_CALLBACK(on_slider_changed), self);
 
+    // --- START DATA UPDATES ---
     sync_ui_with_hardware(self);
     self->update_timer_id = g_timeout_add_seconds(1, on_timer, self);
     on_timer(self);
