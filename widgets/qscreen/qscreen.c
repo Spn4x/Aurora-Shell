@@ -34,7 +34,6 @@ typedef struct {
     gboolean ocr_has_run;
 } UIState;
 
-
 // --- Forward Declarations ---
 static void on_widget_realize(GtkWidget *widget, gpointer user_data);
 static void on_window_destroy(GtkWidget *widget, gpointer user_data);
@@ -58,7 +57,6 @@ static gboolean animation_tick(gpointer data);
 static void create_rounded_rect_path(cairo_t *cr, double x, double y, double w, double h, double r);
 static void on_key_pressed(GtkEventControllerKey* controller, guint keyval, guint keycode, GdkModifierType state, gpointer user_data);
 static void on_drawing_area_resize(GtkWidget *widget, int width, int height, gpointer user_data);
-
 
 // ===================================================================
 //  Plugin Lifecycle Functions
@@ -135,24 +133,16 @@ static void create_rounded_rect_path(cairo_t *cr, double x, double y, double w, 
     cairo_close_path(cr);
 }
 
-// ---
-// --- FINAL CORRECTED DRAWING FUNCTION ---
-// ---
 static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data) {
     (void)area;
     UIState *state = data;
     if (!state->screenshot_pixbuf || width == 0 || height == 0) return;
 
-    // The GtkPicture underneath this drawing area has already drawn the scaled image.
-    // This function now ONLY draws the overlays.
-
-    // 1. Draw the dark overlay that covers the entire widget.
     if (state->current_mode != MODE_TEXT) {
         cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.5);
         cairo_paint(cr);
     }
     
-    // 2. "Punch out" the selected region for Region/Window mode.
     if (state->current_w > 1 && state->current_h > 1 && state->current_mode != MODE_TEXT) {
         double sel_x = state->current_x / state->scale_x;
         double sel_y = state->current_y / state->scale_y;
@@ -163,23 +153,19 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
         create_rounded_rect_path(cr, sel_x, sel_y, sel_w, sel_h, 10.0);
         cairo_clip(cr);
         
-        // Use the CLEAR operator. This makes the clipped area fully transparent,
-        // revealing the GtkPicture that is underneath our drawing area.
         cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
         cairo_paint(cr);
         
-        cairo_restore(cr); // Remove the clip
+        cairo_restore(cr);
 
-        // Redraw the border around the now-cleared area
         cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
         cairo_set_line_width(cr, 2.0);
         create_rounded_rect_path(cr, sel_x, sel_y, sel_w, sel_h, 10.0);
         cairo_stroke(cr);
     }
 
-    // 3. Handle selection drawing for Text mode
     if (state->current_mode == MODE_TEXT && state->text_boxes) {
-        cairo_set_source_rgba(cr, 0.2, 0.5, 1.0, 0.3); // Unselected
+        cairo_set_source_rgba(cr, 0.2, 0.5, 1.0, 0.3);
         for (GList *l = state->text_boxes; l != NULL; l = l->next) {
             if (!g_list_find(state->selected_text_boxes, l->data)) {
                 QScreenTextBox *box = l->data;
@@ -188,14 +174,14 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
         }
         cairo_fill(cr);
 
-        cairo_set_source_rgba(cr, 0.8, 0.5, 0.1, 0.5); // Selected
+        cairo_set_source_rgba(cr, 0.8, 0.5, 0.1, 0.5);
         for (GList *l = state->selected_text_boxes; l != NULL; l = l->next) {
             QScreenTextBox *box = l->data;
             cairo_rectangle(cr, box->geometry.x / state->scale_x, box->geometry.y / state->scale_y, box->geometry.width / state->scale_x, box->geometry.height / state->scale_y);
         }
         cairo_fill(cr);
 
-        if (state->current_w > 1 && state->current_h > 1) { // Drag selection rect
+        if (state->current_w > 1 && state->current_h > 1) {
             double sel_x = state->current_x / state->scale_x;
             double sel_y = state->current_y / state->scale_y;
             double sel_w = state->current_w / state->scale_x;
@@ -217,7 +203,7 @@ static void on_selection_finalized(UIState *state) {
     GdkRectangle geometry = { (int)round(state->current_x), (int)round(state->current_y), (int)round(state->current_w), (int)round(state->current_h) };
     gboolean save_to_disk = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(state->save_button));
     process_final_screenshot(state->temp_screenshot_path, &geometry, save_to_disk, state->app_state);
-    gtk_window_destroy(state->window);
+    if (state->window) gtk_window_destroy(state->window);
 }
 
 static void on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data) {
@@ -268,7 +254,7 @@ static void on_drag_end(GtkGestureDrag *gesture, double offset_x, double offset_
             run_command_with_stdin_sync("notify-send 'Text Copied' 'Selected text is on your clipboard.'", NULL);
             g_string_free(final_text, TRUE);
         } 
-        gtk_window_destroy(state->window);
+        if (state->window) gtk_window_destroy(state->window);
     } else on_selection_finalized(state);
 }
 
@@ -325,7 +311,14 @@ static void set_mode(UIState *state, SelectionMode mode) {
 static void on_region_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); set_mode(s,MODE_REGION); }}
 static void on_window_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); set_mode(s,MODE_WINDOW); }}
 static void on_text_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); set_mode(s,MODE_TEXT); }}
-static void on_screen_button_clicked(GtkButton *b, gpointer d) { (void)b; UIState *s=d; GdkRectangle g={0,0,gdk_pixbuf_get_width(s->screenshot_pixbuf),gdk_pixbuf_get_height(s->screenshot_pixbuf)}; gboolean save=gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->save_button)); process_final_screenshot(s->temp_screenshot_path,&g,save,s->app_state); gtk_window_destroy(s->window); }
+static void on_screen_button_clicked(GtkButton *b, gpointer d) { 
+    (void)b; UIState *s=d; 
+    GdkRectangle g={0,0,gdk_pixbuf_get_width(s->screenshot_pixbuf),gdk_pixbuf_get_height(s->screenshot_pixbuf)}; 
+    gboolean save=gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->save_button)); 
+    process_final_screenshot(s->temp_screenshot_path,&g,save,s->app_state); 
+    if (s->window) gtk_window_destroy(s->window); 
+}
+
 static gboolean hide_notification_and_redraw(gpointer d) { UIState *s=d; gtk_revealer_set_reveal_child(GTK_REVEALER(s->ocr_notification_revealer),FALSE); gtk_widget_queue_draw(s->drawing_area); return G_SOURCE_REMOVE; }
 static void on_ocr_finished(GList *text_boxes, gpointer data) {
     UIState *state = data; if (!state || !GTK_IS_WIDGET(state->window) || !gtk_widget_get_visible(GTK_WIDGET(state->window))) { if (text_boxes) free_ocr_results(text_boxes); return; }
@@ -338,16 +331,28 @@ static void on_ocr_finished(GList *text_boxes, gpointer data) {
 
 G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     g_autoptr(JsonParser) parser = json_parser_new();
+    
+    // FIX 1: If parsing fails, return a safe dummy widget instead of NULL
     if (!config_string || !json_parser_load_from_data(parser, config_string, -1, NULL)) {
-        g_warning("qscreen: Failed to parse config string."); return NULL;
+        g_warning("qscreen: Failed to parse config string."); 
+        GtkWidget *dummy = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_set_size_request(dummy, 1, 1);
+        gtk_widget_set_opacity(dummy, 0.0);
+        return dummy;
     }
+    
     JsonObject *root_obj = json_node_get_object(json_parser_get_root(parser));
     
-    // FIX: Safely check for member existence before retrieval
+    // FIX 2: Safely check for member existence before retrieval.
     if (!json_object_has_member(root_obj, "temp_screenshot_path")) {
-        // This is not an error; it just means the widget isn't ready to be shown yet.
-        return NULL;
+        // This means the widget was loaded on boot before being toggled.
+        // Return a transparent 1x1 box so GTK 4.22 creates a Wayland surface and doesn't crash.
+        GtkWidget *dummy = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_set_size_request(dummy, 1, 1);
+        gtk_widget_set_opacity(dummy, 0.0);
+        return dummy;
     }
+    
     const char *temp_path = json_object_get_string_member(root_obj, "temp_screenshot_path");
 
     UIState *state = g_new0(UIState, 1);
@@ -366,9 +371,15 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     
     g_autoptr(GError) error = NULL;
     state->screenshot_pixbuf = gdk_pixbuf_new_from_file(state->temp_screenshot_path, &error);
+    
+    // FIX 3: Return dummy if loading image fails
     if (error) {
         g_warning("qscreen: Failed to load pre-captured screenshot '%s': %s", state->temp_screenshot_path, error->message);
-        ui_state_free(state); return NULL;
+        ui_state_free(state); 
+        GtkWidget *dummy = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_set_size_request(dummy, 1, 1);
+        gtk_widget_set_opacity(dummy, 0.0);
+        return dummy;
     }
 
     GtkAspectFrame *aspect_frame = GTK_ASPECT_FRAME(gtk_aspect_frame_new(0.5, 0.5, (float)gdk_pixbuf_get_width(state->screenshot_pixbuf) / (float)gdk_pixbuf_get_height(state->screenshot_pixbuf), FALSE));
@@ -379,12 +390,10 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     g_object_set_data_full(G_OBJECT(aspect_frame), "ui-state", state, ui_state_free);
     
     // --- NEW WIDGET HIERARCHY ---
-    // 1. GtkPicture is the base layer in the overlay, it will display the scaled screenshot.
     GtkWidget *picture = gtk_picture_new_for_pixbuf(state->screenshot_pixbuf);
     gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_FILL);
     gtk_overlay_set_child(GTK_OVERLAY(overlay), picture);
 
-    // 2. GtkDrawingArea is added as an overlay on top. It's transparent by default.
     state->drawing_area = gtk_drawing_area_new();
     g_signal_connect(state->drawing_area, "resize", G_CALLBACK(on_drawing_area_resize), state);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(state->drawing_area), draw_selection_overlay, state, NULL);
@@ -395,8 +404,6 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     GtkEventController *key_controller = gtk_event_controller_key_new();
     g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), state);
     gtk_widget_add_controller(GTK_WIDGET(aspect_frame), key_controller);
-    
-    // ... (rest of the code is identical, adding UI controls to the main overlay)
     
     state->ocr_notification_revealer = gtk_revealer_new();
     gtk_revealer_set_transition_type(GTK_REVEALER(state->ocr_notification_revealer), GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);

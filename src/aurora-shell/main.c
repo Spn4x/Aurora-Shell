@@ -206,6 +206,9 @@ static void free_widget_state(gpointer data) {
     WidgetState *state = (WidgetState *)data;
     if (state->window) {
         g_signal_handlers_disconnect_by_func(state->window, on_widget_window_destroyed, state);
+        
+        gtk_widget_set_visible(GTK_WIDGET(state->window), FALSE); 
+        
         gtk_window_destroy(state->window);
         state->window = NULL;
     }
@@ -310,17 +313,17 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     GtkWidget *widget = create_widget(config_string_to_pass);
     if (!widget) { g_warning("Plugin '%s' for widget '%s' returned a NULL widget.", plugin_path, name); dlclose(handle); gtk_window_destroy(window); return NULL; }
 
+    // --- FIX: GTK 4.22 Surface Lifecycle Bug ---
+    // Do not destroy and recreate the window! We just reuse the existing one.
+    gtk_window_set_child(window, widget);
+
     if (g_strcmp0(name, "qscreen") == 0) {
-        gtk_window_destroy(window); 
-        window = GTK_WINDOW(gtk_application_window_new(shell->app)); 
-        gtk_window_set_child(window, widget);
         gtk_window_set_default_size(window, 600, 400);
         gtk_window_set_title(window, "qscreen");
         is_exclusive = FALSE; 
         use_layer_shell = FALSE; 
-    } else {
-        gtk_window_set_child(window, widget);
     }
+    // --- END FIX ---
     
     if (use_layer_shell) {
         gtk_layer_init_for_window(window);
@@ -335,7 +338,6 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     } else if (g_strcmp0(name, "qscreen") != 0) {
         gtk_window_fullscreen(window);
     }
-
 
     if (json_object_has_member(item_obj, "stylesheet")) {
         const char *stylesheet_name = json_object_get_string_member(item_obj, "stylesheet");
@@ -414,6 +416,16 @@ static void load_all_widgets(AuroraShell *shell) {
         
         if (!json_object_has_member(item_obj, "name")) continue;
         const char *name = json_object_get_string_member(item_obj, "name");
+        
+        // =================================================================
+        // --- FIX FOR QSCREEN TOGGLE CRASH ---
+        // Do not preload qscreen on boot. It is an on-demand tool.
+        // Loading it on boot creates a hidden dummy window that crashes 
+        // GTK 4.22 when it gets destroyed during the first --toggle.
+        // =================================================================
+        if (g_strcmp0(name, "qscreen") == 0) {
+            continue;
+        }
         
         WidgetState *state = create_single_widget(shell, item_obj);
         if (state) {
