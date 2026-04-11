@@ -70,6 +70,17 @@ void db_log_usage(const char* app_class, long duration) {
 void log_current_session() {
     if (focus_start_time > 0 && strlen(current_app_class) > 0) {
         long time_spent = time(NULL) - focus_start_time;
+        
+        // --- FIX: Prevent sleep/suspend from inflating screen time ---
+        // Our select() loop times out every 30 seconds. 
+        // If time_spent is much larger (e.g., > 60s), the system 
+        // was suspended/asleep while this app was focused.
+        // We cap it to 30 seconds to prevent logging ghost time.
+        if (time_spent > 60) {
+            printf("SLEEP DETECTED: Gap of %ld seconds. Capping to 30s.\n", time_spent);
+            time_spent = 30;
+        }
+        
         db_log_usage(current_app_class, time_spent);
     }
     focus_start_time = time(NULL);

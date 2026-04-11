@@ -21,6 +21,7 @@ static void on_generic_module_clicked(GtkButton *button, gpointer user_data);
 static GtkWidget* create_popover_module(JsonObject *config);
 static void free_string_data(gpointer data, GClosure *closure);
 static void on_popover_button_clicked(GtkButton *button, gpointer user_data);
+static void build_popover_items_recursive(JsonArray *items_array, GtkWidget *list_box);
 
 // Click handler for GtkDrawingAreas that have an on-click command
 static void on_drawing_area_clicked(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) {
@@ -60,6 +61,76 @@ static void topbar_cleanup(gpointer data) {
     g_free(data);
 }
 
+static void build_popover_items_recursive(JsonArray *items_array, GtkWidget *list_box) {
+    for (guint i = 0; i < json_array_get_length(items_array); i++) {
+        JsonObject *item_obj = json_array_get_object_element(items_array, i);
+        if (!item_obj) continue;
+        
+        const char *label = json_object_get_string_member_with_default(item_obj, "label", "No Label");
+        const char *command = json_object_has_member(item_obj, "on-click") ? json_object_get_string_member(item_obj, "on-click") : NULL;
+        const char* glyph = json_object_has_member(item_obj, "glyph") ? json_object_get_string_member(item_obj, "glyph") : NULL;
+        
+        // Check if this item has its own nested "items" array
+        gboolean has_submenu = json_object_has_member(item_obj, "items");
+        
+        GtkWidget *item_button = gtk_button_new();
+        gtk_widget_add_css_class(item_button, "popover-item");
+        gtk_widget_add_css_class(item_button, "flat");
+        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_button_set_child(GTK_BUTTON(item_button), box);
+        
+        if (glyph) {
+            GtkWidget *glyph_label = gtk_label_new(glyph);
+            gtk_widget_add_css_class(glyph_label, "glyph-label");
+            gtk_box_append(GTK_BOX(box), glyph_label);
+        }
+        GtkWidget *desc_label = gtk_label_new(label);
+        gtk_label_set_xalign(GTK_LABEL(desc_label), 0.0);
+        gtk_widget_set_hexpand(desc_label, TRUE);
+        gtk_box_append(GTK_BOX(box), desc_label);
+        
+        if (has_submenu) {
+            // 1. Add a small arrow to indicate a submenu
+            GtkWidget *arrow = gtk_image_new_from_icon_name("go-next-symbolic");
+            gtk_widget_set_halign(arrow, GTK_ALIGN_END);
+            gtk_widget_set_opacity(arrow, 0.5);
+            gtk_box_append(GTK_BOX(box), arrow);
+
+            // 2. Create the Sub-Popover attached to this button
+            GtkWidget *sub_popover = gtk_popover_new();
+            gtk_popover_set_position(GTK_POPOVER(sub_popover), GTK_POS_RIGHT); // Pop out to the side
+            gtk_popover_set_has_arrow(GTK_POPOVER(sub_popover), FALSE);
+            gtk_widget_set_parent(sub_popover, item_button);
+
+            // 3. Attach our existing cascade animation to the submenu!
+            attach_popover_animation(GTK_POPOVER(sub_popover), item_button);
+
+            GtkWidget *sub_list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+            gtk_widget_set_margin_top(sub_list_box, 5);
+            gtk_widget_set_margin_bottom(sub_list_box, 5);
+            gtk_popover_set_child(GTK_POPOVER(sub_popover), sub_list_box);
+
+            // 4. RECURSION: Build the items inside the submenu
+            JsonArray *sub_items = json_object_get_array_member(item_obj, "items");
+            build_popover_items_recursive(sub_items, sub_list_box);
+
+            // 5. Initialize the animation for the new submenu items
+            reset_popover_animation(GTK_POPOVER(sub_popover));
+
+            // 6. Make clicking the button open the submenu
+            g_signal_connect(item_button, "clicked", G_CALLBACK(on_popover_button_clicked), sub_popover);
+        } else if (command) {
+            // Normal clickable command
+            g_signal_connect_data(item_button, "clicked", G_CALLBACK(on_generic_module_clicked), g_strdup(command), free_string_data, 0);
+        }
+
+        // Wrap it in a revealer for the animation
+        GtkWidget *revealer = gtk_revealer_new();
+        gtk_revealer_set_child(GTK_REVEALER(revealer), item_button);
+        gtk_box_append(GTK_BOX(list_box), revealer);
+    }
+}
+
 static GtkWidget* create_popover_module(JsonObject *config) {
     const char *symbol = json_object_get_string_member_with_default(config, "symbol", "?");
     GtkWidget *button = gtk_button_new_with_label(symbol);
@@ -82,38 +153,9 @@ static GtkWidget* create_popover_module(JsonObject *config) {
     
     if (json_object_has_member(config, "items")) {
         JsonArray *items_array = json_object_get_array_member(config, "items");
-        for (guint i = 0; i < json_array_get_length(items_array); i++) {
-            JsonObject *item_obj = json_array_get_object_element(items_array, i);
-            if (!item_obj) continue;
-            
-            const char *label = json_object_get_string_member_with_default(item_obj, "label", "No Label");
-            const char *command = json_object_has_member(item_obj, "on-click") ? json_object_get_string_member(item_obj, "on-click") : NULL;
-            const char* glyph = json_object_has_member(item_obj, "glyph") ? json_object_get_string_member(item_obj, "glyph") : NULL;
-            
-            GtkWidget *item_button = gtk_button_new();
-            gtk_widget_add_css_class(item_button, "popover-item");
-            gtk_widget_add_css_class(item_button, "flat");
-            GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-            gtk_button_set_child(GTK_BUTTON(item_button), box);
-            
-            if (glyph) {
-                GtkWidget *glyph_label = gtk_label_new(glyph);
-                gtk_widget_add_css_class(glyph_label, "glyph-label");
-                gtk_box_append(GTK_BOX(box), glyph_label);
-            }
-            GtkWidget *desc_label = gtk_label_new(label);
-            gtk_label_set_xalign(GTK_LABEL(desc_label), 0.0);
-            gtk_widget_set_hexpand(desc_label, TRUE);
-            gtk_box_append(GTK_BOX(box), desc_label);
-            
-            if (command) {
-                g_signal_connect_data(item_button, "clicked", G_CALLBACK(on_generic_module_clicked), g_strdup(command), free_string_data, 0);
-            }
-
-            GtkWidget *revealer = gtk_revealer_new();
-            gtk_revealer_set_child(GTK_REVEALER(revealer), item_button);
-            gtk_box_append(GTK_BOX(list_box), revealer);
-        }
+        
+        // --- WE REPLACED THE OLD LOOP WITH OUR NEW RECURSIVE FUNCTION ---
+        build_popover_items_recursive(items_array, list_box);
     }
 
     // After populating, tell the animation helper to find the new items
@@ -141,7 +183,7 @@ static void load_module(JsonObject *module_config, TopbarState *state, GtkBox *t
         if (g_strcmp0(module_name, "clock") == 0) {
             module_widget = create_clock_module();
         } else if (g_strcmp0(module_name, "systray") == 0) {
-            module_widget = create_systray_module();  // <--- THE NEW SYSTRAY MODULE
+            module_widget = create_systray_module(); 
         } else if (g_strcmp0(module_name, "workspaces") == 0) {
             module_widget = create_workspaces_module();
         } else if (g_strcmp0(module_name, "sysinfo") == 0) {

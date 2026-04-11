@@ -1,6 +1,7 @@
 #include <gtk/gtk.h>
 #include <gio/gio.h>
 #include "systray.h"
+#include "popover_anim.h" 
 
 #define WATCHER_BUS "org.kde.StatusNotifierWatcher"
 #define WATCHER_PATH "/StatusNotifierWatcher"
@@ -40,7 +41,7 @@ typedef struct {
     GtkWidget *active_popover; 
     guint watch_id;
     guint menu_watch_id;
-    GCancellable *cancellable; // FIX: Prevent pending async calls from crashing
+    GCancellable *cancellable;
 } TrayItem;
 
 // --- Forward Declarations ---
@@ -91,7 +92,6 @@ static void on_icon_fetched(GObject *source, GAsyncResult *res, gpointer user_da
     g_autoptr(GError) error = NULL;
     g_autoptr(GVariant) result = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &error);
 
-    // FIX: Safely abort if the applet was destroyed while we were fetching the icon
     if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) return;
 
     TrayItem *item = (TrayItem*)user_data;
@@ -114,7 +114,7 @@ static void update_item_icon(TrayItem *item) {
     g_dbus_connection_call(item->module->dbus_conn, item->bus_name, item->object_path,
                            "org.freedesktop.DBus.Properties", "Get",
                            g_variant_new("(ss)", ITEM_IFACE, "IconName"),
-                           NULL, G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, // Added Cancellable
+                           NULL, G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable,
                            on_icon_fetched, item);
 }
 
@@ -159,7 +159,6 @@ static void on_menu_item_clicked(GtkButton *btn, gpointer user_data) {
     
     if (!item || !item->menu_path) return;
 
-    // Passing NULL callback here is safe because we don't process the return value
     g_dbus_connection_call(item->module->dbus_conn, item->bus_name, item->menu_path,
                            MENU_IFACE, "Event", g_variant_new("(isvu)", id, "clicked", g_variant_new_string(""), (guint32)0),
                            NULL, G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, NULL, NULL);
@@ -227,7 +226,11 @@ static void build_menu_recursive(GVariant *children_list, TrayItem *item, GtkWid
             GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
             gtk_widget_set_margin_top(sep, 4);
             gtk_widget_set_margin_bottom(sep, 4);
-            gtk_box_append(GTK_BOX(container_vbox), sep);
+            
+            GtkWidget *revealer = gtk_revealer_new();
+            gtk_revealer_set_child(GTK_REVEALER(revealer), sep);
+            gtk_box_append(GTK_BOX(container_vbox), revealer);
+            
         } else if (label) {
             gchar **parts = g_strsplit(label, "_", -1);
             gchar *clean_label = g_strjoinv("", parts);
@@ -268,11 +271,16 @@ static void build_menu_recursive(GVariant *children_list, TrayItem *item, GtkWid
                 GtkWidget *sub_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
                 gtk_popover_set_child(GTK_POPOVER(sub_popover), sub_vbox);
                 
+                gtk_widget_set_parent(sub_popover, btn);
+                
+                attach_popover_animation(GTK_POPOVER(sub_popover), btn);
+
                 if (num_children > 0) {
                     build_menu_recursive(sub_children_v, item, sub_vbox);
                 }
                 
-                gtk_widget_set_parent(sub_popover, btn);
+                reset_popover_animation(GTK_POPOVER(sub_popover));
+                
                 g_object_set_data(G_OBJECT(btn), "tray-item", item);
                 g_object_set_data(G_OBJECT(btn), "menu-id", GINT_TO_POINTER(id));
                 g_object_set_data(G_OBJECT(btn), "sub-popover", sub_popover); 
@@ -283,7 +291,11 @@ static void build_menu_recursive(GVariant *children_list, TrayItem *item, GtkWid
             }
 
             gtk_button_set_child(GTK_BUTTON(btn), btn_box);
-            gtk_box_append(GTK_BOX(container_vbox), btn);
+            
+            GtkWidget *revealer = gtk_revealer_new();
+            gtk_revealer_set_child(GTK_REVEALER(revealer), btn);
+            gtk_box_append(GTK_BOX(container_vbox), revealer);
+            
             g_free(clean_label);
         }
         
@@ -298,8 +310,13 @@ static void cleanup_sub_popovers(GtkWidget *vbox) {
     while (child) {
         GtkWidget *next = gtk_widget_get_next_sibling(child);
         
-        if (GTK_IS_BUTTON(child)) {
-            GtkWidget *sub_popover = g_object_get_data(G_OBJECT(child), "sub-popover");
+        GtkWidget *target_widget = child;
+        if (GTK_IS_REVEALER(child)) {
+            target_widget = gtk_revealer_get_child(GTK_REVEALER(child));
+        }
+        
+        if (GTK_IS_BUTTON(target_widget)) {
+            GtkWidget *sub_popover = g_object_get_data(G_OBJECT(target_widget), "sub-popover");
             if (sub_popover) {
                 GtkWidget *sub_vbox = gtk_popover_get_child(GTK_POPOVER(sub_popover));
                 if (sub_vbox) {
@@ -318,9 +335,7 @@ static void on_menu_layout_ready(GObject *source, GAsyncResult *res, gpointer us
     g_autoptr(GError) error = NULL;
     g_autoptr(GVariant) result = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &error);
 
-    // FIX: Safely abort if the applet was destroyed while we were fetching the menu
     if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) return;
-
     if (error || !result) return;
 
     TrayItem *item = (TrayItem*)user_data;
@@ -329,10 +344,22 @@ static void on_menu_layout_ready(GObject *source, GAsyncResult *res, gpointer us
 
     g_autoptr(GVariant) children_list = g_variant_get_child_value(layout_tuple, 2);
 
+    gboolean already_open = FALSE;
+    int current_anim_index = -1;
+    PopoverAnimState *anim_state = NULL;
+
     if (!item->active_popover) {
         item->active_popover = gtk_popover_new();
         gtk_widget_set_parent(item->active_popover, item->button);
-    } 
+        attach_popover_animation(GTK_POPOVER(item->active_popover), item->button);
+    } else {
+        already_open = gtk_widget_get_mapped(item->active_popover);
+        anim_state = g_object_get_data(G_OBJECT(item->active_popover), "anim-state");
+        if (anim_state && anim_state->animation_id > 0) {
+            // Find exactly how many items we've already animated
+            current_anim_index = g_list_position(anim_state->revealers, anim_state->current_item);
+        }
+    }
 
     GtkWidget *old_vbox = gtk_popover_get_child(GTK_POPOVER(item->active_popover));
     if (old_vbox) {
@@ -348,7 +375,35 @@ static void on_menu_layout_ready(GObject *source, GAsyncResult *res, gpointer us
 
     build_menu_recursive(children_list, item, vbox);
 
-    gtk_popover_popup(GTK_POPOVER(item->active_popover));
+    reset_popover_animation(GTK_POPOVER(item->active_popover));
+
+    if (already_open) {
+        if (anim_state) {
+            if (anim_state->animation_id > 0 && current_anim_index >= 0) {
+                // THE FIX: The animation was running when nm-applet updated!
+                // 1. Instantly reveal only the items that were ALREADY visible before the refresh
+                GList *l = anim_state->revealers;
+                for (int i = 0; i < current_anim_index && l != NULL; i++, l = l->next) {
+                    GtkRevealer *rev = GTK_REVEALER(l->data);
+                    gtk_revealer_set_transition_duration(rev, 0);
+                    gtk_revealer_set_reveal_child(rev, TRUE);
+                    gtk_revealer_set_transition_duration(rev, 150);
+                }
+                // 2. Point the timer to the next hidden item so the cascade continues smoothly!
+                anim_state->current_item = l;
+            } else {
+                // Animation was already finished. Just reveal all instantly.
+                for (GList *l = anim_state->revealers; l != NULL; l = l->next) {
+                    GtkRevealer *rev = GTK_REVEALER(l->data);
+                    gtk_revealer_set_transition_duration(rev, 0); 
+                    gtk_revealer_set_reveal_child(rev, TRUE);     
+                    gtk_revealer_set_transition_duration(rev, 250); 
+                }
+            }
+        }
+    } else {
+        gtk_popover_popup(GTK_POPOVER(item->active_popover));
+    }
 }
 
 static void on_menu_signal(GDBusConnection *conn, const gchar *sender, const gchar *path, const gchar *iface, const gchar *signal, GVariant *params, gpointer user_data) {
@@ -368,7 +423,6 @@ static void on_about_to_show_ready(GObject *source, GAsyncResult *res, gpointer 
     g_autoptr(GError) error = NULL;
     g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &error);
 
-    // FIX: Safely abort if the applet was destroyed while clicking
     if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) return;
 
     if (error) {
@@ -411,7 +465,6 @@ static void on_item_proxy_ready(GObject *source, GAsyncResult *res, gpointer use
     GError *error = NULL;
     GDBusProxy *proxy = g_dbus_proxy_new_for_bus_finish(res, &error);
 
-    // FIX: If the proxy creation was cancelled (because the item vanished instantly), abort immediately.
     if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
         g_error_free(error);
         if (proxy) g_object_unref(proxy);
@@ -475,7 +528,7 @@ static void handle_method_call(GDBusConnection *c, const gchar *s, const gchar *
             TrayItem *item = g_new0(TrayItem, 1);
             item->module = module; 
             item->service = g_strdup(full_service);
-            item->cancellable = g_cancellable_new(); // Ensure we can abort dead network calls
+            item->cancellable = g_cancellable_new(); 
             
             gchar **parts = g_strsplit(full_service, "/", 2);
             item->bus_name = g_strdup(parts[0]);
@@ -504,12 +557,10 @@ static GVariant *handle_get_prop(GDBusConnection *c, const gchar *s, const gchar
 static void free_tray_item(gpointer data) {
     TrayItem *item = (TrayItem*)data;
 
-    // FIX 1: Immediately cancel any pending network/dbus fetch calls so they don't invoke on dead pointers
     if (item->cancellable) {
         g_cancellable_cancel(item->cancellable);
     }
 
-    // Unparent active popover FIRST to prevent GTK complaints when the button is destroyed later
     if (item->active_popover && gtk_widget_get_parent(item->active_popover)) {
         GtkWidget *old_vbox = gtk_popover_get_child(GTK_POPOVER(item->active_popover));
         if (old_vbox) {
@@ -527,7 +578,6 @@ static void free_tray_item(gpointer data) {
         g_dbus_connection_signal_unsubscribe(item->module->dbus_conn, item->menu_watch_id);
     }
     
-    // FIX 2: Destroy the D-Bus Proxy to ensure late signals do not trigger use-after-free
     if (item->item_proxy) {
         g_signal_handlers_disconnect_by_data(item->item_proxy, item);
         g_clear_object(&item->item_proxy);

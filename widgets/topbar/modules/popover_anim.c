@@ -49,7 +49,7 @@ static void on_popover_map(GtkWidget *widget, gpointer user_data) {
     // Start the animation timer
     if (state->animation_id > 0) g_source_remove(state->animation_id);
     state->current_item = state->revealers;
-    state->animation_id = g_timeout_add(40, popover_cascade_tick, state); 
+    state->animation_id = g_timeout_add(20, popover_cascade_tick, state); 
 }
 
 static void on_popover_unmap(GtkWidget *widget, gpointer user_data) {
@@ -78,7 +78,7 @@ static void on_popover_unmap(GtkWidget *widget, gpointer user_data) {
             gtk_revealer_set_transition_duration(revealer, 0);
             gtk_revealer_set_reveal_child(revealer, FALSE);
             // Restore the duration for the next animation.
-            gtk_revealer_set_transition_duration(revealer, 250);
+            gtk_revealer_set_transition_duration(revealer, 150);
         }
     }
 }
