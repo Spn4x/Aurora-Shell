@@ -40,6 +40,7 @@ typedef struct {
     GtkWidget *active_popover; 
     guint watch_id;
     guint menu_watch_id;
+    GCancellable *cancellable; // FIX: Prevent pending async calls from crashing
 } TrayItem;
 
 // --- Forward Declarations ---
@@ -87,10 +88,13 @@ static void apply_icon_name(TrayItem *item, const gchar *icon_name) {
 }
 
 static void on_icon_fetched(GObject *source, GAsyncResult *res, gpointer user_data) {
-    TrayItem *item = user_data;
     g_autoptr(GError) error = NULL;
     g_autoptr(GVariant) result = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &error);
 
+    // FIX: Safely abort if the applet was destroyed while we were fetching the icon
+    if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) return;
+
+    TrayItem *item = (TrayItem*)user_data;
     if (result) {
         g_autoptr(GVariant) val = g_variant_get_child_value(result, 0);
         if (val) {
@@ -110,7 +114,7 @@ static void update_item_icon(TrayItem *item) {
     g_dbus_connection_call(item->module->dbus_conn, item->bus_name, item->object_path,
                            "org.freedesktop.DBus.Properties", "Get",
                            g_variant_new("(ss)", ITEM_IFACE, "IconName"),
-                           NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL,
+                           NULL, G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, // Added Cancellable
                            on_icon_fetched, item);
 }
 
@@ -119,7 +123,6 @@ static void on_item_properties_changed(GDBusProxy *proxy, GVariant *changed_prop
     TrayItem *item = (TrayItem*)user_data;
     update_item_icon(item);
 
-    // Catch dynamic Menu path changes (e.g. nm-applet switching menus on disconnect)
     if (changed_properties) {
         g_autoptr(GVariant) menu_v = g_variant_lookup_value(changed_properties, "Menu", G_VARIANT_TYPE_OBJECT_PATH);
         if (menu_v) {
@@ -156,9 +159,10 @@ static void on_menu_item_clicked(GtkButton *btn, gpointer user_data) {
     
     if (!item || !item->menu_path) return;
 
+    // Passing NULL callback here is safe because we don't process the return value
     g_dbus_connection_call(item->module->dbus_conn, item->bus_name, item->menu_path,
                            MENU_IFACE, "Event", g_variant_new("(isvu)", id, "clicked", g_variant_new_string(""), (guint32)0),
-                           NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+                           NULL, G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, NULL, NULL);
 
     if (item->active_popover) {
         gtk_popover_popdown(GTK_POPOVER(item->active_popover));
@@ -173,7 +177,7 @@ static void on_submenu_button_clicked(GtkButton *btn, gpointer user_data) {
     if (item && item->menu_path) {
         g_dbus_connection_call(item->module->dbus_conn, item->bus_name, item->menu_path,
                                MENU_IFACE, "Event", g_variant_new("(isvu)", id, "opened", g_variant_new_string(""), (guint32)0),
-                               NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+                               NULL, G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, NULL, NULL);
     }
 
     gtk_popover_popup(GTK_POPOVER(popover));
@@ -311,12 +315,15 @@ static void cleanup_sub_popovers(GtkWidget *vbox) {
 
 // --- Menu Builder ---
 static void on_menu_layout_ready(GObject *source, GAsyncResult *res, gpointer user_data) {
-    TrayItem *item = (TrayItem*)user_data;
     g_autoptr(GError) error = NULL;
     g_autoptr(GVariant) result = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &error);
 
+    // FIX: Safely abort if the applet was destroyed while we were fetching the menu
+    if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) return;
+
     if (error || !result) return;
 
+    TrayItem *item = (TrayItem*)user_data;
     g_autoptr(GVariant) layout_tuple = g_variant_get_child_value(result, 1);
     if (!layout_tuple || !g_variant_is_of_type(layout_tuple, G_VARIANT_TYPE("(ia{sv}av)"))) return;
 
@@ -353,22 +360,25 @@ static void on_menu_signal(GDBusConnection *conn, const gchar *sender, const gch
     if (g_strcmp0(signal, "LayoutUpdated") == 0 || g_strcmp0(signal, "ItemsPropertiesUpdated") == 0) {
         g_dbus_connection_call(item->module->dbus_conn, item->bus_name, item->menu_path,
                                MENU_IFACE, "GetLayout", g_variant_new("(iias)", 0, -1, NULL),
-                               NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, on_menu_layout_ready, item);
+                               NULL, G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, on_menu_layout_ready, item);
     }
 }
 
 static void on_about_to_show_ready(GObject *source, GAsyncResult *res, gpointer user_data) {
-    TrayItem *item = (TrayItem*)user_data;
     g_autoptr(GError) error = NULL;
     g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &error);
+
+    // FIX: Safely abort if the applet was destroyed while clicking
+    if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) return;
 
     if (error) {
         g_warning("TrayItem AboutToShow failed: %s", error->message);
     }
 
+    TrayItem *item = (TrayItem*)user_data;
     g_dbus_connection_call(item->module->dbus_conn, item->bus_name, item->menu_path,
                            MENU_IFACE, "GetLayout", g_variant_new("(iias)", 0, -1, NULL),
-                           NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, on_menu_layout_ready, item);
+                           NULL, G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, on_menu_layout_ready, item);
 }
 
 // --- Click Handling ---
@@ -385,23 +395,32 @@ static void on_click_pressed(GtkGestureClick *gesture, int n_press, double x, do
         if (item->menu_path) {
             g_dbus_connection_call(item->module->dbus_conn, item->bus_name, item->menu_path,
                                    MENU_IFACE, "AboutToShow", g_variant_new("(i)", 0),
-                                   NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, on_about_to_show_ready, item);
+                                   NULL, G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, on_about_to_show_ready, item);
         } else {
-            g_dbus_proxy_call(item->item_proxy, "ContextMenu", g_variant_new("(ii)", (int)x, (int)y), G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+            g_dbus_proxy_call(item->item_proxy, "ContextMenu", g_variant_new("(ii)", (int)x, (int)y), G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, NULL, NULL);
         }
     } 
     else if (button == GDK_BUTTON_PRIMARY) {
-        g_dbus_proxy_call(item->item_proxy, "Activate", g_variant_new("(ii)", (int)x, (int)y), G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+        g_dbus_proxy_call(item->item_proxy, "Activate", g_variant_new("(ii)", (int)x, (int)y), G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, NULL, NULL);
     }
 }
 
 // --- Item Discovery ---
 static void on_item_proxy_ready(GObject *source, GAsyncResult *res, gpointer user_data) {
     (void)source;
-    TrayItem *item = (TrayItem*)user_data;
     GError *error = NULL;
-    item->item_proxy = g_dbus_proxy_new_for_bus_finish(res, &error);
-    
+    GDBusProxy *proxy = g_dbus_proxy_new_for_bus_finish(res, &error);
+
+    // FIX: If the proxy creation was cancelled (because the item vanished instantly), abort immediately.
+    if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+        g_error_free(error);
+        if (proxy) g_object_unref(proxy);
+        return; 
+    }
+
+    TrayItem *item = (TrayItem*)user_data;
+    item->item_proxy = proxy;
+
     if (error) { 
         g_hash_table_remove(item->module->items, item->service); 
         g_error_free(error);
@@ -456,6 +475,7 @@ static void handle_method_call(GDBusConnection *c, const gchar *s, const gchar *
             TrayItem *item = g_new0(TrayItem, 1);
             item->module = module; 
             item->service = g_strdup(full_service);
+            item->cancellable = g_cancellable_new(); // Ensure we can abort dead network calls
             
             gchar **parts = g_strsplit(full_service, "/", 2);
             item->bus_name = g_strdup(parts[0]);
@@ -465,7 +485,7 @@ static void handle_method_call(GDBusConnection *c, const gchar *s, const gchar *
             item->watch_id = g_bus_watch_name_on_connection(c, item->bus_name, 0, NULL, on_applet_vanished, module->items, NULL);
             g_hash_table_insert(module->items, g_strdup(full_service), item);
             
-            g_dbus_proxy_new_for_bus(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL, item->bus_name, item->object_path, ITEM_IFACE, NULL, on_item_proxy_ready, item);
+            g_dbus_proxy_new_for_bus(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL, item->bus_name, item->object_path, ITEM_IFACE, item->cancellable, on_item_proxy_ready, item);
         }
         g_free(full_service); 
         g_dbus_method_invocation_return_value(inv, NULL);
@@ -484,6 +504,11 @@ static GVariant *handle_get_prop(GDBusConnection *c, const gchar *s, const gchar
 static void free_tray_item(gpointer data) {
     TrayItem *item = (TrayItem*)data;
 
+    // FIX 1: Immediately cancel any pending network/dbus fetch calls so they don't invoke on dead pointers
+    if (item->cancellable) {
+        g_cancellable_cancel(item->cancellable);
+    }
+
     // Unparent active popover FIRST to prevent GTK complaints when the button is destroyed later
     if (item->active_popover && gtk_widget_get_parent(item->active_popover)) {
         GtkWidget *old_vbox = gtk_popover_get_child(GTK_POPOVER(item->active_popover));
@@ -496,15 +521,27 @@ static void free_tray_item(gpointer data) {
     if (item->button && gtk_widget_get_parent(item->button)) {
         gtk_box_remove(GTK_BOX(item->module->container), item->button);
     }
+
     if (item->watch_id > 0) g_bus_unwatch_name(item->watch_id);
     if (item->menu_watch_id > 0 && item->module->dbus_conn) {
         g_dbus_connection_signal_unsubscribe(item->module->dbus_conn, item->menu_watch_id);
+    }
+    
+    // FIX 2: Destroy the D-Bus Proxy to ensure late signals do not trigger use-after-free
+    if (item->item_proxy) {
+        g_signal_handlers_disconnect_by_data(item->item_proxy, item);
+        g_clear_object(&item->item_proxy);
     }
     
     g_free(item->menu_path); 
     g_free(item->service); 
     g_free(item->bus_name); 
     g_free(item->object_path); 
+
+    if (item->cancellable) {
+        g_object_unref(item->cancellable);
+    }
+
     g_free(item);
 }
 
