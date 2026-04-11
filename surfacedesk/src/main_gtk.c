@@ -234,6 +234,9 @@ static void on_show_drawer_clicked(GtkButton *btn, gpointer user_data) {
 
 static void on_change_wallpaper_activate(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
     (void)action; (void)parameter; (void)user_data;
+    if (app_state.is_picking_wallpaper) {
+        wallpaper_chooser_cancel();
+    }
     app_set_wallpaper_mode(!app_state.is_picking_wallpaper);
 }
 
@@ -270,6 +273,9 @@ static void handle_method_call(GDBusConnection *c, const gchar *s, const gchar *
         set_edit_mode(!app_state.is_editing);
         g_dbus_method_invocation_return_value(inv, NULL);
     } else if (g_strcmp0(method, "ToggleWallpaperMode") == 0) {
+        if (app_state.is_picking_wallpaper) {
+            wallpaper_chooser_cancel();
+        }
         app_set_wallpaper_mode(!app_state.is_picking_wallpaper);
         g_dbus_method_invocation_return_value(inv, NULL);
     } else {
