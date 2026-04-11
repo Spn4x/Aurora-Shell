@@ -1,0 +1,12 @@
+[package]
+name = "backend_engine"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+libc = "0.2"
+sha2 = "0.10"
+hex = "0.4"

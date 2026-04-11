@@ -1,7 +1,3 @@
-// ===============================================
-//  Aurora Shell - Main Host Application
-// ===============================================
-
 #include <glib.h>
 #include <glib/gstdio.h> 
 #include <gtk/gtk.h>
@@ -14,9 +10,6 @@
 #include <sys/wait.h>
 #include <errno.h> 
 
-// ===============================================
-// --- Type Definitions ---
-// ===============================================
 typedef struct {
     GtkWindow *window;
     GtkWidget *widget;
@@ -38,24 +31,16 @@ typedef struct {
     char *path;
 } CssReloadData;
 
-// Data for qscreen's "Capture First" logic
 typedef struct {
     AuroraShell *shell;
     JsonObject *config_obj;
     gchar *temp_path;
 } QScreenLaunchData;
 
-// Global argv for restart logic
 static char **global_argv = NULL;
 
 static void load_all_widgets(AuroraShell *shell);
 static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_obj); 
-
-// ===============================================
-// --- Helper and Utility Functions ---
-// ===============================================
-
-// --- GLOBAL THEME MANAGEMENT ---
 
 typedef struct {
     GtkCssProvider *provider;
@@ -63,15 +48,9 @@ typedef struct {
     AuroraShell *shell;
 } GlobalThemeData;
 
-// THE FIX: Recursively force every single child widget to redraw.
-// This guarantees that GtkDrawingAreas (like SysInfo bars) update instantly.
 static void recursive_force_redraw(GtkWidget *widget) {
     if (!widget) return;
-    
-    // Force this specific widget to redraw
     gtk_widget_queue_draw(widget);
-    
-    // Iterate over children (GTK4 style) and force them too
     GtkWidget *child = gtk_widget_get_first_child(widget);
     while (child) {
         recursive_force_redraw(child);
@@ -81,25 +60,16 @@ static void recursive_force_redraw(GtkWidget *widget) {
 
 static void on_global_theme_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
     (void)monitor; (void)file; (void)other_file;
-    
-    // Wait for the write to finish completely
     if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
         GlobalThemeData *data = (GlobalThemeData *)user_data;
-        g_print("Global theme colors changed. Reloading from: %s\n", data->path);
-        
-        // 1. Reload the CSS definitions into the global display context
         gtk_css_provider_load_from_path(data->provider, data->path);
-
-        // 2. NUCLEAR REDRAW: Force every pixel of every widget to repaint right now.
         if (data->shell && data->shell->widgets) {
             GHashTableIter iter;
             gpointer key, value;
             g_hash_table_iter_init(&iter, data->shell->widgets);
             while (g_hash_table_iter_next(&iter, &key, &value)) {
                 WidgetState *ws = (WidgetState *)value;
-                if (ws && ws->window) {
-                    recursive_force_redraw(GTK_WIDGET(ws->window));
-                }
+                if (ws && ws->window) recursive_force_redraw(GTK_WIDGET(ws->window));
             }
         }
     }
@@ -107,37 +77,20 @@ static void on_global_theme_changed(GFileMonitor *monitor, GFile *file, GFile *o
 
 static void load_global_theme(AuroraShell *shell) {
     g_autofree gchar *colors_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "aurora-colors.css", NULL);
-    
     if (!g_file_test(colors_path, G_FILE_TEST_EXISTS)) {
-        g_print("Creating default global colors file at %s\n", colors_path);
-        g_file_set_contents(colors_path, 
-            "@define-color aurora_bg #1e1e2e;\n"
-            "@define-color aurora_fg #cdd6f4;\n"
-            "@define-color aurora_accent #89b4fa;\n"
-            "@define-color aurora_surface #313244;\n", 
-            -1, NULL);
+        g_file_set_contents(colors_path, "@define-color aurora_bg #1e1e2e;\n@define-color aurora_fg #cdd6f4;\n@define-color aurora_accent #89b4fa;\n@define-color aurora_surface #313244;\n", -1, NULL);
     }
-
     GtkCssProvider *provider = gtk_css_provider_new();
     gtk_css_provider_load_from_path(provider, colors_path);
-
-    gtk_style_context_add_provider_for_display(
-        gdk_display_get_default(), 
-        GTK_STYLE_PROVIDER(provider), 
-        GTK_STYLE_PROVIDER_PRIORITY_USER
-    );
+    gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_USER);
 
     GFile *file = g_file_new_for_path(colors_path);
     GFileMonitor *monitor = g_file_monitor_file(file, G_FILE_MONITOR_NONE, NULL, NULL);
-    
     if (monitor) {
         GlobalThemeData *data = g_new(GlobalThemeData, 1);
-        data->provider = provider;
-        data->path = g_strdup(colors_path);
-        data->shell = shell; 
+        data->provider = provider; data->path = g_strdup(colors_path); data->shell = shell; 
         g_signal_connect(monitor, "changed", G_CALLBACK(on_global_theme_changed), data);
     }
-    
     g_object_unref(file);
 }
 
@@ -145,13 +98,12 @@ static void ensure_user_config_exists() {
     g_autofree gchar *user_config_dir_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", NULL);
     g_autofree gchar *user_config_file_path = g_build_filename(user_config_dir_path, "config.json", NULL);
     if (g_file_test(user_config_file_path, G_FILE_TEST_EXISTS)) { return; }
-    g_print("First run: User config not found. Creating default configuration at %s\n", user_config_dir_path);
     g_autoptr(GError) error = NULL;
     g_autoptr(GFile) user_config_dir = g_file_new_for_path(user_config_dir_path);
-    if (!g_file_make_directory_with_parents(user_config_dir, NULL, &error)) { g_warning("Failed to create user config directory: %s", error->message); return; }
+    if (!g_file_make_directory_with_parents(user_config_dir, NULL, &error)) return;
     g_autoptr(GFile) default_config_file = g_file_new_for_path("/usr/local/share/aurora-shell/config.json");
     g_autoptr(GFile) user_config_file = g_file_new_for_path(user_config_file_path);
-    if (!g_file_copy(default_config_file, user_config_file, G_FILE_COPY_NONE, NULL, NULL, NULL, &error)) { g_warning("Failed to copy default config.json: %s", error->message); }
+    g_file_copy(default_config_file, user_config_file, G_FILE_COPY_NONE, NULL, NULL, NULL, &error);
     g_autofree gchar *cp_command = g_strdup_printf("cp -r /usr/local/share/aurora-shell/templates %s", user_config_dir_path);
     g_spawn_command_line_sync(cp_command, NULL, NULL, NULL, NULL);
 }
@@ -160,16 +112,13 @@ static void on_stylesheet_changed(GFileMonitor *monitor, GFile *file, GFile *oth
     (void)monitor; (void)file; (void)other_file;
     if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
         CssReloadData *data = (CssReloadData *)user_data;
-        g_print("CSS file changed, reloading: %s\n", data->path);
         gtk_css_provider_load_from_path(data->provider, data->path);
     }
 }
 
 static void free_css_reload_data(gpointer data, GClosure *closure) {
-    (void)closure;
-    CssReloadData *reload_data = (CssReloadData *)data;
-    g_free(reload_data->path);
-    g_free(reload_data);
+    (void)closure; CssReloadData *reload_data = (CssReloadData *)data;
+    g_free(reload_data->path); g_free(reload_data);
 }
 
 static void hide_widget(WidgetState *state) {
@@ -179,17 +128,24 @@ static void hide_widget(WidgetState *state) {
 }
 
 static void on_mouse_enter(GtkEventControllerMotion *controller, double x, double y, gpointer user_data) {
-    (void)controller; (void)x; (void)y;
-    WidgetState *state = (WidgetState *)user_data;
-    if (state && state->window) {
-        gtk_widget_grab_focus(GTK_WIDGET(state->window));
-    }
+    (void)controller; (void)x; (void)y; WidgetState *state = (WidgetState *)user_data;
+    if (state && state->window) gtk_widget_grab_focus(GTK_WIDGET(state->window));
 }
 
 static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval, guint keycode, GdkModifierType state, gpointer user_data) {
     (void)controller; (void)keycode; (void)state;
+    
     if (keyval == GDK_KEY_Escape) {
-        hide_widget((WidgetState *)user_data);
+        WidgetState *ws = (WidgetState *)user_data;
+        const char *name = json_object_get_string_member_with_default(ws->config_obj, "name", "");
+        
+        // THE REAL FIX: If it is surfacedesk, PROPAGATE the event down to the child plugin!
+        if (g_strcmp0(name, "surfacedesk") == 0) {
+            return GDK_EVENT_PROPAGATE; 
+        }
+        
+        // For all other widgets (launcher, control center, etc.), hide them as normal
+        hide_widget(ws);
         return GDK_EVENT_STOP;
     }
     return GDK_EVENT_PROPAGATE;
@@ -197,44 +153,26 @@ static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval, 
 
 static void on_widget_window_destroyed(GtkWidget *widget, gpointer user_data) {
     WidgetState *state = (WidgetState *)user_data;
-    if (state->window == GTK_WINDOW(widget)) {
-        state->window = NULL;
-    }
+    if (state->window == GTK_WINDOW(widget)) state->window = NULL;
 }
 
 static void free_widget_state(gpointer data) {
     WidgetState *state = (WidgetState *)data;
     if (state->window) {
         g_signal_handlers_disconnect_by_func(state->window, on_widget_window_destroyed, state);
-        
         gtk_widget_set_visible(GTK_WIDGET(state->window), FALSE); 
-        
         gtk_window_destroy(state->window);
         state->window = NULL;
     }
     g_free(state);
 }
 
-
-// ===============================================
-// --- Core Shell Logic ---
-// ===============================================
-
 static void on_config_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
     (void)monitor; (void)file; (void)other_file; (void)user_data;
-    
     if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
-        g_print("\n>>> Configuration changed. PERFORMING HARD RESTART (execv) <<<\n");
-        system("pkill -9 -x auroranotify-ui");
-        system("pkill -9 -x auroranotifyd");
-        system("pkill -9 -x aurora-insight-daemon");
-
-        if (global_argv) {
-            execv("/proc/self/exe", global_argv);
-        } else {
-            execl("/proc/self/exe", "aurora-shell", NULL);
-        }
-        g_critical("FATAL: Failed to re-execute aurora-shell: %s", g_strerror(errno));
+        system("pkill -9 -x auroranotify-ui"); system("pkill -9 -x auroranotifyd"); system("pkill -9 -x aurora-insight-daemon");
+        if (global_argv) execv("/proc/self/exe", global_argv);
+        else execl("/proc/self/exe", "aurora-shell", NULL);
         exit(1);
     }
 }
@@ -248,16 +186,27 @@ static GtkLayerShellLayer parse_layer_string(const gchar *layer_str) {
 
 static void apply_anchor_and_margins(GtkWindow *window, GtkWidget *widget, JsonObject *widget_obj) {
     const char *anchor_str = json_object_get_string_member_with_default(widget_obj, "anchor", "center");
-    if (strstr(anchor_str, "top"))    gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_TOP, TRUE);
-    if (strstr(anchor_str, "bottom")) gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
-    if (strstr(anchor_str, "left"))   gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
-    if (strstr(anchor_str, "right"))  gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
-    if (strstr(anchor_str, "left"))       gtk_widget_set_halign(widget, GTK_ALIGN_START);
-    else if (strstr(anchor_str, "right")) gtk_widget_set_halign(widget, GTK_ALIGN_END);
-    else                                  gtk_widget_set_halign(widget, GTK_ALIGN_CENTER);
-    if (strstr(anchor_str, "top"))        gtk_widget_set_valign(widget, GTK_ALIGN_START);
-    else if (strstr(anchor_str, "bottom"))gtk_widget_set_valign(widget, GTK_ALIGN_END);
-    else                                  gtk_widget_set_valign(widget, GTK_ALIGN_CENTER);
+    
+    // FIX: If "fill" is present, force Layer Shell to anchor to all 4 edges of the monitor
+    if (strstr(anchor_str, "top") || strstr(anchor_str, "fill"))    gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_TOP, TRUE);
+    if (strstr(anchor_str, "bottom") || strstr(anchor_str, "fill")) gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
+    if (strstr(anchor_str, "left") || strstr(anchor_str, "fill"))   gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
+    if (strstr(anchor_str, "right") || strstr(anchor_str, "fill"))  gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
+    
+    if (strstr(anchor_str, "fill")) {
+        gtk_widget_set_halign(widget, GTK_ALIGN_FILL);
+        gtk_widget_set_valign(widget, GTK_ALIGN_FILL);
+        gtk_widget_set_hexpand(widget, TRUE);
+        gtk_widget_set_vexpand(widget, TRUE);
+    } else {
+        if (strstr(anchor_str, "left"))       gtk_widget_set_halign(widget, GTK_ALIGN_START);
+        else if (strstr(anchor_str, "right")) gtk_widget_set_halign(widget, GTK_ALIGN_END);
+        else                                  gtk_widget_set_halign(widget, GTK_ALIGN_CENTER);
+        if (strstr(anchor_str, "top"))        gtk_widget_set_valign(widget, GTK_ALIGN_START);
+        else if (strstr(anchor_str, "bottom"))gtk_widget_set_valign(widget, GTK_ALIGN_END);
+        else                                  gtk_widget_set_valign(widget, GTK_ALIGN_CENTER);
+    }
+    
     if (json_object_has_member(widget_obj, "margin")) {
         JsonObject *margin_obj = json_object_get_object_member(widget_obj, "margin");
         gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, json_object_get_int_member_with_default(margin_obj, "top", 0));
@@ -272,12 +221,8 @@ static void launch_daemon_if_needed(const char *command) {
     char *argv[] = { "/usr/bin/pgrep", "-f", check_pattern, NULL };
     g_autoptr(GError) error = NULL; gint exit_status = 0;
     gboolean success = g_spawn_sync(NULL, (gchar**)argv, NULL, G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, NULL, NULL, &exit_status, &error);
-    if (!success) { g_warning("Failed to run pgrep to check for daemon '%s': %s", command, error->message); }
-    if (success && WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 0) { g_print("Daemon '%s' is already running.\n", command); return; }
-    g_print("Spawning daemon: '%s'\n", command);
-    g_autoptr(GError) spawn_error = NULL;
-    g_spawn_command_line_async(command, &spawn_error);
-    if (spawn_error) { g_warning("Failed to spawn daemon '%s': %s", command, spawn_error->message); }
+    if (success && WIFEXITED(exit_status) && WEXITSTATUS(exit_status) == 0) return;
+    g_spawn_command_line_async(command, NULL);
 }
 
 static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_obj) {
@@ -297,10 +242,10 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     g_object_unref(transparency_provider);
     
     void* handle = dlopen(plugin_path, RTLD_LAZY);
-    if (!handle) { g_warning("Failed to open plugin '%s' for widget '%s': %s", plugin_path, name, dlerror()); gtk_window_destroy(window); return NULL; }
+    if (!handle) { g_warning("Failed to open plugin '%s': %s", plugin_path, dlerror()); gtk_window_destroy(window); return NULL; }
     
     CreateWidgetFunc create_widget = (CreateWidgetFunc)dlsym(handle, "create_widget");
-    if (!create_widget) { g_warning("No 'create_widget' function in plugin '%s' for widget '%s'.", plugin_path, name); dlclose(handle); gtk_window_destroy(window); return NULL; }
+    if (!create_widget) { dlclose(handle); gtk_window_destroy(window); return NULL; }
     
     g_autofree gchar *config_string_to_pass = NULL;
     JsonNode *widget_node = json_node_new(JSON_NODE_OBJECT);
@@ -311,19 +256,15 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     json_node_free(widget_node);
     
     GtkWidget *widget = create_widget(config_string_to_pass);
-    if (!widget) { g_warning("Plugin '%s' for widget '%s' returned a NULL widget.", plugin_path, name); dlclose(handle); gtk_window_destroy(window); return NULL; }
+    if (!widget) { dlclose(handle); gtk_window_destroy(window); return NULL; }
 
-    // --- FIX: GTK 4.22 Surface Lifecycle Bug ---
-    // Do not destroy and recreate the window! We just reuse the existing one.
     gtk_window_set_child(window, widget);
 
     if (g_strcmp0(name, "qscreen") == 0) {
         gtk_window_set_default_size(window, 600, 400);
         gtk_window_set_title(window, "qscreen");
-        is_exclusive = FALSE; 
-        use_layer_shell = FALSE; 
+        is_exclusive = FALSE; use_layer_shell = FALSE; 
     }
-    // --- END FIX ---
     
     if (use_layer_shell) {
         gtk_layer_init_for_window(window);
@@ -332,6 +273,15 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
             gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
         } else {
             gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
+            
+            // =====================================================================
+            // THE FIX: If the widget wants to fill the screen (like SurfaceDesk),
+            // tell Wayland to ignore the Topbar's reserved space and go behind it.
+            // =====================================================================
+            const char *anchor_str = json_object_get_string_member_with_default(item_obj, "anchor", "center");
+            if (strstr(anchor_str, "fill")) {
+                gtk_layer_set_exclusive_zone(window, -1);
+            }
         }
         gtk_layer_set_layer(window, parse_layer_string(json_object_get_string_member_with_default(item_obj, "layer", "top")));
         apply_anchor_and_margins(window, widget, item_obj);
@@ -344,7 +294,6 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
         g_autofree gchar *user_templates_dir = g_build_filename(g_get_user_config_dir(), "aurora-shell", "templates", name, NULL);
         g_autofree gchar *stylesheet_path = g_build_filename(user_templates_dir, stylesheet_name, NULL);
         if (stylesheet_path && g_file_test(stylesheet_path, G_FILE_TEST_IS_REGULAR)) {
-            g_print("Loading stylesheet: %s\n", stylesheet_path);
             GtkCssProvider *provider = gtk_css_provider_new();
             gtk_css_provider_load_from_path(provider, stylesheet_path);
             gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -355,7 +304,7 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
             g_signal_connect_data(monitor, "changed", G_CALLBACK(on_stylesheet_changed), reload_data, (GClosureNotify)free_css_reload_data, 0);
             g_object_set_data_full(G_OBJECT(window), "css-monitor", monitor, g_object_unref);
             g_object_unref(css_file);
-        } else { g_warning("Stylesheet not found for '%s'. Searched at: %s", name, stylesheet_path ? stylesheet_path : "(null)"); }
+        }
     }
     
     WidgetState *state = g_new0(WidgetState, 1);
@@ -379,53 +328,31 @@ static void load_all_widgets(AuroraShell *shell) {
     g_autofree gchar *user_config_file_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "config.json", NULL);
     
     GError *error = NULL;
-    if (!json_parser_load_from_file(parser, user_config_file_path, &error)) {
-        g_warning("Failed to parse config: %s", error->message);
-        g_error_free(error);
-        return;
-    }
+    if (!json_parser_load_from_file(parser, user_config_file_path, &error)) return;
     
     shell->config_root = json_parser_steal_root(parser);
-    if (!shell->config_root || json_node_get_node_type(shell->config_root) != JSON_NODE_ARRAY) {
-        g_warning("Config root is not an array.");
-        return;
-    }
+    if (!shell->config_root || json_node_get_node_type(shell->config_root) != JSON_NODE_ARRAY) return;
 
     JsonArray *config_array = json_node_get_array(shell->config_root);
     guint len = json_array_get_length(config_array);
 
     for (guint i = 0; i < len; i++) {
         JsonNode *element_node = json_array_get_element(config_array, i);
-        if (!element_node || json_node_get_node_type(element_node) != JSON_NODE_OBJECT) {
-            continue; 
-        }
-
+        if (!element_node || json_node_get_node_type(element_node) != JSON_NODE_OBJECT) continue; 
         JsonObject *item_obj = json_node_get_object(element_node);
         if (!item_obj) continue;
 
         const char *type = json_object_get_string_member_with_default(item_obj, "type", "widget");
-        
         if (g_strcmp0(type, "daemon") == 0) {
-            if (json_object_has_member(item_obj, "command")) {
-                launch_daemon_if_needed(json_object_get_string_member(item_obj, "command"));
-            }
+            if (json_object_has_member(item_obj, "command")) launch_daemon_if_needed(json_object_get_string_member(item_obj, "command"));
             continue;
         }
         
         if (g_strcmp0(type, "widget") != 0) continue;
-        
         if (!json_object_has_member(item_obj, "name")) continue;
         const char *name = json_object_get_string_member(item_obj, "name");
         
-        // =================================================================
-        // --- FIX FOR QSCREEN TOGGLE CRASH ---
-        // Do not preload qscreen on boot. It is an on-demand tool.
-        // Loading it on boot creates a hidden dummy window that crashes 
-        // GTK 4.22 when it gets destroyed during the first --toggle.
-        // =================================================================
-        if (g_strcmp0(name, "qscreen") == 0) {
-            continue;
-        }
+        if (g_strcmp0(name, "qscreen") == 0) continue;
         
         WidgetState *state = create_single_widget(shell, item_obj);
         if (state) {
@@ -435,15 +362,10 @@ static void load_all_widgets(AuroraShell *shell) {
     }
 }
 
-
-// ===============================================
-// --- GApplication Signal Handlers ---
-// ===============================================
 static void on_qscreen_pre_capture_finished(GPid pid, gint status, gpointer user_data) {
     g_spawn_close_pid(pid);
     QScreenLaunchData *data = (QScreenLaunchData *)user_data;
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        g_print("qscreen pre-capture successful. Creating window.\n");
         json_object_set_string_member(data->config_obj, "temp_screenshot_path", data->temp_path);
         const char *name = json_object_get_string_member(data->config_obj, "name");
         WidgetState *new_state = create_single_widget(data->shell, data->config_obj);
@@ -451,57 +373,57 @@ static void on_qscreen_pre_capture_finished(GPid pid, gint status, gpointer user
             gtk_window_present(new_state->window);
             g_hash_table_replace(data->shell->widgets, g_strdup(name), new_state);
         }
-    } else {
-        g_warning("qscreen pre-capture command (grim) failed. Aborting.");
-        g_remove(data->temp_path);
-    }
-    g_free(data->temp_path);
-    g_free(data);
+    } else { g_remove(data->temp_path); }
+    g_free(data->temp_path); g_free(data);
 }
 
 static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdline, gpointer user_data) {
     AuroraShell *shell = (AuroraShell *)user_data;
     gchar **argv = g_application_command_line_get_arguments(cmdline, NULL);
+    
     if (argv[1] && g_strcmp0(argv[1], "--toggle") == 0 && argv[2]) {
         const char *widget_name = argv[2];
+
+        // --- THE DEADLOCK FIX ---
+        if (g_strcmp0(widget_name, "surfacedesk") == 0 && argv[3]) {
+            g_autoptr(GError) error = NULL;
+            g_autoptr(GDBusConnection) bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
+            if (bus) {
+                if (g_strcmp0(argv[3], "-w") == 0 || g_strcmp0(argv[3], "--wallpaper") == 0) {
+                    // Note: NO _sync here! 
+                    g_dbus_connection_call(bus, "com.meismeric.SurfaceDesk", "/com/meismeric/SurfaceDesk", "com.meismeric.SurfaceDesk", "ToggleWallpaperMode", NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+                } else if (g_strcmp0(argv[3], "-e") == 0 || g_strcmp0(argv[3], "--edit") == 0) {
+                    // Note: NO _sync here!
+                    g_dbus_connection_call(bus, "com.meismeric.SurfaceDesk", "/com/meismeric/SurfaceDesk", "com.meismeric.SurfaceDesk", "ToggleEditMode", NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+                }
+            }
+            g_strfreev(argv);
+            return 0; 
+        }
+
         JsonArray *config_array = json_node_get_array(shell->config_root);
         JsonObject *item_obj = NULL;
         for (guint i = 0; i < json_array_get_length(config_array); i++) {
             JsonNode *element_node = json_array_get_element(config_array, i);
-            if (!element_node || json_node_get_node_type(element_node) != JSON_NODE_OBJECT) {
-                continue; 
-            }
+            if (!element_node || json_node_get_node_type(element_node) != JSON_NODE_OBJECT) continue; 
             JsonObject *current_obj = json_node_get_object(element_node);
-            
             if (!json_object_has_member(current_obj, "name")) continue;
-            
             const char *name = json_object_get_string_member(current_obj, "name");
-            if (name && g_strcmp0(name, widget_name) == 0) { 
-                item_obj = current_obj; 
-                break; 
-            }
+            if (name && g_strcmp0(name, widget_name) == 0) { item_obj = current_obj; break; }
         }
         if (!item_obj) { g_warning("Command line: No config for '%s' found.", widget_name); }
         else if (g_strcmp0(widget_name, "qscreen") == 0) {
             g_autofree gchar *temp_template = g_build_filename(g_get_tmp_dir(), "aurora-qscreen-XXXXXX.png", NULL);
             gint fd = g_mkstemp(temp_template);
-            if (fd == -1) { g_warning("Failed to create temp file for qscreen"); g_strfreev(argv); return 1; }
+            if (fd == -1) { g_strfreev(argv); return 1; }
             close(fd);
             QScreenLaunchData *launch_data = g_new0(QScreenLaunchData, 1);
-            launch_data->shell = shell;
-            launch_data->config_obj = item_obj;
-            launch_data->temp_path = g_strdup(temp_template);
+            launch_data->shell = shell; launch_data->config_obj = item_obj; launch_data->temp_path = g_strdup(temp_template);
             g_autofree gchar *command = g_strdup_printf("grim \"%s\"", launch_data->temp_path);
-            g_autoptr(GError) error = NULL;
-            GPid child_pid;
-            g_spawn_command_line_async(command, &error);
+            g_autoptr(GError) error = NULL; GPid child_pid;
             g_spawn_async(NULL, (gchar*[]){"/bin/sh", "-c", command, NULL}, NULL, G_SPAWN_DO_NOT_REAP_CHILD, NULL, NULL, &child_pid, &error);
-            if (error) {
-                g_warning("Failed to spawn grim: %s", error->message);
-                g_free(launch_data->temp_path); g_free(launch_data);
-            } else {
-                g_child_watch_add(child_pid, on_qscreen_pre_capture_finished, launch_data);
-            }
+            if (error) { g_free(launch_data->temp_path); g_free(launch_data); } 
+            else { g_child_watch_add(child_pid, on_qscreen_pre_capture_finished, launch_data); }
         }
         else {
             const char *type = json_object_get_string_member_with_default(item_obj, "type", "widget");
@@ -510,8 +432,8 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
                 g_spawn_command_line_async(command_to_run, NULL);
             } else {
                 WidgetState *state = g_hash_table_lookup(shell->widgets, widget_name);
-                if (state) {
-                    if (state->window) {
+                if (state && state->window) {
+                    if (g_strcmp0(widget_name, "surfacedesk") != 0) {
                         gboolean is_visible = gtk_widget_get_visible(GTK_WIDGET(state->window));
                         gtk_widget_set_visible(GTK_WIDGET(state->window), !is_visible);
                         if (!is_visible) {
@@ -526,7 +448,7 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
                             }
                         }
                     }
-                } else { g_warning("No loaded widget named '%s' found.", widget_name); }
+                }
             }
         }
     } else { g_application_activate(app); }
@@ -535,40 +457,27 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
 }
 
 static void activate_handler(GApplication *app, gpointer user_data) {
-    (void)app;
-    AuroraShell *shell = (AuroraShell *)user_data;
+    (void)app; AuroraShell *shell = (AuroraShell *)user_data;
     ensure_user_config_exists();
-    
-    // NEW: Load global theme colors before creating any widgets
     load_global_theme(shell);
-    
     load_all_widgets(shell);
-    
     g_autofree gchar *user_config_file_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "config.json", NULL);
     GFile *config_file = g_file_new_for_path(user_config_file_path);
     shell->config_monitor = g_file_monitor_file(config_file, G_FILE_MONITOR_NONE, NULL, NULL);
-    if (shell->config_monitor) {
-        g_signal_connect(shell->config_monitor, "changed", G_CALLBACK(on_config_changed), shell);
-    }
+    if (shell->config_monitor) g_signal_connect(shell->config_monitor, "changed", G_CALLBACK(on_config_changed), shell);
     g_object_unref(config_file);
 }
 
-
-// ===============================================
-// --- Main Program Entry Point ---
-// ===============================================
-
 int main(int argc, char **argv) {
     global_argv = argv;
-
     AuroraShell shell_data = {0};
     shell_data.widgets = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, free_widget_state);
     shell_data.app = gtk_application_new("com.meismeric.aurora.shell", G_APPLICATION_HANDLES_COMMAND_LINE);
     g_signal_connect(shell_data.app, "activate", G_CALLBACK(activate_handler), &shell_data);
     g_signal_connect(G_APPLICATION(shell_data.app), "command-line", G_CALLBACK(command_line_handler), &shell_data);
     int status = g_application_run(G_APPLICATION(shell_data.app), argc, argv);
-    if (shell_data.config_monitor) { g_object_unref(shell_data.config_monitor); }
-    if (shell_data.config_root) { json_node_free(shell_data.config_root); }
+    if (shell_data.config_monitor) g_object_unref(shell_data.config_monitor);
+    if (shell_data.config_root) json_node_free(shell_data.config_root);
     g_hash_table_destroy(shell_data.widgets);
     g_object_unref(shell_data.app);
     return status;

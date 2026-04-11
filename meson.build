@@ -12,6 +12,7 @@ project('aurora-shell', 'c',
 subdir('src/aurora-shell')
 subdir('widgets')
 subdir('daemons')
+subdir('surfacedesk') # <-- Added here
 
 # Install the templates directory
 install_subdir(
@@ -27,18 +28,10 @@ install_data(
   install_mode: 'rw-r--r--'
 )
 
-install_data(
-  'themer/wallpaper.sh',
-  'themer/toggle-selector.sh',   
-  'themer/lighten_color.py',       
-  install_dir: get_option('bindir'), 
-  install_mode: 'rwxr-xr-x'          
-)
-
 # Install the MPRIS resetter daemon script to the binary directory
 install_data(
   'daemons/mpris-resetter/mpris-resetter.sh',
   install_dir: get_option('bindir'),
   rename: 'aurora-mpris-resetter', # Rename it for a clean command name
-  install_mode: 'rwxr-xr-x'         # Make it executable
+  install_mode: 'rwxr-xr-x'        # Make it executable
 )
