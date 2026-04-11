@@ -42,33 +42,70 @@
           {
              "name": "systray" 
           },
-          {
-            "type" : "popover",
-            "symbol" : "",
-            "name" : "popover-module",
-            "items" : [
-              {
-                "label" : "  MPRIS Player",
-                "glyph" : "",
-                "on-click" : "aurora-shell --toggle mpris-player"
-              },
-              {
-                "label" : "  Insight",
-                "glyph" : "",
-                "on-click" : "aurora-shell --toggle insight"
-              },
-              {
-                "label" : " Cheatsheet",
-                "glyph" : "",
-                "on-click" : "aurora-shell --toggle cheatsheet"
-              },
-              {
-                "label" : " Thinkfan",
-                "glyph" : "",
-                "on-click" : "aurora-shell --toggle thinkfan"
-              }
-            ]
-          }
+     {
+  "type": "popover",
+  "symbol": "",
+  "name": "popover-module",
+  "items": [
+    {
+      "label": "Widgets",
+      "glyph": "",
+      "items":[
+        {
+          "label": "MPRIS Player",
+          "glyph": "",
+          "on-click": "aurora-shell --toggle mpris-player"
+        },
+        {
+          "label": "Insight",
+          "glyph": "",
+          "on-click": "aurora-shell --toggle insight"
+        },
+        {
+          "label": "Cheatsheet",
+          "glyph": "",
+          "on-click": "aurora-shell --toggle cheatsheet"
+        },
+        {
+          "label": "Thinkfan",
+          "glyph": "",
+          "on-click": "aurora-shell --toggle thinkfan"
+        }
+      ]
+    },
+    {
+      "label": "Power Options",
+      "glyph": "",
+      "items":[
+        {
+          "label": "Lock Screen",
+          "glyph": "",
+          "on-click": "hyprlock"
+        },
+        {
+          "label": "Log Out",
+          "glyph": "󰍃",
+          "on-click": "hyprctl dispatch exit"
+        },
+        {
+          "label": "Sleep",
+          "glyph": "󰒲",
+          "on-click": "systemctl suspend"
+        },
+        {
+          "label": "Reboot",
+          "glyph": "",
+          "on-click": "systemctl reboot"
+        },
+        {
+          "label": "Shut Down",
+          "glyph": "",
+          "on-click": "systemctl poweroff"
+        }
+      ]
+    }
+  ]
+}
         ]
       }
     },
@@ -149,21 +186,6 @@
     "anchor" : "center",
     "visible_on_start" : false,
     "interactive" : true
-  },
-  {
-    "name" : "cachy-selector",
-    "type" : "command",
-    "command" : "toggle-selector.sh",
-    "config" : {
-      "stylesheet" : "cachy-selector.css",
-      "size" : {
-        "width" : 810,
-        "height" : 210
-      },
-      "margin" : {
-        "top" : 50
-      }
-    }
   },
   {
     "type" : "themer-config",
@@ -253,5 +275,15 @@
     "interactive" : true,
     "visible_on_start" : false,
     "exclusive" : false
+},
+{
+  "name": "surfacedesk",
+  "plugin": "/usr/local/lib/aurora-shell/widgets/surfacedesk.so",
+  "layer_shell": true,
+  "layer": "background",
+  "anchor": "fill",
+  "exclusive": false,
+  "interactive": true,
+  "visible_on_start": true
 }
 ]
