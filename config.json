@@ -40,6 +40,9 @@
             "on-click-right" : "aurora-shell --toggle organizer"
           },
           {
+             "name": "systray" 
+          },
+          {
             "type" : "popover",
             "symbol" : "",
             "name" : "popover-module",

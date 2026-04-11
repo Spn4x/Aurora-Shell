@@ -53,7 +53,8 @@
 .aurora-topbar-widget .audio-module .album-art-bg {
     border-radius: 8px;
     filter: blur(1px);
-    opacity: 0.6;
+    opacity: 0.7;
+    box-shadow: none;
 }
 
 .aurora-topbar-widget .audio-module .song-title-overlay {
@@ -62,6 +63,7 @@
     color: white;
     background: none;
     padding: 0 8px;
+    box-shadow: none;
 }
 
 /* --- Zen Module --- */
@@ -247,4 +249,17 @@ popover .flat:hover {
 
 .aurora-topbar-widget .zen-module .glyph-label {
     font-size: 1.1em;
+}
+
+.aurora-topbar-widget .systray-module {
+    margin-right: 4px;
+    padding: 0 8px;
+    min-width: 50px;
+    background: @gnome-highlight;
+    border-radius: 8px;
+}
+.aurora-topbar-widget .systray-item {
+    padding: 0 6px;
+    min-width: 24px;
+    min-height: 24px;
 }

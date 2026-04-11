@@ -2,18 +2,15 @@
 /* ---                  GLOBAL DEFINITIONS & STYLES                --- */
 /* =================================================================== */
 
-/* --- Wallust Placeholders --- */
 @define-color background @aurora_bg;
 @define-color foreground @aurora_fg;
 @define-color accent     @aurora_accent;
 @define-color surface    @aurora_surface;
 
-/* --- Static Colors --- */
 @define-color gnome-bg #28282C;
 @define-color gnome-highlight #3E3E41;
 @define-color destructive #e06c75;
 
-/* This applies to the layer shell window itself */
 window.background {
   background: transparent;
 }
@@ -46,7 +43,6 @@ window.background {
 .body { font-size: 0.9rem; color: #8e8e93; }
 .icon { font-size: 24px; }
 
-
 /* =================================================================== */
 /* ---          ORGANIZER WIDGET (NOTIFICATION CENTER)             --- */
 /* =================================================================== */
@@ -58,7 +54,6 @@ window.background {
   border-radius: 16px;
   padding: 0;
   margin: 10px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
 }
 
 #organizer-widget .notification-pane
@@ -113,32 +108,6 @@ window.background {
   border-top: 1px solid @gnome-highlight;
   color: #f2f2f2;
 }
-
-#organizer-widget .clear-all-button
-{
-  background-color: @gnome-highlight;
-  border: none;
-  border-radius: 8px;
-  color: #f2f2f2;
-  padding: 4px 16px;
-}
-
-#organizer-widget .clear-all-button:hover
-{
-  background-color: alpha(#f2f2f2, 0.1);
-}
-
-#organizer-widget switch.dnd-switch slider
-{
-  background-color: @gnome-highlight;
-  border-radius: 99px;
-}
-
-#organizer-widget switch.dnd-switch:checked slider
-{
-  background-color: @accent;
-}
-
 
 /* =================================================================== */
 /* ---        FULL CALENDAR (RIGHT PANE) STYLES                    --- */

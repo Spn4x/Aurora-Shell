@@ -4,7 +4,6 @@
 ###### *Song: Pressure Bomb?!?! - Jhariah*
 ---
 
-### An arch user's descent into AI exploitation... And apparently Desktop Shell Development.
 
 A fully automated and cohesive desktop experience built on Hyprland, made possible using C/GTK4 - And AI exploitation.
 
