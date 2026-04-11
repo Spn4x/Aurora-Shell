@@ -7,7 +7,8 @@
 #include "modules/audio.h"
 #include "modules/zen.h"
 #include "modules/clock.h" 
-#include "modules/popover_anim.h" // <-- Include the shared animation helper
+#include "modules/popover_anim.h" 
+#include "modules/systray.h"
 
 typedef struct {
     int placeholder;
@@ -139,8 +140,9 @@ static void load_module(JsonObject *module_config, TopbarState *state, GtkBox *t
 
         if (g_strcmp0(module_name, "clock") == 0) {
             module_widget = create_clock_module();
-        } 
-        else if (g_strcmp0(module_name, "workspaces") == 0) {
+        } else if (g_strcmp0(module_name, "systray") == 0) {
+            module_widget = create_systray_module();  // <--- THE NEW SYSTRAY MODULE
+        } else if (g_strcmp0(module_name, "workspaces") == 0) {
             module_widget = create_workspaces_module();
         } else if (g_strcmp0(module_name, "sysinfo") == 0) {
             module_widget = create_sysinfo_module();

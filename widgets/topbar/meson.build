@@ -9,6 +9,7 @@ sources = [
   'modules/zen.c',
   'modules/clock.c',
    'modules/popover_anim.c',
+   'modules/systray.c', 
 ]
 
 dependencies = [
