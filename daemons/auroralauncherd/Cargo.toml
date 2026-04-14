@@ -1,0 +1,12 @@
+[package]
+name = "auroralauncherd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zbus = { version = "3.14", features = ["tokio"] }
+tokio = { version = "1.28", features = ["full"] }
+evalexpr = "11.3"
+fuzzy-matcher = "0.3"
+gio = "0.18"
+glib = "0.18"
