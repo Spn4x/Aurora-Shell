@@ -139,12 +139,10 @@ static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval, 
         WidgetState *ws = (WidgetState *)user_data;
         const char *name = json_object_get_string_member_with_default(ws->config_obj, "name", "");
         
-        // THE REAL FIX: If it is surfacedesk, PROPAGATE the event down to the child plugin!
         if (g_strcmp0(name, "surfacedesk") == 0) {
             return GDK_EVENT_PROPAGATE; 
         }
         
-        // For all other widgets (launcher, control center, etc.), hide them as normal
         hide_widget(ws);
         return GDK_EVENT_STOP;
     }
@@ -170,7 +168,12 @@ static void free_widget_state(gpointer data) {
 static void on_config_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
     (void)monitor; (void)file; (void)other_file; (void)user_data;
     if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
-        system("pkill -9 -x auroranotify-ui"); system("pkill -9 -x auroranotifyd"); system("pkill -9 -x aurora-insight-daemon");
+        // Graceful termination for background daemons
+        system("pkill -15 -x auroranotify-ui"); 
+        system("pkill -15 -x auroranotifyd"); 
+        system("pkill -15 -x aurora-insight-daemon");
+        system("pkill -15 -x auroralauncherd"); 
+        
         if (global_argv) execv("/proc/self/exe", global_argv);
         else execl("/proc/self/exe", "aurora-shell", NULL);
         exit(1);
@@ -187,7 +190,6 @@ static GtkLayerShellLayer parse_layer_string(const gchar *layer_str) {
 static void apply_anchor_and_margins(GtkWindow *window, GtkWidget *widget, JsonObject *widget_obj) {
     const char *anchor_str = json_object_get_string_member_with_default(widget_obj, "anchor", "center");
     
-    // FIX: If "fill" is present, force Layer Shell to anchor to all 4 edges of the monitor
     if (strstr(anchor_str, "top") || strstr(anchor_str, "fill"))    gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_TOP, TRUE);
     if (strstr(anchor_str, "bottom") || strstr(anchor_str, "fill")) gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
     if (strstr(anchor_str, "left") || strstr(anchor_str, "fill"))   gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
@@ -274,10 +276,6 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
         } else {
             gtk_layer_set_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
             
-            // =====================================================================
-            // THE FIX: If the widget wants to fill the screen (like SurfaceDesk),
-            // tell Wayland to ignore the Topbar's reserved space and go behind it.
-            // =====================================================================
             const char *anchor_str = json_object_get_string_member_with_default(item_obj, "anchor", "center");
             if (strstr(anchor_str, "fill")) {
                 gtk_layer_set_exclusive_zone(window, -1);
@@ -384,16 +382,13 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
     if (argv[1] && g_strcmp0(argv[1], "--toggle") == 0 && argv[2]) {
         const char *widget_name = argv[2];
 
-        // --- THE DEADLOCK FIX ---
         if (g_strcmp0(widget_name, "surfacedesk") == 0 && argv[3]) {
             g_autoptr(GError) error = NULL;
             g_autoptr(GDBusConnection) bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
             if (bus) {
                 if (g_strcmp0(argv[3], "-w") == 0 || g_strcmp0(argv[3], "--wallpaper") == 0) {
-                    // Note: NO _sync here! 
                     g_dbus_connection_call(bus, "com.meismeric.SurfaceDesk", "/com/meismeric/SurfaceDesk", "com.meismeric.SurfaceDesk", "ToggleWallpaperMode", NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
                 } else if (g_strcmp0(argv[3], "-e") == 0 || g_strcmp0(argv[3], "--edit") == 0) {
-                    // Note: NO _sync here!
                     g_dbus_connection_call(bus, "com.meismeric.SurfaceDesk", "/com/meismeric/SurfaceDesk", "com.meismeric.SurfaceDesk", "ToggleEditMode", NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
                 }
             }
@@ -458,9 +453,11 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
 
 static void activate_handler(GApplication *app, gpointer user_data) {
     (void)app; AuroraShell *shell = (AuroraShell *)user_data;
+
     ensure_user_config_exists();
     load_global_theme(shell);
     load_all_widgets(shell);
+    
     g_autofree gchar *user_config_file_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "config.json", NULL);
     GFile *config_file = g_file_new_for_path(user_config_file_path);
     shell->config_monitor = g_file_monitor_file(config_file, G_FILE_MONITOR_NONE, NULL, NULL);

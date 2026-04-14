@@ -14,12 +14,14 @@
 typedef enum {
     AURORA_RESULT_APP = 0,
     AURORA_RESULT_CALCULATOR = 1,
-    AURORA_RESULT_COMMAND = 2
+    AURORA_RESULT_COMMAND = 2,
+    AURORA_RESULT_CLIPBOARD = 3
 } AuroraResultType;
 
 typedef enum {
     MODE_APPS = 0,
-    MODE_COMMAND = 1
+    MODE_COMMAND = 1,
+    MODE_CLIPBOARD = 2
 } LauncherMode;
 
 #define AURORA_TYPE_RESULT_OBJECT (aurora_result_object_get_type())
@@ -77,7 +79,6 @@ typedef struct {
     
     LauncherMode current_mode;
 
-    // DBus components
     GDBusProxy *search_proxy;
     GCancellable *cancellable;
 } LauncherState;
@@ -101,9 +102,12 @@ static void update_launcher_mode_ui(LauncherState *state) {
     if (state->current_mode == MODE_APPS) {
         gtk_entry_set_placeholder_text(GTK_ENTRY(state->entry), "Search Apps or Math...");
         gtk_entry_set_icon_from_icon_name(GTK_ENTRY(state->entry), GTK_ENTRY_ICON_PRIMARY, "system-search-symbolic");
-    } else {
+    } else if (state->current_mode == MODE_COMMAND) {
         gtk_entry_set_placeholder_text(GTK_ENTRY(state->entry), "Run Command...");
         gtk_entry_set_icon_from_icon_name(GTK_ENTRY(state->entry), GTK_ENTRY_ICON_PRIMARY, "utilities-terminal-symbolic");
+    } else if (state->current_mode == MODE_CLIPBOARD) {
+        gtk_entry_set_placeholder_text(GTK_ENTRY(state->entry), "Search Clipboard...");
+        gtk_entry_set_icon_from_icon_name(GTK_ENTRY(state->entry), GTK_ENTRY_ICON_PRIMARY, "edit-paste-symbolic");
     }
 }
 
@@ -129,17 +133,8 @@ static void on_query_ready(GObject *source_object, GAsyncResult *res, gpointer u
     GError *error = NULL;
     
     GVariant *result = g_dbus_proxy_call_finish(G_DBUS_PROXY(source_object), res, &error);
-    
-    if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-        g_error_free(error);
-        return;
-    }
-    
-    if (error) {
-        g_warning("Search D-Bus call failed: %s", error->message);
-        g_error_free(error);
-        return;
-    }
+    if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) { g_error_free(error); return; }
+    if (error) { g_warning("Search D-Bus call failed: %s", error->message); g_error_free(error); return; }
 
     g_list_store_remove_all(state->results_store);
 
@@ -147,14 +142,9 @@ static void on_query_ready(GObject *source_object, GAsyncResult *res, gpointer u
         GVariantIter *iter;
         g_variant_get(result, "(a(ussssi))", &iter);
         
-        guint32 type;
-        gchar *title, *desc, *icon, *payload;
-        gint32 score;
-        
+        guint32 type; gchar *title, *desc, *icon, *payload; gint32 score;
         while (g_variant_iter_loop(iter, "(ussssi)", &type, &title, &desc, &icon, &payload, &score)) {
-            AuroraResultObject *obj = aurora_result_object_new(
-                (AuroraResultType)type, title, desc, icon, payload, score
-            );
+            AuroraResultObject *obj = aurora_result_object_new((AuroraResultType)type, title, desc, icon, payload, score);
             g_list_store_append(state->results_store, obj);
             g_object_unref(obj);
         }
@@ -163,16 +153,11 @@ static void on_query_ready(GObject *source_object, GAsyncResult *res, gpointer u
     }
 
     guint n_items = g_list_model_get_n_items(G_LIST_MODEL(state->results_store));
-    
     if (n_items > 0) {
         gtk_revealer_set_reveal_child(GTK_REVEALER(state->results_revealer), TRUE);
         int visible_rows = (n_items > MAX_VISIBLE_ROWS) ? MAX_VISIBLE_ROWS : n_items;
-        int target_height = visible_rows * ROW_HEIGHT;
-        gtk_scrolled_window_set_min_content_height(state->scrolled_window, target_height);
-        
-        GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(state->scrolled_window);
-        gtk_adjustment_set_value(adj, 0);
-
+        gtk_scrolled_window_set_min_content_height(state->scrolled_window, visible_rows * ROW_HEIGHT);
+        gtk_adjustment_set_value(gtk_scrolled_window_get_vadjustment(state->scrolled_window), 0);
         GtkListBoxRow *first_row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(state->listbox), 0);
         if (first_row) gtk_list_box_select_row(GTK_LIST_BOX(state->listbox), first_row);
     } else {
@@ -185,50 +170,42 @@ static void on_entry_changed(GtkEditable *entry, gpointer user_data) {
     const gchar *raw_text = gtk_editable_get_text(entry);
 
     if (!raw_text || strlen(raw_text) == 0) {
-        if (state->cancellable) {
-            g_cancellable_cancel(state->cancellable);
+        if (state->current_mode != MODE_CLIPBOARD) {
+            if (state->cancellable) g_cancellable_cancel(state->cancellable);
+            g_list_store_remove_all(state->results_store);
+            gtk_revealer_set_reveal_child(GTK_REVEALER(state->results_revealer), FALSE);
+            return;
         }
-        g_list_store_remove_all(state->results_store);
-        gtk_revealer_set_reveal_child(GTK_REVEALER(state->results_revealer), FALSE);
-        return;
     }
 
     if (!state->search_proxy) return;
 
-    if (state->cancellable) {
-        g_cancellable_cancel(state->cancellable);
-        g_object_unref(state->cancellable);
-    }
+    if (state->cancellable) { g_cancellable_cancel(state->cancellable); g_object_unref(state->cancellable); }
     state->cancellable = g_cancellable_new();
 
-    // Silently prepend "> " if we are in command mode
+    const char *method = "Query";
     g_autofree gchar *search_text = NULL;
+
     if (state->current_mode == MODE_COMMAND) {
         search_text = g_strdup_printf("> %s", raw_text);
+    } else if (state->current_mode == MODE_CLIPBOARD) {
+        method = "QueryClipboard";
+        search_text = g_strdup(raw_text);
     } else {
         search_text = g_strdup(raw_text);
     }
 
     g_dbus_proxy_call(
-        state->search_proxy,
-        "Query",
-        g_variant_new("(s)", search_text),
-        G_DBUS_CALL_FLAGS_NONE,
-        -1,
-        state->cancellable,
-        on_query_ready,
-        state
+        state->search_proxy, method, g_variant_new("(s)", search_text),
+        G_DBUS_CALL_FLAGS_NONE, -1, state->cancellable, on_query_ready, state
     );
 }
-
 
 static void on_result_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
     (void)user_data;
     if (!row) return;
-    guint index = gtk_list_box_row_get_index(row);
-    GtkWidget *parent_box = gtk_widget_get_ancestor(GTK_WIDGET(box), GTK_TYPE_BOX);
-    LauncherState *state = (LauncherState*)g_object_get_data(G_OBJECT(parent_box), "launcher-state");
-    AuroraResultObject *result = g_list_model_get_item(G_LIST_MODEL(state->results_store), index);
+    LauncherState *state = (LauncherState*)g_object_get_data(G_OBJECT(gtk_widget_get_ancestor(GTK_WIDGET(box), GTK_TYPE_BOX)), "launcher-state");
+    AuroraResultObject *result = g_list_model_get_item(G_LIST_MODEL(state->results_store), gtk_list_box_row_get_index(row));
     if (!result) return;
 
     switch (result->type) {
@@ -236,19 +213,11 @@ static void on_result_activated(GtkListBox *box, GtkListBoxRow *row, gpointer us
             GList *all_apps = g_app_info_get_all();
             GAppInfo *target_app = NULL;
             for (GList *l = all_apps; l != NULL; l = l->next) {
-                GAppInfo *info = G_APP_INFO(l->data);
-                const char *id = g_app_info_get_id(info);
-                if (id && g_strcmp0(id, result->payload) == 0) {
-                    target_app = info;
-                    break;
-                }
+                if (g_strcmp0(g_app_info_get_id(G_APP_INFO(l->data)), result->payload) == 0) { target_app = G_APP_INFO(l->data); break; }
             }
             if (target_app) {
-                GError *error = NULL;
-                if (!g_app_info_launch(target_app, NULL, NULL, &error)) {
-                    g_warning("Failed to launch app '%s': %s", result->payload, error->message);
-                    g_error_free(error);
-                }
+                GError *err = NULL;
+                if (!g_app_info_launch(target_app, NULL, NULL, &err)) { g_warning("App launch failed: %s", err->message); g_error_free(err); }
             }
             g_list_free_full(all_apps, g_object_unref);
             break;
@@ -257,19 +226,17 @@ static void on_result_activated(GtkListBox *box, GtkListBoxRow *row, gpointer us
             gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(box)), result->payload);
             break;
         case AURORA_RESULT_COMMAND: {
-            // THE FIX: Execute directly via the system shell instead of forcing 'foot'
-            GError *error = NULL;
-            if (!g_spawn_command_line_async(result->payload, &error)) {
-                g_warning("Failed to execute command '%s': %s", result->payload, error->message);
-                g_error_free(error);
-            }
+            GError *err = NULL;
+            if (!g_spawn_command_line_async(result->payload, &err)) { g_warning("Command failed: %s", err->message); g_error_free(err); }
+            break;
+        }
+        case AURORA_RESULT_CLIPBOARD: {
+            g_dbus_proxy_call(state->search_proxy, "SetClipboardItem", g_variant_new("(s)", result->payload), G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
             break;
         }
         default: break;
     }
     g_object_unref(result);
-    
-    // Hide the launcher window after an action is taken
     GtkWidget *toplevel = gtk_widget_get_ancestor(GTK_WIDGET(row), GTK_TYPE_WINDOW);
     if (toplevel) gtk_widget_set_visible(toplevel, FALSE);
 }
@@ -279,6 +246,7 @@ static void on_widget_mapped(GtkWidget *widget, gpointer user_data) {
     LauncherState *state = (LauncherState *)user_data;
     gtk_editable_set_text(GTK_EDITABLE(state->entry), "");
     gtk_widget_grab_focus(state->entry);
+    if (state->current_mode == MODE_CLIPBOARD) on_entry_changed(GTK_EDITABLE(state->entry), state);
 }
 
 static void on_entry_activated(GtkEntry *entry, gpointer user_data) {
@@ -292,16 +260,31 @@ static gboolean on_key_pressed_nav(GtkEventControllerKey *c, guint keyval, guint
     (void)c; (void)kc; (void)s;
     LauncherState *state = (LauncherState *)user_data;
     
-    // --- MODE SWITCHING (TAB) ---
     if (keyval == GDK_KEY_Tab) {
-        state->current_mode = (state->current_mode == MODE_APPS) ? MODE_COMMAND : MODE_APPS;
+        if (state->current_mode == MODE_APPS) state->current_mode = MODE_COMMAND;
+        else if (state->current_mode == MODE_COMMAND) state->current_mode = MODE_CLIPBOARD;
+        else state->current_mode = MODE_APPS;
+        
         update_launcher_mode_ui(state);
-        // Re-trigger search to update results instantly based on new mode
+        gtk_editable_set_text(GTK_EDITABLE(state->entry), ""); 
         on_entry_changed(GTK_EDITABLE(state->entry), state);
         return GDK_EVENT_STOP;
     }
     
-    // --- VERTICAL NAVIGATION ---
+    if (keyval == GDK_KEY_Delete && state->current_mode == MODE_CLIPBOARD) {
+        GtkListBoxRow *row = gtk_list_box_get_selected_row(GTK_LIST_BOX(state->listbox));
+        if (row) {
+            guint index = gtk_list_box_row_get_index(row);
+            AuroraResultObject *res = g_list_model_get_item(G_LIST_MODEL(state->results_store), index);
+            if (res) {
+                g_dbus_proxy_call(state->search_proxy, "DeleteClipboardItem", g_variant_new("(s)", res->payload), G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+                g_object_unref(res);
+                on_entry_changed(GTK_EDITABLE(state->entry), state);
+            }
+        }
+        return GDK_EVENT_STOP;
+    }
+    
     if (keyval == GDK_KEY_Up || keyval == GDK_KEY_Down) {
         guint n = g_list_model_get_n_items(G_LIST_MODEL(state->results_store));
         if (n == 0) return GDK_EVENT_PROPAGATE;
@@ -328,11 +311,14 @@ static GtkWidget* create_result_row_ui(AuroraResultObject *result) {
 
     GtkWidget *icon = NULL;
     if (result->icon_name && g_path_is_absolute(result->icon_name)) {
-        icon = gtk_image_new_from_file(result->icon_name);
+        icon = gtk_picture_new_for_filename(result->icon_name);
+        gtk_picture_set_content_fit(GTK_PICTURE(icon), GTK_CONTENT_FIT_COVER);
+        
+        gtk_widget_add_css_class(icon, "result-icon-pic");
     } else {
         icon = gtk_image_new_from_icon_name(result->icon_name);
     }
-    gtk_image_set_pixel_size(GTK_IMAGE(icon), 32);
+    gtk_widget_set_size_request(icon, 36, 36);
     gtk_box_append(GTK_BOX(main_box), icon);
 
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
@@ -382,6 +368,9 @@ static void on_dbus_proxy_ready(GObject *source_object, GAsyncResult *res, gpoin
     if (error) {
         g_warning("Launcher failed to connect to Search Daemon: %s", error->message);
         g_error_free(error);
+    } else if (state->search_proxy) {
+        // Clear the clipboard history when the shell initially builds/maps the launcher on startup
+        g_dbus_proxy_call(state->search_proxy, "ClearClipboard", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
     }
 }
 
@@ -390,19 +379,12 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     
     LauncherState *state = g_new0(LauncherState, 1);
     state->results_store = g_list_store_new(AURORA_TYPE_RESULT_OBJECT);
-    state->current_mode = MODE_APPS; // Set initial mode
+    state->current_mode = MODE_APPS; 
     
-    // Connect to the DBus daemon asynchronously
     g_dbus_proxy_new_for_bus(
-        G_BUS_TYPE_SESSION,
-        G_DBUS_PROXY_FLAGS_NONE,
-        NULL,
-        "com.meismeric.auroralauncher",
-        "/com/meismeric/auroralauncher",
-        "com.meismeric.auroralauncher.Search",
-        NULL,
-        on_dbus_proxy_ready,
-        state
+        G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL,
+        "com.meismeric.auroralauncher", "/com/meismeric/auroralauncher", "com.meismeric.auroralauncher.Search",
+        NULL, on_dbus_proxy_ready, state
     );
     
     state->main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
@@ -415,15 +397,14 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     const char *css = 
         ".launcher-scroll scrollbar { opacity: 0; min-width: 0px; min-height: 0px; }"
         ".launcher-scroll scrollbar slider { min-width: 0px; min-height: 0px; }"
-        ".launcher-scroll contents { border: none; }";
+        ".launcher-scroll contents { border: none; }"
+        ".result-icon-pic { border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); }";
     gtk_css_provider_load_from_string(css_provider, css);
     gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(css_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css_provider);
 
     state->entry = gtk_entry_new();
     gtk_widget_add_css_class(state->entry, "launcher-entry");
-    
-    // Apply the initial UI (placeholder & icon)
     update_launcher_mode_ui(state);
     
     state->listbox = gtk_list_box_new();
@@ -453,10 +434,7 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     g_signal_connect(state->listbox, "row-activated", G_CALLBACK(on_result_activated), state);
 
     GtkEventController *nav = gtk_event_controller_key_new();
-    
-    // Set to CAPTURE phase so GTK's default focus logic doesn't eat the Tab key
     gtk_event_controller_set_propagation_phase(nav, GTK_PHASE_CAPTURE);
-    
     g_signal_connect(nav, "key-pressed", G_CALLBACK(on_key_pressed_nav), state);
     gtk_widget_add_controller(state->main_box, nav);
 
