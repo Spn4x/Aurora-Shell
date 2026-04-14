@@ -4,8 +4,11 @@
 #include <graphene.h>
 #include "launcher.h"
 
-#define ROW_HEIGHT 54
+// Bumped row height slightly for better spacing
+#define ROW_HEIGHT 58 
 #define MAX_VISIBLE_ROWS 7
+// Set a clear icon size
+#define ICON_SIZE 44
 
 // ===================================================================
 //  Type Definitions
@@ -304,24 +307,29 @@ static gboolean on_key_pressed_nav(GtkEventControllerKey *c, guint keyval, guint
 // ===================================================================
 
 static GtkWidget* create_result_row_ui(AuroraResultObject *result) {
-    GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-    gtk_widget_set_margin_start(main_box, 8);
-    gtk_widget_set_margin_end(main_box, 8);
-    gtk_widget_set_size_request(main_box, -1, 42); 
+    GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
+    gtk_widget_set_margin_start(main_box, 10);
+    gtk_widget_set_margin_end(main_box, 10);
+    // Row should match defined constant
+    gtk_widget_set_size_request(main_box, -1, ROW_HEIGHT - 8); 
 
     GtkWidget *icon = NULL;
     if (result->icon_name && g_path_is_absolute(result->icon_name)) {
         icon = gtk_picture_new_for_filename(result->icon_name);
         gtk_picture_set_content_fit(GTK_PICTURE(icon), GTK_CONTENT_FIT_COVER);
-        
         gtk_widget_add_css_class(icon, "result-icon-pic");
     } else {
         icon = gtk_image_new_from_icon_name(result->icon_name);
+        // Force the icon to actually scale to a larger pixel size
+        gtk_image_set_pixel_size(GTK_IMAGE(icon), ICON_SIZE);
     }
-    gtk_widget_set_size_request(icon, 36, 36);
+    
+    // Ensure the container for the icon respects the size
+    gtk_widget_set_size_request(icon, ICON_SIZE, ICON_SIZE);
+    gtk_widget_set_valign(icon, GTK_ALIGN_CENTER);
     gtk_box_append(GTK_BOX(main_box), icon);
 
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_valign(vbox, GTK_ALIGN_CENTER);
 
     GtkWidget *name_label = gtk_label_new(result->name);
@@ -352,8 +360,6 @@ static GtkWidget* bind_model_create_widget_func(gpointer item, gpointer user_dat
     (void)user_data;
     GtkListBoxRow *row = GTK_LIST_BOX_ROW(gtk_list_box_row_new());
     gtk_widget_add_css_class(GTK_WIDGET(row), "app-row");
-    gtk_widget_set_margin_top(GTK_WIDGET(row), 4);
-    gtk_widget_set_margin_bottom(GTK_WIDGET(row), 4);
     
     GtkWidget *content = create_result_row_ui(AURORA_RESULT_OBJECT(item));
     gtk_list_box_row_set_child(row, content);
