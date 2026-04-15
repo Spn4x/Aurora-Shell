@@ -4,7 +4,7 @@
 #include <gio/gio.h>
 #include <gdk/gdkkeysyms.h>
 #include "calendar_widget.h"
-#include "mpris_widget.h" // Added
+#include "mpris_widget.h"
 
 const char* CENTER_BUS_NAME = "com.meismeric.auranotify.Center";
 const char* CENTER_OBJECT_PATH = "/com/meismeric/auranotify/Center";
@@ -19,25 +19,23 @@ typedef struct {
     guint owner_id;
     GDBusConnection *dbus_connection;
     guint dnd_signal_id;
+    guint name_watcher_id; // Added for safe D-Bus loading
     GtkWidget *dnd_switch;
 } OrganizerState;
 
-// Data attached to each Group Widget
 typedef struct {
     GtkWidget *header_btn;
     GtkWidget *count_label;
     GtkWidget *chevron_icon;
-    GtkWidget *latest_box;      // Holds the 1 newest card
-    GtkWidget *history_revealer; // Animates the older cards
-    GtkWidget *history_box;     // Holds cards 2..N
+    GtkWidget *latest_box;      
+    GtkWidget *history_revealer; 
+    GtkWidget *history_box;     
     char *app_name;
 } GroupWidgets;
 
 static void update_placeholder_visibility(OrganizerState *state);
 static void on_close_clicked(GtkButton *button, gpointer user_data);
 static void dbus_method_call_handler(GDBusConnection *c, const gchar *s, const gchar *o, const gchar *i, const gchar *m, GVariant *p, GDBusMethodInvocation *inv, gpointer user_data);
-
-// --- Group Logic ---
 
 static void update_group_header(GroupWidgets *g) {
     int latest_count = 0;
@@ -48,11 +46,9 @@ static void update_group_header(GroupWidgets *g) {
 
     int total = latest_count + history_count;
     
-    // Update Count Label
     g_autofree gchar *text = g_strdup_printf("%d", total);
     gtk_label_set_text(GTK_LABEL(g->count_label), text);
     
-    // Only show chevron and enable toggle if we have history
     if (history_count > 0) {
         gtk_widget_set_visible(g->chevron_icon, TRUE);
         gtk_widget_set_visible(g->count_label, TRUE);
@@ -192,7 +188,6 @@ static GtkWidget* create_app_group(const gchar *app_name, const gchar *icon_name
     gtk_widget_set_margin_bottom(group_wrapper, 12);
     g_object_set_data_full(G_OBJECT(group_wrapper), "group-data", g, destroy_group_data);
 
-    // --- Header ---
     g->header_btn = gtk_button_new();
     gtk_widget_add_css_class(g->header_btn, "flat");
     gtk_widget_set_halign(g->header_btn, GTK_ALIGN_FILL);
@@ -224,16 +219,13 @@ static GtkWidget* create_app_group(const gchar *app_name, const gchar *icon_name
     gtk_button_set_child(GTK_BUTTON(g->header_btn), header_box);
     g_signal_connect(g->header_btn, "clicked", G_CALLBACK(on_group_header_clicked), g);
 
-    // --- Latest Slot ---
     g->latest_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
-    // --- History Stack ---
     g->history_revealer = gtk_revealer_new();
     gtk_revealer_set_reveal_child(GTK_REVEALER(g->history_revealer), FALSE);
     gtk_revealer_set_transition_type(GTK_REVEALER(g->history_revealer), GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
     
     g->history_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    // REMOVED INDENTATION: Aligns with header now
     gtk_revealer_set_child(GTK_REVEALER(g->history_revealer), g->history_box);
 
     gtk_box_append(GTK_BOX(group_wrapper), g->header_btn);
@@ -267,13 +259,11 @@ static void on_clear_all_clicked(GtkButton *button, gpointer user_data) {
     OrganizerState *state = (OrganizerState *)user_data;
     if (!state->notification_list) return;
     
-    // Clear everything
     GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(state->notification_list));
     while (child) {
         GtkWidget *next = gtk_widget_get_next_sibling(child);
         GroupWidgets *g = g_object_get_data(G_OBJECT(child), "group-data");
         
-        // Helper to close all cards in a box
         GtkWidget *n = gtk_widget_get_first_child(g->latest_box);
         while(n) {
              GtkWidget *nn = gtk_widget_get_next_sibling(n);
@@ -295,7 +285,6 @@ static void on_clear_all_clicked(GtkButton *button, gpointer user_data) {
         child = next;
     }
     
-    // Force check
     g_timeout_add(400, (GSourceFunc)update_placeholder_visibility, state);
 }
 
@@ -310,14 +299,22 @@ static void on_dnd_state_changed_signal(GDBusConnection *c, const gchar *s, cons
     g_signal_handlers_unblock_by_func(state->dnd_switch, G_CALLBACK(on_dnd_toggled), state);
 }
 
+// Updated to parse from G_DBUS_CONNECTION directly
 static void on_get_initial_dnd_state(GObject *source_object, GAsyncResult *res, gpointer user_data) {
     OrganizerState *state = user_data;
     g_autoptr(GError) error = NULL;
-    g_autoptr(GVariant) result = g_dbus_proxy_call_finish(G_DBUS_PROXY(source_object), res, &error);
+    g_autoptr(GVariant) result = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source_object), res, &error);
     if(error) { return; }
     gboolean is_active;
     g_variant_get(result, "(b)", &is_active);
     gtk_switch_set_active(GTK_SWITCH(state->dnd_switch), is_active);
+}
+
+// Watcher Callback for safe loading
+static void on_daemon_appeared(GDBusConnection *connection, const gchar *name, const gchar *name_owner, gpointer user_data) {
+    (void)name_owner;
+    OrganizerState *state = (OrganizerState*)user_data;
+    g_dbus_connection_call(connection, name, DAEMON_OBJECT_PATH, DAEMON_INTERFACE_NAME, "GetDNDState", NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, (GAsyncReadyCallback)on_get_initial_dnd_state, state);
 }
 
 static void handle_add_notification_dbus(GVariant *p, OrganizerState *state) {
@@ -379,8 +376,9 @@ static void on_bus_acquired(GDBusConnection *c, const gchar *n, gpointer user_da
 static void plugin_cleanup(gpointer data) {
     OrganizerState *state = (OrganizerState *)data;
     if (!state) return;
+    if (state->name_watcher_id > 0) { g_bus_unwatch_name(state->name_watcher_id); }
     if (state->owner_id > 0) { g_bus_unown_name(state->owner_id); }
-    if(state->dnd_signal_id > 0) { g_dbus_connection_signal_unsubscribe(state->dbus_connection, state->dnd_signal_id); }
+    if (state->dnd_signal_id > 0) { g_dbus_connection_signal_unsubscribe(state->dbus_connection, state->dnd_signal_id); }
     g_clear_object(&state->dbus_connection);
     g_free(state);
 }
@@ -402,7 +400,6 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     gtk_widget_set_hexpand(notification_vbox, TRUE);
     gtk_widget_set_margin_top(notification_vbox, 0);
 
-    // --- Header ---
     GtkWidget *header_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_widget_set_margin_bottom(header_box, 8);
     gtk_widget_set_margin_start(header_box, 12);
@@ -429,23 +426,20 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
 
     gtk_box_append(GTK_BOX(notification_vbox), header_box);
 
-    // --- MPRIS ---
     GtkWidget *mpris = create_mpris_widget();
     gtk_box_append(GTK_BOX(notification_vbox), mpris);
 
-    // --- List ---
     state->content_stack = gtk_stack_new();
     gtk_widget_set_vexpand(state->content_stack, TRUE);
 
     GtkWidget *scrolled_window = gtk_scrolled_window_new();
     state->notification_list = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0));
-    g_object_set_data(G_OBJECT(state->notification_list), "organizer-state", state); // Fix for cleanup
+    g_object_set_data(G_OBJECT(state->notification_list), "organizer-state", state);
     
     gtk_widget_set_valign(GTK_WIDGET(state->notification_list), GTK_ALIGN_START);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled_window), GTK_WIDGET(state->notification_list));
     gtk_stack_add_named(GTK_STACK(state->content_stack), scrolled_window, "list");
 
-    // --- Placeholder ---
     GtkWidget *placeholder_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_valign(placeholder_box, GTK_ALIGN_CENTER);
     gtk_widget_set_halign(placeholder_box, GTK_ALIGN_CENTER);
@@ -470,8 +464,8 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     state->owner_id = g_bus_own_name_on_connection(state->dbus_connection, CENTER_BUS_NAME, G_BUS_NAME_OWNER_FLAGS_NONE, on_bus_acquired, NULL, state, NULL);
     state->dnd_signal_id = g_dbus_connection_signal_subscribe(state->dbus_connection, DAEMON_BUS_NAME, DAEMON_INTERFACE_NAME, "DNDStateChanged", DAEMON_OBJECT_PATH, NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_dnd_state_changed_signal, state, NULL);
     
-    g_autoptr(GDBusProxy) proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL, DAEMON_BUS_NAME, DAEMON_OBJECT_PATH, DAEMON_INTERFACE_NAME, NULL, NULL);
-    if(proxy) { g_dbus_proxy_call(proxy, "GetDNDState", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, (GAsyncReadyCallback)on_get_initial_dnd_state, state); }
+    // Safely watch for the daemon instead of blindly querying it
+    state->name_watcher_id = g_bus_watch_name(G_BUS_TYPE_SESSION, DAEMON_BUS_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE, on_daemon_appeared, NULL, state, NULL);
 
     return main_hbox;
 }

@@ -14,8 +14,32 @@ const char* CENTER_INTERFACE_NAME = "com.meismeric.auranotify.Center";
 static gboolean is_dnd_active = FALSE; 
 static gboolean is_center_visible = FALSE;
 
-// FIX: Renamed DB to force a clean schema creation
 #define DB_NAME "notifications_v2.db"
+
+// --- NEW: Persistence Logic for DND ---
+static void save_dnd_state() {
+    g_autofree gchar *dir = g_build_filename(g_get_user_config_dir(), "aurora-shell", NULL);
+    g_mkdir_with_parents(dir, 0755); 
+    
+    g_autofree gchar *path = g_build_filename(dir, "notify_settings.conf", NULL);
+    GKeyFile *kf = g_key_file_new();
+    
+    g_key_file_set_boolean(kf, "General", "DND", is_dnd_active);
+    g_key_file_save_to_file(kf, path, NULL);
+    g_key_file_free(kf);
+}
+
+static void load_dnd_state() {
+    g_autofree gchar *path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "notify_settings.conf", NULL);
+    GKeyFile *kf = g_key_file_new();
+    
+    if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+        is_dnd_active = g_key_file_get_boolean(kf, "General", "DND", NULL);
+        g_print("Daemon: Loaded DND State from disk: %s\n", is_dnd_active ? "TRUE" : "FALSE");
+    }
+    g_key_file_free(kf);
+}
+// --------------------------------------
 
 static void log_notification_to_db(const char *app, const char *summary, const char *body, const char *icon) {
     sqlite3 *db;
@@ -24,7 +48,6 @@ static void log_notification_to_db(const char *app, const char *summary, const c
     g_mkdir_with_parents(g_path_get_dirname(path), 0755);
 
     if (sqlite3_open(path, &db) == SQLITE_OK) {
-        // CLEAN SCHEMA (No virtual columns)
         const char *schema = 
             "CREATE TABLE IF NOT EXISTS history ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -102,7 +125,6 @@ static void handle_method_call(GDBusConnection *connection, const gchar *sender,
             g_dbus_connection_call(connection, UI_BUS_NAME, UI_OBJECT_PATH, UI_INTERFACE_NAME, "ShowNotification", g_variant_new("(sss)", app_icon, summary, body), NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
         }
         
-        // UPDATED: Sending app_name as the 2nd argument (ss ss) -> icon, app_name, summary, body
         g_dbus_connection_call(connection, CENTER_BUS_NAME, CENTER_OBJECT_PATH, CENTER_INTERFACE_NAME, "AddNotification", g_variant_new("(ssss)", app_icon, app_name, summary, body), NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
         
         g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", g_random_int()));
@@ -112,12 +134,14 @@ static void handle_method_call(GDBusConnection *connection, const gchar *sender,
         g_variant_get(parameters, "(b)", &active);
         if (is_dnd_active != active) {
             is_dnd_active = active;
+            save_dnd_state();
             emit_dnd_signal(connection);
         }
         g_dbus_method_invocation_return_value(invocation, NULL);
     }
     else if (g_strcmp0(method_name, "ToggleDND") == 0) {
         is_dnd_active = !is_dnd_active;
+        save_dnd_state();
         emit_dnd_signal(connection);
         g_dbus_method_invocation_return_value(invocation, NULL);
     }
@@ -150,6 +174,7 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name, gpoi
 }
 
 int main(void) {
+    load_dnd_state();
     g_bus_own_name(G_BUS_TYPE_SESSION, "org.freedesktop.Notifications", G_BUS_NAME_OWNER_FLAGS_NONE, on_bus_acquired, NULL, NULL, NULL, NULL);
     g_main_loop_run(g_main_loop_new(NULL, FALSE));
     return 0;
