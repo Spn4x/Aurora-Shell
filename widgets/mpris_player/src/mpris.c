@@ -1,5 +1,3 @@
-// src/mpris.c
-
 #include "mpris.h"
 #include <libsoup/soup.h>
 #include <json-glib/json-glib.h>
@@ -11,7 +9,6 @@
 #define LYRICS_SAFETY_RESYNC_INTERVAL_S 10
 #define LYRICS_SYNC_OFFSET_MS -550
 #define LYRICS_OFFSET_ADJUSTMENT_STEP 50
-
 
 static void fetch_lyrics(MprisPopoutState *state);
 static void on_mpris_signal(GDBusProxy *proxy, const gchar *sender, const gchar *signal, GVariant *params, gpointer user_data);
@@ -30,39 +27,18 @@ static void update_mpris_state(MprisPopoutState *state);
 static void stop_lyric_updates(MprisPopoutState *state);
 static void start_lyric_updates(MprisPopoutState *state);
 static void schedule_next_lyric_update(gpointer user_data);
-static void on_player_position_for_resync(GObject *source, GAsyncResult *res, gpointer user_data);
+static void on_dbus_position_ready(GObject *source, GAsyncResult *res, gpointer user_data);
 static void on_offset_increase_clicked(GtkButton *button, gpointer user_data);
 static void on_offset_decrease_clicked(GtkButton *button, gpointer user_data);
 static void update_offset_label(MprisPopoutState *state);
 static void show_toast(MprisPopoutState *state, const gchar *message);
 static gboolean hide_toast_label(gpointer user_data);
 
-// --- NEW HELPER STRUCT ---
 typedef struct {
-    MprisPopoutState *state;
+    GtkWidget *root_widget;
     char *local_path;
 } ArtDownloadData;
 
-// --- NEW HELPER FUNCTION ---
-static void on_curl_finished(GObject *source, GAsyncResult *res, gpointer user_data) {
-    GSubprocess *proc = G_SUBPROCESS(source);
-    ArtDownloadData *data = (ArtDownloadData*)user_data;
-    
-    GError *error = NULL;
-    if (g_subprocess_wait_check_finish(proc, res, &error)) {
-        if (g_file_test(data->local_path, G_FILE_TEST_EXISTS)) {
-            // Success: Load it into the GtkImage
-            gtk_image_set_from_file(data->state->album_art_image, data->local_path);
-        }
-    } else {
-        if (error) g_error_free(error);
-    }
-    
-    g_free(data->local_path);
-    g_free(data);
-}
-
-// --- NEW HELPER FUNCTION ---
 static void ensure_cache_dir_exists(const char *path) {
     g_autofree char *dir = g_path_get_dirname(path);
     g_mkdir_with_parents(dir, 0755);
@@ -71,13 +47,20 @@ static void ensure_cache_dir_exists(const char *path) {
 static void free_popout_state(gpointer data) {
     MprisPopoutState *state = data;
     if (!state) return;
-    g_print("[LIFECYCLE] Destroying MPRIS view state for %s\n", state->bus_name);
     
     stop_lyric_updates(state);
     
-    if (state->lyrics_cancellable) g_cancellable_cancel(state->lyrics_cancellable);
-    g_clear_object(&state->lyrics_cancellable);
+    if (state->lyrics_cancellable) {
+        g_cancellable_cancel(state->lyrics_cancellable);
+        g_object_unref(state->lyrics_cancellable);
+        state->lyrics_cancellable = NULL;
+    }
     
+    if (state->soup_session) {
+        g_object_unref(state->soup_session);
+        state->soup_session = NULL;
+    }
+
     g_free(state->current_track_signature);
     destroy_lyrics_view(state->lyrics_view_state);
     
@@ -87,9 +70,7 @@ static void free_popout_state(gpointer data) {
         g_clear_object(&state->player_proxy);
     }
 
-    // ADD THIS LINE:
     g_free(state->last_art_url);
-
     g_free(state->bus_name);
     g_free(state);
 }
@@ -107,35 +88,83 @@ static void show_toast(MprisPopoutState *state, const gchar *message) {
     g_timeout_add_seconds(2, hide_toast_label, state->toast_label);
 }
 
-static void on_player_position_for_resync(GObject *source, GAsyncResult *res, gpointer user_data) {
-    (void)source;
-    MprisPopoutState *state = user_data;
-    g_autofree gchar *stdout_str = get_command_stdout(res);
-    if (!stdout_str || !state->lyrics_view_state || !state->lyrics_view_state->lyric_lines) { return; }
-    gint64 pos_us = (gint64)(atof(stdout_str) * 1000000.0);
-    gint64 adjusted_pos_us = pos_us - (state->current_sync_offset_ms * 1000);
-    if (adjusted_pos_us < 0) adjusted_pos_us = 0;
-    lyrics_view_sync_to_position(state, adjusted_pos_us);
-    g_autoptr(GVariant) status_var = g_dbus_proxy_get_cached_property(state->player_proxy, "PlaybackStatus");
-    const char *status = status_var ? g_variant_get_string(status_var, NULL) : "Paused";
-    if (g_strcmp0(status, "Playing") != 0) { return; }
-    LyricsView *view = state->lyrics_view_state;
-    guint next_lyric_index = (view->current_line_index < 0) ? 0 : (guint)view->current_line_index + 1;
-    if (next_lyric_index >= g_list_length(view->lyric_lines)) { return; }
-    GList *next_link = g_list_nth(view->lyric_lines, next_lyric_index);
-    LyricLine *next_line = next_link->data;
-    guint64 next_timestamp_ms = next_line->timestamp_ms;
-    guint64 adjusted_pos_ms = adjusted_pos_us / 1000;
-    gint64 delay_ms = next_timestamp_ms - adjusted_pos_ms;
-    if (delay_ms < 0) delay_ms = 20;
-    state->next_lyric_timer_id = g_timeout_add_once((guint)delay_ms, (GSourceOnceFunc)schedule_next_lyric_update, state);
+static void on_curl_finished(GObject *source, GAsyncResult *res, gpointer user_data) {
+    GSubprocess *proc = G_SUBPROCESS(source);
+    ArtDownloadData *data = (ArtDownloadData*)user_data;
+    
+    GError *error = NULL;
+    gboolean success = g_subprocess_wait_check_finish(proc, res, &error);
+    
+    MprisPopoutState *state = g_object_get_data(G_OBJECT(data->root_widget), "mpris-state");
+    
+    if (state && success && g_file_test(data->local_path, G_FILE_TEST_EXISTS)) {
+        gtk_image_set_from_file(state->album_art_image, data->local_path);
+    } 
+    if (error) g_error_free(error);
+    
+    g_object_unref(data->root_widget); 
+    g_free(data->local_path);
+    g_free(data);
+}
+
+// FIX: Instant, reliable D-Bus position fetching instead of shelling out to playerctl
+static void on_dbus_position_ready(GObject *source_object, GAsyncResult *res, gpointer user_data) {
+    GDBusProxy *proxy = G_DBUS_PROXY(source_object);
+    GtkWidget *root_widget = GTK_WIDGET(user_data);
+    
+    g_autoptr(GError) error = NULL;
+    g_autoptr(GVariant) result = g_dbus_proxy_call_finish(proxy, res, &error);
+    
+    MprisPopoutState *state = g_object_get_data(G_OBJECT(root_widget), "mpris-state");
+    if (!state || !state->lyrics_view_state || !state->lyrics_view_state->lyric_lines) {
+        g_object_unref(root_widget);
+        return;
+    }
+
+    if (result) {
+        GVariant *val_v = NULL;
+        g_variant_get(result, "(v)", &val_v);
+        gint64 pos_us = g_variant_get_int64(val_v);
+        g_variant_unref(val_v);
+
+        gint64 adjusted_pos_us = pos_us - (state->current_sync_offset_ms * 1000);
+        if (adjusted_pos_us < 0) adjusted_pos_us = 0;
+        
+        lyrics_view_sync_to_position(state, adjusted_pos_us);
+        
+        g_autoptr(GVariant) status_var = g_dbus_proxy_get_cached_property(state->player_proxy, "PlaybackStatus");
+        const char *status = status_var ? g_variant_get_string(status_var, NULL) : "Paused";
+        
+        if (g_strcmp0(status, "Playing") == 0) { 
+            LyricsView *view = state->lyrics_view_state;
+            guint next_lyric_index = (view->current_line_index < 0) ? 0 : (guint)view->current_line_index + 1;
+            if (next_lyric_index < g_list_length(view->lyric_lines)) { 
+                GList *next_link = g_list_nth(view->lyric_lines, next_lyric_index);
+                LyricLine *next_line = next_link->data;
+                guint64 next_timestamp_ms = next_line->timestamp_ms;
+                guint64 adjusted_pos_ms = adjusted_pos_us / 1000;
+                gint64 delay_ms = next_timestamp_ms - adjusted_pos_ms;
+                if (delay_ms < 0) delay_ms = 20;
+                if (delay_ms > 10000) delay_ms = 10000; 
+                state->next_lyric_timer_id = g_timeout_add_once((guint)delay_ms, (GSourceOnceFunc)schedule_next_lyric_update, state);
+            }
+        }
+    } else {
+        state->next_lyric_timer_id = g_timeout_add_once(1000, (GSourceOnceFunc)schedule_next_lyric_update, state);
+    }
+    
+    g_object_unref(root_widget);
 }
 
 static void schedule_next_lyric_update(gpointer user_data) {
     MprisPopoutState *state = user_data;
-    if (!state) return;
+    if (!state || !state->player_proxy) return;
     state->next_lyric_timer_id = 0;
-    execute_command_async("playerctl position", on_player_position_for_resync, state);
+    
+    g_dbus_proxy_call(state->player_proxy,
+        "org.freedesktop.DBus.Properties.Get",
+        g_variant_new("(ss)", "org.mpris.MediaPlayer2.Player", "Position"),
+        G_DBUS_CALL_FLAGS_NONE, -1, NULL, on_dbus_position_ready, g_object_ref(state->root_widget));
 }
 
 static gboolean safety_resync_callback(gpointer user_data) {
@@ -161,7 +190,10 @@ static void start_lyric_updates(MprisPopoutState *state) {
         schedule_next_lyric_update(state);
         state->resync_poll_timer_id = g_timeout_add_seconds(LYRICS_SAFETY_RESYNC_INTERVAL_S, safety_resync_callback, state);
     } else {
-        execute_command_async("playerctl position", on_player_position_for_resync, state);
+        g_dbus_proxy_call(state->player_proxy,
+            "org.freedesktop.DBus.Properties.Get",
+            g_variant_new("(ss)", "org.mpris.MediaPlayer2.Player", "Position"),
+            G_DBUS_CALL_FLAGS_NONE, -1, NULL, on_dbus_position_ready, g_object_ref(state->root_widget));
     }
 }
 
@@ -239,14 +271,14 @@ static void process_lyrics_response_node(JsonNode *root_node, MprisPopoutState *
     } else if (JSON_NODE_HOLDS_ARRAY(root_node)) {
         JsonArray *results_array = json_node_get_array(root_node);
         double min_duration_diff = 1000.0;
-        // The window is now stored in the state struct, retrieve it from there.
-        gint64 original_duration_us = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(state->root_widget), "current-track-duration"));
-        guint original_duration_s = (guint)(original_duration_us / 1000000);
+        
+        // FIX: Safe duration matching
+        guint original_duration_s = (guint)(state->current_track_length_us / 1000000);
         for (guint i = 0; i < json_array_get_length(results_array); i++) {
             JsonObject *track_obj = json_array_get_object_element(results_array, i);
             const char *synced_lyrics = json_object_get_string_member_with_default(track_obj, "syncedLyrics", NULL);
             if (synced_lyrics && *synced_lyrics) {
-                if (original_duration_us <= 0) {
+                if (state->current_track_length_us <= 0) {
                     best_match_lyrics = synced_lyrics;
                     best_match_id = json_object_get_int_member_with_default(track_obj, "id", 0);
                     break;
@@ -260,7 +292,7 @@ static void process_lyrics_response_node(JsonNode *root_node, MprisPopoutState *
                 }
             }
         }
-        if (best_match_lyrics && !(min_duration_diff <= 2.0 || original_duration_us <= 0)) {
+        if (best_match_lyrics && !(min_duration_diff <= 2.0 || state->current_track_length_us <= 0)) {
             best_match_lyrics = NULL;
             best_match_id = 0;
         }
@@ -281,38 +313,54 @@ static void process_lyrics_response_node(JsonNode *root_node, MprisPopoutState *
 }
 
 static void on_lyrics_api_response(GObject *source_object, GAsyncResult *res, gpointer user_data) {
-    MprisPopoutState *state = user_data;
+    GtkWidget *root_widget = GTK_WIDGET(user_data);
+    
+    MprisPopoutState *state = g_object_get_data(G_OBJECT(root_widget), "mpris-state");
     g_autoptr(GError) error = NULL;
-    if (g_cancellable_is_cancelled(state->lyrics_cancellable)) return;
     g_autoptr(GInputStream) stream = soup_session_send_finish(SOUP_SESSION(source_object), res, &error);
-    if (error) {
-        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) launch_lyrics_search_request(state);
+    
+    // Safety aborts - ensures widget is alive and not cancelled
+    if (!state || !state->lyrics_cancellable || g_cancellable_is_cancelled(state->lyrics_cancellable)) {
+        g_object_unref(root_widget);
         return;
     }
+    
+    if (error) {
+        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) launch_lyrics_search_request(state);
+        g_object_unref(root_widget);
+        return;
+    }
+    
     g_autoptr(JsonParser) parser = json_parser_new();
     if (!json_parser_load_from_stream(parser, stream, state->lyrics_cancellable, &error)) {
         if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) launch_lyrics_search_request(state);
+        g_object_unref(root_widget);
         return;
     }
+    
     process_lyrics_response_node(json_parser_get_root(parser), state);
+    g_object_unref(root_widget);
 }
 
 static void launch_lyrics_search_request(MprisPopoutState *state) {
     g_object_set_data(G_OBJECT(state->root_widget), "is-fallback-search", GINT_TO_POINTER(1));
     g_autoptr(GVariant) metadata_var = g_dbus_proxy_get_cached_property(state->player_proxy, "Metadata");
     if (!metadata_var) { parse_and_populate_lyrics(state->lyrics_view_state, ""); return; }
+    
     g_autoptr(GVariantDict) dict = g_variant_dict_new(metadata_var);
     const char *title = NULL; gchar **artists = NULL;
     g_variant_dict_lookup(dict, "xesam:title", "&s", &title);
     g_variant_dict_lookup(dict, "xesam:artist", "^as", &artists);
+    
     if (title && artists && artists[0]) {
         g_autofree gchar *artist_encoded = g_uri_escape_string(artists[0], NULL, FALSE);
         g_autofree gchar *title_encoded = g_uri_escape_string(title, NULL, FALSE);
         g_autofree gchar *search_url = g_strdup_printf("https://lrclib.net/api/search?track_name=%s&artist_name=%s", title_encoded, artist_encoded);
-        g_autoptr(SoupSession) session = soup_session_new();
+        
         g_autoptr(SoupMessage) msg = soup_message_new("GET", search_url);
         soup_message_headers_append(soup_message_get_request_headers(msg), "User-Agent", "MPRISLyricsViewer(v1.0)");
-        soup_session_send_async(session, msg, G_PRIORITY_DEFAULT, state->lyrics_cancellable, (GAsyncReadyCallback)on_lyrics_api_response, state);
+        
+        soup_session_send_async(state->soup_session, msg, G_PRIORITY_DEFAULT, state->lyrics_cancellable, (GAsyncReadyCallback)on_lyrics_api_response, g_object_ref(state->root_widget));
     } else {
         parse_and_populate_lyrics(state->lyrics_view_state, "");
     }
@@ -325,39 +373,52 @@ static void update_playback_status_ui(MprisPopoutState *state, const gchar *stat
 }
 
 static void fetch_lyrics(MprisPopoutState *state) {
-    if (state->lyrics_cancellable) { g_cancellable_cancel(state->lyrics_cancellable); g_clear_object(&state->lyrics_cancellable); }
+    if (state->lyrics_cancellable) { 
+        g_cancellable_cancel(state->lyrics_cancellable); 
+        g_object_unref(state->lyrics_cancellable); 
+    }
     state->lyrics_cancellable = g_cancellable_new();
     state->current_lyrics_id = 0;
+    
     gtk_widget_set_sensitive(GTK_WIDGET(state->save_lyrics_button), FALSE);
     g_object_set_data(G_OBJECT(state->root_widget), "is-fallback-search", NULL);
     parse_and_populate_lyrics(state->lyrics_view_state, NULL);
+    
     gint64 saved_id = load_lyrics_id_for_track(state->current_track_signature);
-    g_autoptr(SoupSession) session = soup_session_new();
+    
     if (saved_id > 0) {
         g_autofree gchar *url = g_strdup_printf("https://lrclib.net/api/get/%"G_GINT64_FORMAT, saved_id);
         g_autoptr(SoupMessage) msg = soup_message_new("GET", url);
         soup_message_headers_append(soup_message_get_request_headers(msg), "User-Agent", "MPRISLyricsViewer(v1.0)");
-        soup_session_send_async(session, msg, G_PRIORITY_DEFAULT, state->lyrics_cancellable, (GAsyncReadyCallback)on_lyrics_api_response, state);
+        
+        soup_session_send_async(state->soup_session, msg, G_PRIORITY_DEFAULT, state->lyrics_cancellable, (GAsyncReadyCallback)on_lyrics_api_response, g_object_ref(state->root_widget));
         return;
     }
+    
     g_autoptr(GVariant) metadata_var = g_dbus_proxy_get_cached_property(state->player_proxy, "Metadata");
     if (!metadata_var) { launch_lyrics_search_request(state); return; }
+    
     g_autoptr(GVariantDict) dict = g_variant_dict_new(metadata_var);
     const char *title = NULL, *album = NULL; gchar **artists = NULL; gint64 length_us = 0;
+    
     g_variant_dict_lookup(dict, "xesam:title", "&s", &title);
     g_variant_dict_lookup(dict, "xesam:artist", "^as", &artists);
     g_variant_dict_lookup(dict, "mpris:length", "t", &length_us);
     g_variant_dict_lookup(dict, "xesam:album", "&s", &album);
-    g_object_set_data(G_OBJECT(state->root_widget), "current-track-duration", GINT_TO_POINTER(length_us));
+    
+    state->current_track_length_us = length_us; // Safely store 64bit integer
+    
     if (title && artists && artists[0] && album && length_us > 0) {
         g_autofree gchar *artist_enc = g_uri_escape_string(artists[0], NULL, FALSE);
         g_autofree gchar *title_enc = g_uri_escape_string(title, NULL, FALSE);
         g_autofree gchar *album_enc = g_uri_escape_string(album, NULL, FALSE);
         guint duration_s = (guint)(length_us / 1000000);
         g_autofree gchar *url = g_strdup_printf("https://lrclib.net/api/get?track_name=%s&artist_name=%s&album_name=%s&duration=%u", title_enc, artist_enc, album_enc, duration_s);
+        
         g_autoptr(SoupMessage) msg = soup_message_new("GET", url);
         soup_message_headers_append(soup_message_get_request_headers(msg), "User-Agent", "MPRISLyricsViewer(v1.0)");
-        soup_session_send_async(session, msg, G_PRIORITY_DEFAULT, state->lyrics_cancellable, (GAsyncReadyCallback)on_lyrics_api_response, state);
+        
+        soup_session_send_async(state->soup_session, msg, G_PRIORITY_DEFAULT, state->lyrics_cancellable, (GAsyncReadyCallback)on_lyrics_api_response, g_object_ref(state->root_widget));
     } else {
         launch_lyrics_search_request(state);
     }
@@ -377,7 +438,6 @@ static void update_display_metadata(MprisPopoutState *state, GVariantDict *dict)
     gtk_label_set_text(state->title_label, title ? title : "Unknown Title");
     gtk_label_set_text(state->artist_label, (artists && artists[0]) ? artists[0] : "Unknown Artist");
 
-    // --- START OF NEW ART LOGIC ---
     if (g_strcmp0(art_url, state->last_art_url) != 0) {
         g_free(state->last_art_url);
         state->last_art_url = g_strdup(art_url);
@@ -386,7 +446,6 @@ static void update_display_metadata(MprisPopoutState *state, GVariantDict *dict)
             gtk_image_set_from_icon_name(state->album_art_image, "audio-x-generic");
         } 
         else if (g_str_has_prefix(art_url, "file://")) {
-            // Local file (mpd, local players)
             g_autofree gchar *path = g_filename_from_uri(art_url, NULL, NULL);
             if (g_file_test(path, G_FILE_TEST_EXISTS)) {
                 gtk_image_set_from_file(state->album_art_image, path);
@@ -395,27 +454,22 @@ static void update_display_metadata(MprisPopoutState *state, GVariantDict *dict)
             }
         } 
         else if (g_str_has_prefix(art_url, "http://") || g_str_has_prefix(art_url, "https://")) {
-            // Remote file (Spotify) - Check Cache first
             g_autofree char *checksum = g_compute_checksum_for_string(G_CHECKSUM_SHA256, art_url, -1);
             g_autofree char *cache_path = g_build_filename(g_get_user_cache_dir(), "aurora-shell", "art", checksum, NULL);
             
             if (g_file_test(cache_path, G_FILE_TEST_EXISTS)) {
-                // Found in cache, load immediately
                 gtk_image_set_from_file(state->album_art_image, cache_path);
             } else {
-                // Not in cache, set placeholder and download
                 gtk_image_set_from_icon_name(state->album_art_image, "audio-x-generic");
                 ensure_cache_dir_exists(cache_path);
                 
                 GSubprocessLauncher *launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_NONE);
                 GError *err = NULL;
-                
-                // Spawn curl to download to cache_path
                 GSubprocess *proc = g_subprocess_launcher_spawn(launcher, &err, "curl", "-s", "-L", "-o", cache_path, art_url, NULL);
                 
                 if (proc) {
                     ArtDownloadData *data = g_new(ArtDownloadData, 1);
-                    data->state = state;
+                    data->root_widget = g_object_ref(state->root_widget); 
                     data->local_path = g_strdup(cache_path);
                     g_subprocess_wait_async(proc, NULL, on_curl_finished, data);
                     g_object_unref(proc);
@@ -425,12 +479,9 @@ static void update_display_metadata(MprisPopoutState *state, GVariantDict *dict)
                 g_object_unref(launcher);
             }
         } else {
-            // Unknown protocol
             gtk_image_set_from_icon_name(state->album_art_image, "audio-x-generic");
         }
     }
-    // --- END OF NEW ART LOGIC ---
-
     g_strfreev(artists);
 }
 
@@ -451,8 +502,10 @@ static void update_mpris_state(MprisPopoutState *state) {
     g_autoptr(GVariantDict) dict = metadata_var ? g_variant_dict_new(metadata_var) : NULL;
     g_autoptr(GVariant) status_var = g_dbus_proxy_get_cached_property(state->player_proxy, "PlaybackStatus");
     const char *status = status_var ? g_variant_get_string(status_var, NULL) : "Paused";
+    
     update_display_metadata(state, dict);
     update_playback_status_ui(state, status);
+    
     g_autofree gchar *new_signature = create_track_signature(dict);
     if (g_strcmp0(new_signature, state->current_track_signature) != 0) {
         g_print("[STATE] New Track Detected: %s\n", new_signature);
@@ -489,10 +542,9 @@ GtkWidget* create_mpris_view(const gchar *bus_name, MprisPopoutState **state_out
     MprisPopoutState *state = g_new0(MprisPopoutState, 1);
     state->bus_name = g_strdup(bus_name);
     state->current_sync_offset_ms = LYRICS_SYNC_OFFSET_MS;
+    state->soup_session = soup_session_new(); // FIX: Attach Session Lifecycle to Widget
     
     GtkWidget *root_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-
-    // Force the widget to respect the size from config/main.c
     gtk_widget_set_size_request(root_box, width, height); 
     
     state->root_widget = root_box;
@@ -512,9 +564,6 @@ GtkWidget* create_mpris_view(const gchar *bus_name, MprisPopoutState **state_out
     gtk_widget_set_hexpand(text_box, TRUE); 
     gtk_widget_set_valign(text_box, GTK_ALIGN_CENTER);
 
-    // --- FIX: Label constraints to prevent expansion ---
-    
-    // 1. Title Label
     state->title_label = GTK_LABEL(gtk_label_new(""));
     gtk_widget_add_css_class(GTK_WIDGET(state->title_label), "title-label");
     gtk_label_set_xalign(state->title_label, 0.0);
@@ -522,11 +571,9 @@ GtkWidget* create_mpris_view(const gchar *bus_name, MprisPopoutState **state_out
     gtk_label_set_wrap(state->title_label, TRUE);
     gtk_label_set_wrap_mode(state->title_label, PANGO_WRAP_WORD_CHAR);
     gtk_label_set_ellipsize(state->title_label, PANGO_ELLIPSIZE_END);
-    gtk_label_set_lines(state->title_label, 2); // Limit to 2 lines max
-    // Crucial: Tells GTK it *can* be narrower than the text requires
+    gtk_label_set_lines(state->title_label, 2); 
     gtk_label_set_max_width_chars(state->title_label, 1); 
 
-    // 2. Artist Label
     state->artist_label = GTK_LABEL(gtk_label_new(""));
     gtk_widget_add_css_class(GTK_WIDGET(state->artist_label), "artist-label");
     gtk_label_set_xalign(state->artist_label, 0.0);
@@ -534,11 +581,8 @@ GtkWidget* create_mpris_view(const gchar *bus_name, MprisPopoutState **state_out
     gtk_label_set_wrap(state->artist_label, TRUE);
     gtk_label_set_wrap_mode(state->artist_label, PANGO_WRAP_WORD_CHAR);
     gtk_label_set_ellipsize(state->artist_label, PANGO_ELLIPSIZE_END);
-    gtk_label_set_lines(state->artist_label, 1); // Limit to 1 line
-    // Crucial: Tells GTK it *can* be narrower than the text requires
+    gtk_label_set_lines(state->artist_label, 1); 
     gtk_label_set_max_width_chars(state->artist_label, 1);
-
-    // --- END FIX ---
 
     gtk_box_append(GTK_BOX(text_box), GTK_WIDGET(state->title_label));
     gtk_box_append(GTK_BOX(text_box), GTK_WIDGET(state->artist_label));

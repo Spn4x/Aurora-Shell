@@ -1,9 +1,8 @@
-// widgets/mpris_player/src/mpris.h
-
 #ifndef MPRIS_H
 #define MPRIS_H
 
 #include <gtk/gtk.h>
+#include <libsoup/soup.h>
 #include "lyrics.h"
 #include "utils.h"
 
@@ -23,8 +22,11 @@ typedef struct _MprisPopoutState {
 
     LyricsView *lyrics_view_state;
     GCancellable *lyrics_cancellable;
+    SoupSession *soup_session; // FIX: Global session per widget
+    
     gint64 current_lyrics_id;
     gchar *current_track_signature;
+    gint64 current_track_length_us; // FIX: Safe duration matching
 
     guint next_lyric_timer_id;
     guint resync_poll_timer_id;
@@ -35,7 +37,6 @@ typedef struct _MprisPopoutState {
     gint64 current_sync_offset_ms;
     GtkLabel *offset_label;
 
-    // --- ADD THIS FIELD ---
     gchar *last_art_url; 
 } MprisPopoutState;
 

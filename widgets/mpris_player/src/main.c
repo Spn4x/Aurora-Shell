@@ -1,5 +1,3 @@
-// widgets/mpris_player/src/main.c
-
 #include <gtk/gtk.h>
 #include <json-glib/json-glib.h>
 #include "mpris.h"
@@ -7,86 +5,10 @@
 typedef struct {
     GtkWidget *view_stack;
     MprisPopoutState *mpris_state;
-    GList *mpris_players;
-    GDBusConnection *dbus_connection;
-    guint name_watcher_id;
+    GDBusProxy *manager_proxy;
     gint width;
     gint height;
 } MprisPluginState;
-
-static void update_view(MprisPluginState *state);
-static GtkWidget* create_default_view();
-static void plugin_cleanup(gpointer data);
-
-static void on_mpris_name_appeared(const gchar *name, gpointer user_data) {
-    MprisPluginState *state = user_data;
-    if (g_list_find_custom(state->mpris_players, name, (GCompareFunc)g_strcmp0) == NULL) {
-        state->mpris_players = g_list_append(state->mpris_players, g_strdup(name));
-        update_view(state);
-    }
-}
-
-static void on_mpris_name_vanished(const gchar *name, gpointer user_data) {
-    MprisPluginState *state = user_data;
-    GList *link = g_list_find_custom(state->mpris_players, name, (GCompareFunc)g_strcmp0);
-    if (link) { 
-        g_free(link->data); 
-        state->mpris_players = g_list_delete_link(state->mpris_players, link); 
-        update_view(state); 
-    }
-}
-
-static void on_name_owner_changed(GDBusConnection *c, const gchar *s, const gchar *o, const gchar *i, const gchar *sig, GVariant *p, gpointer d) {
-    (void)c; (void)s; (void)o; (void)i; (void)sig;
-    const gchar *name, *old_owner, *new_owner;
-    g_variant_get(p, "(sss)", &name, &old_owner, &new_owner);
-    if (name && g_str_has_prefix(name, "org.mpris.MediaPlayer2.")) {
-        if (new_owner && *new_owner) { on_mpris_name_appeared(name, d); }
-        else { on_mpris_name_vanished(name, d); }
-    }
-}
-
-static void update_view(MprisPluginState *state) {
-    gboolean has_players = (state->mpris_players != NULL);
-    if (has_players && state->mpris_state == NULL) {
-        const gchar *bus_name = state->mpris_players->data;
-        GtkWidget *old_view = gtk_stack_get_child_by_name(GTK_STACK(state->view_stack), "player-view");
-        if (old_view) { gtk_stack_remove(GTK_STACK(state->view_stack), old_view); }
-        GtkWidget *new_view = create_mpris_view(bus_name, &state->mpris_state, state->width, state->height);
-        if (new_view) {
-            state->mpris_state->window = GTK_WINDOW(gtk_widget_get_root(state->view_stack));
-            gtk_stack_add_named(GTK_STACK(state->view_stack), new_view, "player-view");
-            gtk_stack_set_visible_child_name(GTK_STACK(state->view_stack), "player-view");
-        }
-    } 
-    else if (!has_players && state->mpris_state != NULL) {
-        state->mpris_state = NULL;
-        gtk_stack_set_visible_child_name(GTK_STACK(state->view_stack), "default-view");
-        GtkWidget *old_view = gtk_stack_get_child_by_name(GTK_STACK(state->view_stack), "player-view");
-        if (old_view) { gtk_stack_remove(GTK_STACK(state->view_stack), old_view); }
-    }
-}
-
-static void setup_mpris_watcher(MprisPluginState *state) {
-    g_autoptr(GError) error = NULL;
-    state->dbus_connection = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
-    if (state->dbus_connection == NULL) { 
-        g_critical("MPRIS Plugin: FAILED to get D-Bus session connection. Error: %s", error ? error->message : "Unknown error"); 
-        return; 
-    }
-    g_autoptr(GVariant) result = g_dbus_connection_call_sync(state->dbus_connection, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames", NULL, G_VARIANT_TYPE("(as)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-    if (error) { 
-        g_warning("MPRIS Plugin: DBus ListNames call failed: %s", error->message); 
-    } else if (result) {
-        g_autoptr(GVariantIter) iter;
-        g_variant_get(result, "(as)", &iter);
-        gchar *name;
-        while (g_variant_iter_loop(iter, "s", &name)) { 
-            if (g_str_has_prefix(name, "org.mpris.MediaPlayer2.")) { on_mpris_name_appeared(name, state); } 
-        }
-    }
-    state->name_watcher_id = g_dbus_connection_signal_subscribe(state->dbus_connection, "org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged", "/org/freedesktop/DBus", NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_name_owner_changed, state, NULL);
-}
 
 static GtkWidget* create_default_view() {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 20);
@@ -102,23 +24,55 @@ static GtkWidget* create_default_view() {
     return box;
 }
 
+static void on_media_manager_changed(GDBusProxy *proxy, GVariant *changed_properties, const gchar *const *invalidated_properties, gpointer user_data) {
+    (void)changed_properties; (void)invalidated_properties;
+    MprisPluginState *state = user_data;
+    
+    g_autoptr(GVariant) active_var = g_dbus_proxy_get_cached_property(proxy, "ActivePlayer");
+    const char *active_player = active_var ? g_variant_get_string(active_var, NULL) : "";
+
+    if (active_player && strlen(active_player) > 0) {
+        GtkWidget *old_view = gtk_stack_get_child_by_name(GTK_STACK(state->view_stack), "player-view");
+        if (old_view) gtk_stack_remove(GTK_STACK(state->view_stack), old_view);
+        
+        GtkWidget *new_view = create_mpris_view(active_player, &state->mpris_state, state->width, state->height);
+        if (new_view) {
+            state->mpris_state->window = GTK_WINDOW(gtk_widget_get_root(state->view_stack));
+            gtk_stack_add_named(GTK_STACK(state->view_stack), new_view, "player-view");
+            gtk_stack_set_visible_child_name(GTK_STACK(state->view_stack), "player-view");
+        }
+    } else {
+        state->mpris_state = NULL;
+        gtk_stack_set_visible_child_name(GTK_STACK(state->view_stack), "default-view");
+        GtkWidget *old_view = gtk_stack_get_child_by_name(GTK_STACK(state->view_stack), "player-view");
+        if (old_view) gtk_stack_remove(GTK_STACK(state->view_stack), old_view);
+    }
+}
+
+static void on_media_manager_ready(GObject *source, GAsyncResult *res, gpointer user_data) {
+    (void)source;
+    MprisPluginState *state = user_data;
+    GError *error = NULL;
+    state->manager_proxy = g_dbus_proxy_new_for_bus_finish(res, &error);
+    if (state->manager_proxy) {
+        g_signal_connect(state->manager_proxy, "g-properties-changed", G_CALLBACK(on_media_manager_changed), state);
+        on_media_manager_changed(state->manager_proxy, NULL, NULL, state); // Trigger initial load
+    } else {
+        g_warning("Failed to connect to MediaManager: %s", error->message);
+        if(error) g_error_free(error);
+    }
+}
+
 static void plugin_cleanup(gpointer data) {
     MprisPluginState *state = (MprisPluginState*)data;
     if (!state) return;
-    if (state->name_watcher_id > 0) { g_dbus_connection_signal_unsubscribe(state->dbus_connection, state->name_watcher_id); }
-    g_clear_object(&state->dbus_connection);
-    g_list_free_full(state->mpris_players, g_free);
+    if (state->manager_proxy) g_object_unref(state->manager_proxy);
     g_free(state);
 }
 
-// ===================================================================
-//  Plugin Entry Point (FIXED: Unparented SizeGroup removed)
-// ===================================================================
 G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     MprisPluginState *state = g_new0(MprisPluginState, 1);
-    
-    state->width = 300;
-    state->height = 450;
+    state->width = 300; state->height = 450;
 
     if (config_string && *config_string) {
         g_autoptr(JsonParser) parser = json_parser_new();
@@ -132,25 +86,20 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
         }
     }
     
-    g_print("MPRIS Plugin: Setting size request directly -> Width: %d, Height: %d\n", state->width, state->height);
-
-    // 1. Create our main UI widget, the GtkStack.
     state->view_stack = gtk_stack_new();
     gtk_widget_set_name(state->view_stack, "aurora-mpris-player");
     gtk_widget_add_css_class(state->view_stack, "mpris-player-widget");
     gtk_stack_set_transition_type(GTK_STACK(state->view_stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
-
-    // 2. Set the size directly on the stack instead of using an unparented dummy widget
     gtk_widget_set_size_request(state->view_stack, state->width, state->height);
 
-    // 3. Attach state to the main widget for cleanup.
     g_object_set_data_full(G_OBJECT(state->view_stack), "plugin-state", state, plugin_cleanup);
 
-    // 4. Setup the rest of the widget.
-    GtkWidget *default_view = create_default_view();
-    gtk_stack_add_named(GTK_STACK(state->view_stack), default_view, "default-view");
-    setup_mpris_watcher(state);
+    gtk_stack_add_named(GTK_STACK(state->view_stack), create_default_view(), "default-view");
 
-    // 5. Return the view_stack, safely sized and Wayland-compliant.
+    // Connect to our new centralized daemon
+    g_dbus_proxy_new_for_bus(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL,
+        "com.meismeric.aurora.MediaManager", "/com/meismeric/aurora/MediaManager", "com.meismeric.aurora.MediaManager",
+        NULL, on_media_manager_ready, state);
+
     return state->view_stack;
 }

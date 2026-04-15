@@ -1,0 +1,8 @@
+[package]
+name = "aurorawidgetd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zbus = { version = "3.14", features =["tokio"] }
+tokio = { version = "1.28", features = ["full"] }

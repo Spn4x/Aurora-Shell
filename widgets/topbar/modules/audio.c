@@ -5,64 +5,58 @@
 #include <math.h>
 #include <glib/gstdio.h>
 #include "audio.h"
-// REMOVED: #include "popover_anim.h"
 
 #define BANNER_DURATION_MS 5000
 #define ART_LOAD_DELAY_MS 500
 
-// --- Type Definitions ---
 typedef struct _AudioModule AudioModule;
 
-// FIXED: Added 'name' to struct so we can switch by string instead of ID
 typedef struct {
     uint32_t id;
     gchar *name;
     gchar *description;
-} AudioSink;
+    gboolean is_source;
+} AudioDevice;
 
 struct _AudioModule {
     GtkWidget *main_stack;
     
-    // UI Components
     GtkWidget *bt_drawing_area;
     GtkWidget *media_overlay;
     GtkPicture *album_art_image;
     GtkLabel  *song_title_label;
     GtkWidget *popover;
-    GtkWidget *sink_list_box;
+    GtkWidget *popover_list_box;
 
-    // D-Bus Proxies & Watchers
     GDBusObjectManager *bluez_manager;
     GDBusProxy *mpris_proxy;
-    guint mpris_name_watcher_id;
+    GDBusProxy *media_manager_proxy; 
 
-    // State Flags
     gboolean is_connected;
     gboolean is_powered;
     gboolean is_media_active;
     
-    // Logic Data
     gchar *device_name;
     int battery_percentage;
     gchar *current_track_signature;
     gchar *last_art_url;
-    
-    // State Management
     gchar *preferred_view; 
     
-    // Timers
     guint banner_timer_id; 
     guint art_timer_id;
 };
 
-// --- Forward Declarations ---
 static void update_combined_state(AudioModule *module);
 static void update_bluetooth_status(AudioModule *module);
 static void update_mpris_state(AudioModule *state);
 static void update_mpris_view(AudioModule *module);
 static void draw_audio_bt(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data);
 
-// --- Helpers ---
+// --- SAFE ASYNC STRUCT ---
+typedef struct {
+    GtkWidget *main_stack;
+    char *local_path;
+} ArtDownloadData;
 
 static void cairo_rounded_rectangle(cairo_t *cr, double x, double y, double width, double height, double radius) {
     if (width <= 0 || height <= 0) return;
@@ -74,25 +68,48 @@ static void cairo_rounded_rectangle(cairo_t *cr, double x, double y, double widt
     cairo_close_path(cr);
 }
 
-// FIXED: Free the name string
-static void audio_sink_free(gpointer data) {
-    AudioSink *sink = (AudioSink*)data;
-    g_free(sink->name);
-    g_free(sink->description);
-    g_free(sink);
+static void audio_device_free(gpointer data) {
+    AudioDevice *dev = (AudioDevice*)data;
+    g_free(dev->name);
+    g_free(dev->description);
+    g_free(dev);
 }
 
-static const char* get_glyph_for_sink(const gchar* description) {
-    if (!description) return "󰗟"; 
+static const char* get_glyph_for_device(const gchar* description, gboolean is_source) {
+    if (!description) return is_source ? "󰍬" : "󰗟"; 
     g_autofree gchar *lower_desc = g_ascii_strdown(description, -1);
-    if (strstr(lower_desc, "hdmi")) return "󰡁";
-    if (strstr(lower_desc, "usb")) return "󰘳";
-    if (strstr(lower_desc, "bluez") || strstr(lower_desc, "headphone") || strstr(lower_desc, "headset") || strstr(lower_desc, "buds")) return "󰋋";
-    if (strstr(lower_desc, "speaker") || strstr(lower_desc, "built-in")) return "󰕾";
-    return "󰗟";
+    
+    if (is_source) {
+        if (strstr(lower_desc, "bluez") || strstr(lower_desc, "headset")) return "󰋎";
+        if (strstr(lower_desc, "usb")) return "󰍬"; 
+        if (strstr(lower_desc, "internal") || strstr(lower_desc, "built-in")) return "󰍬"; 
+        return "󰍬";
+    } else {
+        if (strstr(lower_desc, "hdmi")) return "󰡁";
+        if (strstr(lower_desc, "usb")) return "󰘳";
+        if (strstr(lower_desc, "bluez") || strstr(lower_desc, "headphone") || strstr(lower_desc, "headset") || strstr(lower_desc, "buds")) return "󰋋";
+        if (strstr(lower_desc, "speaker") || strstr(lower_desc, "built-in")) return "󰕾";
+        return "󰗟";
+    }
 }
 
-// --- Logic: Temporary Banners ---
+static gchar* get_friendly_player_name(const gchar* bus_name) {
+    const char *prefix = "org.mpris.MediaPlayer2.";
+    if (!g_str_has_prefix(bus_name, prefix)) return g_strdup(bus_name);
+    const char *start = bus_name + strlen(prefix);
+    char *dot = strchr(start, '.');
+    gchar *name = dot ? g_strndup(start, dot - start) : g_strdup(start);
+    if (name[0]) name[0] = g_ascii_toupper(name[0]);
+    return name;
+}
+
+static const char* get_glyph_for_player(const gchar* name) {
+    g_autofree gchar *lower = g_ascii_strdown(name, -1);
+    if (strstr(lower, "spotify")) return "";
+    if (strstr(lower, "firefox") || strstr(lower, "chrome") || strstr(lower, "brave") || strstr(lower, "edge") || strstr(lower, "opera")) return "󰈹";
+    if (strstr(lower, "vlc")) return "󰕼";
+    return "󰎆"; 
+}
 
 static gboolean on_banner_timeout(gpointer user_data) {
     AudioModule *module = user_data;
@@ -106,14 +123,10 @@ static void trigger_temporary_view(AudioModule *module, const char *view_name) {
         g_source_remove(module->banner_timer_id);
         module->banner_timer_id = 0;
     }
-    
     gtk_stack_set_visible_child_name(GTK_STACK(module->main_stack), view_name);
     gtk_widget_set_visible(module->main_stack, TRUE);
-    
     module->banner_timer_id = g_timeout_add(BANNER_DURATION_MS, on_banner_timeout, module);
 }
-
-// --- Logic: Delayed Art Loading ---
 
 static gboolean delayed_art_update_callback(gpointer user_data) {
     AudioModule *module = user_data;
@@ -124,26 +137,24 @@ static gboolean delayed_art_update_callback(gpointer user_data) {
     return G_SOURCE_REMOVE;
 }
 
-// --- Logic: Remote Art Downloading ---
-
-typedef struct {
-    AudioModule *module;
-    char *local_path;
-} ArtDownloadData;
-
+// --- SAFE ASYNC CURL HANDLER ---
 static void on_curl_finished(GObject *source, GAsyncResult *res, gpointer user_data) {
     GSubprocess *proc = G_SUBPROCESS(source);
     ArtDownloadData *data = (ArtDownloadData*)user_data;
     
     GError *error = NULL;
-    if (g_subprocess_wait_check_finish(proc, res, &error)) {
-        if (g_file_test(data->local_path, G_FILE_TEST_EXISTS)) {
-            gtk_picture_set_filename(data->module->album_art_image, data->local_path);
-        }
-    } else {
-        if(error) g_error_free(error);
+    gboolean success = g_subprocess_wait_check_finish(proc, res, &error);
+    
+    // Safely retrieve the state module using the strong reference
+    AudioModule *module = g_object_get_data(G_OBJECT(data->main_stack), "module-state");
+    
+    if (module && success && g_file_test(data->local_path, G_FILE_TEST_EXISTS)) {
+        gtk_picture_set_filename(module->album_art_image, data->local_path);
     }
     
+    if (error) g_error_free(error);
+    
+    g_object_unref(data->main_stack); // Release the strong reference
     g_free(data->local_path);
     g_free(data);
 }
@@ -152,8 +163,6 @@ static void ensure_cache_dir_exists(const char *path) {
     g_autofree char *dir = g_path_get_dirname(path);
     g_mkdir_with_parents(dir, 0755);
 }
-
-// --- The Core Logic: State Management ---
 
 static void update_combined_state(AudioModule *module) {
     if (!module || module->banner_timer_id > 0) return;
@@ -185,8 +194,6 @@ static void update_combined_state(AudioModule *module) {
         gtk_stack_set_visible_child_name(GTK_STACK(module->main_stack), target);
     }
 }
-
-// --- MPRIS (Media) Logic ---
 
 static void update_mpris_view(AudioModule *module) {
     if (!module || !module->mpris_proxy) return;
@@ -232,7 +239,7 @@ static void update_mpris_view(AudioModule *module) {
                 GSubprocess *proc = g_subprocess_launcher_spawn(launcher, &err, "curl", "-s", "-L", "-o", cache_path, art_url, NULL);
                 if (proc) {
                     ArtDownloadData *data = g_new(ArtDownloadData, 1);
-                    data->module = module;
+                    data->main_stack = g_object_ref(module->main_stack); // Safe Ref
                     data->local_path = g_strdup(cache_path);
                     g_subprocess_wait_async(proc, NULL, on_curl_finished, data);
                     g_object_unref(proc);
@@ -313,7 +320,49 @@ static void on_mpris_properties_changed(GDBusProxy *proxy, GVariant *changed, co
     update_mpris_state((AudioModule*)user_data);
 }
 
-// --- Bluetooth Logic ---
+static void connect_to_mpris_player(const gchar *name, gpointer user_data) {
+    AudioModule *module = user_data;
+    if (module->mpris_proxy) g_object_unref(module->mpris_proxy); 
+    
+    g_autoptr(GError) error = NULL;
+    module->mpris_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL, name, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", NULL, &error);
+    
+    if (error) { g_warning("Failed to create proxy: %s", error->message); return; }
+    
+    g_signal_connect(module->mpris_proxy, "g-properties-changed", G_CALLBACK(on_mpris_properties_changed), module);
+    update_mpris_state(module);
+}
+
+static void on_media_manager_changed(GDBusProxy *proxy, GVariant *changed_properties, const gchar *const *invalidated_properties, gpointer user_data) {
+    (void)changed_properties; (void)invalidated_properties;
+    AudioModule *module = user_data;
+    
+    g_autoptr(GVariant) active_var = g_dbus_proxy_get_cached_property(proxy, "ActivePlayer");
+    const char *active_player = active_var ? g_variant_get_string(active_var, NULL) : "";
+
+    if (active_player && strlen(active_player) > 0) {
+        connect_to_mpris_player(active_player, module);
+    } else {
+        if (module->mpris_proxy) {
+            g_clear_object(&module->mpris_proxy);
+        }
+        update_mpris_state(module);
+    }
+}
+
+static void on_media_manager_ready(GObject *source, GAsyncResult *res, gpointer user_data) {
+    (void)source;
+    AudioModule *module = user_data;
+    GError *error = NULL;
+    module->media_manager_proxy = g_dbus_proxy_new_for_bus_finish(res, &error);
+    if (module->media_manager_proxy) {
+        g_signal_connect(module->media_manager_proxy, "g-properties-changed", G_CALLBACK(on_media_manager_changed), module);
+        on_media_manager_changed(module->media_manager_proxy, NULL, NULL, module); // Initial check
+    } else {
+        g_warning("Audio.c failed to connect to MediaManager: %s", error ? error->message : "Unknown");
+        if (error) g_error_free(error);
+    }
+}
 
 static void update_bluetooth_status(AudioModule *module) {
     if (!module->bluez_manager) return;
@@ -376,6 +425,9 @@ static void update_bluetooth_status(AudioModule *module) {
 
 static void draw_audio_bt(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data) {
     AudioModule *module = (AudioModule *)user_data;
+    
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     GtkStyleContext *context = gtk_widget_get_style_context(GTK_WIDGET(area));
     GdkRGBA bg_color, fg_color, accent_color;
 
@@ -386,6 +438,7 @@ static void draw_audio_bt(GtkDrawingArea *area, cairo_t *cr, int width, int heig
     gtk_style_context_lookup_color(context, "theme_unfocused_color", &bg_color);
     gtk_style_context_lookup_color(context, "theme_fg_color", &fg_color);
     gtk_style_context_lookup_color(context, "theme_selected_bg_color", &accent_color);
+#pragma GCC diagnostic pop
 
     gdk_cairo_set_source_rgba(cr, &bg_color); 
     cairo_rounded_rectangle(cr, 0, 0, width, height, 8.0); 
@@ -418,8 +471,6 @@ static void draw_audio_bt(GtkDrawingArea *area, cairo_t *cr, int width, int heig
     pango_cairo_show_layout(cr, layout); g_object_unref(layout);
 }
 
-// --- Interaction ---
-
 static gboolean on_scroll(GtkEventControllerScroll* controller, double dx, double dy, gpointer user_data) {
     (void)controller; (void)dx;
     AudioModule *module = user_data;
@@ -446,35 +497,50 @@ static gboolean on_scroll(GtkEventControllerScroll* controller, double dx, doubl
     return TRUE;
 }
 
-// FIXED: Uses 'pactl set-default-sink NAME'
-static void on_sink_button_clicked(GtkButton *button, gpointer data) {
-    AudioSink *sink = (AudioSink*)data;
-    g_autofree gchar *command = g_strdup_printf("pactl set-default-sink '%s'", sink->name);
+// --- Audio Inputs/Outputs List ---
+static void on_device_button_clicked(GtkButton *button, gpointer data) {
+    AudioDevice *dev = (AudioDevice*)data;
+    g_autofree gchar *command = NULL;
+    
+    if (dev->is_source) {
+        command = g_strdup_printf("pactl set-default-source '%s'", dev->name);
+    } else {
+        command = g_strdup_printf("pactl set-default-sink '%s'", dev->name);
+    }
+    
     system(command);
+    
     GtkPopover* popover = GTK_POPOVER(gtk_widget_get_ancestor(GTK_WIDGET(button), GTK_TYPE_POPOVER));
     if (popover) gtk_popover_popdown(popover);
 }
 
-// FIXED: Parses 'pactl list sinks' to get stable Names
-static void update_sink_list_ui(AudioModule *module) {
-    // 1. Clear old children
+static void update_device_list_ui(AudioModule *module, gboolean is_source) {
     GtkWidget *child;
-    while ((child = gtk_widget_get_first_child(module->sink_list_box))) { 
-        gtk_box_remove(GTK_BOX(module->sink_list_box), child); 
+    while ((child = gtk_widget_get_first_child(module->popover_list_box))) { 
+        gtk_box_remove(GTK_BOX(module->popover_list_box), child); 
     }
     
-    // 2. Get current default sink name
-    char default_sink[256] = {0};
-    FILE *fp_def = popen("pactl get-default-sink", "r");
+    GtkWidget *title = gtk_label_new(is_source ? "Select Microphone" : "Select Speaker");
+    gtk_widget_add_css_class(title, "title-3");
+    gtk_widget_set_margin_bottom(title, 8);
+    gtk_widget_set_margin_top(title, 4);
+    gtk_box_append(GTK_BOX(module->popover_list_box), title);
+
+    char default_dev[256] = {0};
+    const char *cmd_default = is_source ? "pactl get-default-source" : "pactl get-default-sink";
+    FILE *fp_def = popen(cmd_default, "r");
     if (fp_def) {
-        if (fgets(default_sink, sizeof(default_sink), fp_def)) {
-            g_strstrip(default_sink);
+        if (fgets(default_dev, sizeof(default_dev), fp_def)) {
+            g_strstrip(default_dev);
         }
         pclose(fp_def);
     }
     
-    // 3. Populate List (Using pactl to get stable names)
-    FILE *fp = popen("pactl list sinks | grep -E 'Name:|Description:' | awk 'NR%2{printf $2 \"|\"} NR%2==0{$1=\"\"; print substr($0,2)}'", "r");
+    const char *cmd_list = is_source ? 
+        "pactl list sources | grep -E 'Name:|Description:' | awk 'NR%2{printf $2 \"|\"} NR%2==0{$1=\"\"; print substr($0,2)}'" : 
+        "pactl list sinks | grep -E 'Name:|Description:' | awk 'NR%2{printf $2 \"|\"} NR%2==0{$1=\"\"; print substr($0,2)}'";
+
+    FILE *fp = popen(cmd_list, "r");
     if (!fp) return;
     
     char line[512];
@@ -486,65 +552,154 @@ static void update_sink_list_ui(AudioModule *module) {
             g_strstrip(name);
             g_strstrip(desc);
             
-            AudioSink *sink = g_new0(AudioSink, 1);
-            sink->name = g_strdup(name);
-            sink->description = g_strdup(desc);
+            if (is_source && g_str_has_suffix(name, ".monitor")) {
+                continue;
+            }
             
-            gboolean is_default = (g_strcmp0(name, default_sink) == 0);
+            AudioDevice *dev = g_new0(AudioDevice, 1);
+            dev->name = g_strdup(name);
+            dev->description = g_strdup(desc);
+            dev->is_source = is_source;
+            
+            gboolean is_default = (g_strcmp0(name, default_dev) == 0);
 
-            // Build UI
-            GtkWidget *button = gtk_button_new(); gtk_widget_add_css_class(button, "sink-button"); gtk_widget_add_css_class(button, "flat");
-            GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6); gtk_button_set_child(GTK_BUTTON(button), box);
-            GtkWidget *glyph_label = gtk_label_new(get_glyph_for_sink(sink->description)); gtk_widget_add_css_class(glyph_label, "glyph-label");
-            GtkWidget *desc_label = gtk_label_new(sink->description); gtk_label_set_xalign(GTK_LABEL(desc_label), 0.0); gtk_widget_set_hexpand(desc_label, TRUE);
-            gtk_box_append(GTK_BOX(box), glyph_label); gtk_box_append(GTK_BOX(box), desc_label);
+            GtkWidget *button = gtk_button_new(); 
+            gtk_widget_add_css_class(button, "sink-button"); 
+            gtk_widget_add_css_class(button, "flat");
+            
+            GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6); 
+            gtk_button_set_child(GTK_BUTTON(button), box);
+            
+            GtkWidget *glyph_label = gtk_label_new(get_glyph_for_device(dev->description, is_source)); 
+            gtk_widget_add_css_class(glyph_label, "glyph-label");
+            
+            GtkWidget *desc_label = gtk_label_new(dev->description); 
+            gtk_label_set_xalign(GTK_LABEL(desc_label), 0.0); 
+            gtk_widget_set_hexpand(desc_label, TRUE);
+            
+            gtk_box_append(GTK_BOX(box), glyph_label); 
+            gtk_box_append(GTK_BOX(box), desc_label);
+            
             if (is_default) gtk_widget_add_css_class(button, "active-sink");
             
-            g_object_set_data_full(G_OBJECT(button), "sink-data", sink, audio_sink_free);
-            g_signal_connect(button, "clicked", G_CALLBACK(on_sink_button_clicked), sink);
+            g_object_set_data_full(G_OBJECT(button), "device-data", dev, audio_device_free);
+            g_signal_connect(button, "clicked", G_CALLBACK(on_device_button_clicked), dev);
 
-            gtk_box_append(GTK_BOX(module->sink_list_box), button);
+            gtk_box_append(GTK_BOX(module->popover_list_box), button);
         }
     }
     pclose(fp);
 }
 
+// --- Player (MPRIS) List ---
+static void on_player_button_clicked(GtkButton *button, gpointer data) {
+    (void)data;
+    gchar *bus_name = g_object_get_data(G_OBJECT(button), "bus-name");
+    AudioModule *module = g_object_get_data(G_OBJECT(button), "module-ref");
+    
+    if (module && module->media_manager_proxy) {
+        g_dbus_proxy_call(module->media_manager_proxy, "SelectPlayer", 
+            g_variant_new("(s)", bus_name ? bus_name : ""), 
+            G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+    }
+    
+    GtkPopover* popover = GTK_POPOVER(gtk_widget_get_ancestor(GTK_WIDGET(button), GTK_TYPE_POPOVER));
+    if (popover) gtk_popover_popdown(popover);
+}
+
+static void update_player_list_ui(AudioModule *module) {
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child(module->popover_list_box))) { 
+        gtk_box_remove(GTK_BOX(module->popover_list_box), child); 
+    }
+    
+    GtkWidget *title = gtk_label_new("Select Media Player");
+    gtk_widget_add_css_class(title, "title-3");
+    gtk_widget_set_margin_bottom(title, 8);
+    gtk_widget_set_margin_top(title, 4);
+    gtk_box_append(GTK_BOX(module->popover_list_box), title);
+
+    g_autoptr(GDBusConnection) bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    g_autoptr(GVariant) result = g_dbus_connection_call_sync(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames", NULL, G_VARIANT_TYPE("(as)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
+    
+    if (result) {
+        g_autoptr(GVariantIter) iter;
+        g_variant_get(result, "(as)", &iter);
+        gchar *name;
+        gboolean found_any = FALSE;
+        
+        const gchar *current_active = NULL;
+        if (module->mpris_proxy) current_active = g_dbus_proxy_get_name(module->mpris_proxy);
+
+        while (g_variant_iter_loop(iter, "s", &name)) {
+            if (g_str_has_prefix(name, "org.mpris.MediaPlayer2.") && !strstr(name, "playerctld")) {
+                found_any = TRUE;
+                gchar *friendly_name = get_friendly_player_name(name);
+                gboolean is_active = (current_active && g_strcmp0(current_active, name) == 0);
+
+                GtkWidget *button = gtk_button_new(); 
+                gtk_widget_add_css_class(button, "sink-button"); 
+                gtk_widget_add_css_class(button, "flat");
+                
+                GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6); 
+                gtk_button_set_child(GTK_BUTTON(button), box);
+                
+                GtkWidget *glyph_label = gtk_label_new(get_glyph_for_player(friendly_name)); 
+                gtk_widget_add_css_class(glyph_label, "glyph-label");
+                
+                GtkWidget *desc_label = gtk_label_new(friendly_name); 
+                gtk_label_set_xalign(GTK_LABEL(desc_label), 0.0); 
+                gtk_widget_set_hexpand(desc_label, TRUE);
+                
+                gtk_box_append(GTK_BOX(box), glyph_label); 
+                gtk_box_append(GTK_BOX(box), desc_label);
+                
+                if (is_active) gtk_widget_add_css_class(button, "active-sink");
+                
+                g_object_set_data_full(G_OBJECT(button), "bus-name", g_strdup(name), g_free);
+                g_object_set_data(G_OBJECT(button), "module-ref", module);
+                g_signal_connect(button, "clicked", G_CALLBACK(on_player_button_clicked), NULL);
+
+                gtk_box_append(GTK_BOX(module->popover_list_box), button);
+                g_free(friendly_name);
+            }
+        }
+        
+        if (!found_any) {
+            GtkWidget *none_lbl = gtk_label_new("No players running");
+            gtk_widget_set_margin_bottom(none_lbl, 4);
+            gtk_widget_set_opacity(none_lbl, 0.7);
+            gtk_box_append(GTK_BOX(module->popover_list_box), none_lbl);
+        }
+
+        GtkWidget *clear_btn = gtk_button_new_with_label("Auto-Select");
+        gtk_widget_add_css_class(clear_btn, "flat");
+        gtk_widget_add_css_class(clear_btn, "sink-button");
+        g_object_set_data_full(G_OBJECT(clear_btn), "bus-name", g_strdup(""), g_free);
+        g_object_set_data(G_OBJECT(clear_btn), "module-ref", module);
+        g_signal_connect(clear_btn, "clicked", G_CALLBACK(on_player_button_clicked), NULL);
+        gtk_box_append(GTK_BOX(module->popover_list_box), clear_btn);
+    }
+}
+
+// --- Interaction Router ---
 static void on_module_clicked(GtkGestureClick *gesture, int n, double x, double y, gpointer user_data) {
-    (void)gesture; (void)n; (void)x; (void)y;
+    (void)n; (void)x; (void)y;
     AudioModule *module = (AudioModule *)user_data;
-    update_sink_list_ui(module);
+    
+    guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
+    
+    if (button == GDK_BUTTON_SECONDARY || button == 3) {
+        update_player_list_ui(module);
+    } else {
+        gboolean is_source = (button == GDK_BUTTON_MIDDLE || button == 2);
+        update_device_list_ui(module, is_source);
+    }
+    
     gtk_popover_popup(GTK_POPOVER(module->popover));
 }
 
 // --- Setup & Cleanup ---
-
-static void connect_to_mpris_player(const gchar *name, gpointer user_data) {
-    AudioModule *module = user_data;
-    if (module->mpris_proxy) g_object_unref(module->mpris_proxy); 
-    
-    g_print("Audio Module: Connecting to MPRIS Player: %s\n", name);
-    g_autoptr(GError) error = NULL;
-    module->mpris_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL, name, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", NULL, &error);
-    
-    if (error) { g_warning("Failed to create proxy: %s", error->message); return; }
-    
-    g_signal_connect(module->mpris_proxy, "g-properties-changed", G_CALLBACK(on_mpris_properties_changed), module);
-    update_mpris_state(module);
-}
-
-static void on_name_owner_changed(GDBusConnection *c,const gchar *s,const gchar *o,const gchar *i,const gchar *sig,GVariant *p,gpointer d) {
-    (void)c; (void)s; (void)o; (void)i; (void)sig;
-    AudioModule *module = d; const gchar *name, *old_owner, *new_owner;
-    g_variant_get(p, "(sss)", &name, &old_owner, &new_owner);
-    if (g_str_has_prefix(name, "org.mpris.MediaPlayer2.")) {
-        if (new_owner && *new_owner) { connect_to_mpris_player(name, module); }
-        else if (module->mpris_proxy && g_strcmp0(g_dbus_proxy_get_name(module->mpris_proxy), name) == 0) {
-            g_clear_object(&module->mpris_proxy);
-            update_mpris_state(module); 
-        }
-    }
-}
-
 static void on_bluez_properties_changed(GDBusObjectManagerClient *m, GDBusObjectProxy *o, GDBusProxy *i, GVariant *c, const gchar *const *iv, gpointer d) { 
     (void)m; (void)o; (void)i; (void)c; (void)iv; 
     update_bluetooth_status((AudioModule*)d); 
@@ -564,7 +719,7 @@ static void audio_module_cleanup(gpointer data) {
     if (module->art_timer_id > 0) g_source_remove(module->art_timer_id);
     if (module->bluez_manager) g_object_unref(module->bluez_manager);
     if (module->mpris_proxy) g_object_unref(module->mpris_proxy);
-    if (module->mpris_name_watcher_id > 0) g_bus_unwatch_name(module->mpris_name_watcher_id);
+    if (module->media_manager_proxy) g_object_unref(module->media_manager_proxy);
     g_free(module->device_name);
     g_free(module->current_track_signature);
     g_free(module->preferred_view);
@@ -573,7 +728,6 @@ static void audio_module_cleanup(gpointer data) {
 }
 
 // --- Construction ---
-
 GtkWidget* create_audio_module() {
     AudioModule *module = g_new0(AudioModule, 1);
     module->device_name = g_strdup("...");
@@ -586,13 +740,11 @@ GtkWidget* create_audio_module() {
     gtk_widget_add_css_class(module->main_stack, "audio-module");
     gtk_widget_add_css_class(module->main_stack, "module");
 
-    // Bluetooth View
     module->bt_drawing_area = gtk_drawing_area_new();
     gtk_widget_set_size_request(module->bt_drawing_area, 220, 28);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(module->bt_drawing_area), draw_audio_bt, module, NULL);
     gtk_stack_add_named(GTK_STACK(module->main_stack), module->bt_drawing_area, "bluetooth_view");
     
-    // Media View
     module->media_overlay = gtk_overlay_new();
     GtkWidget *sizing_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_size_request(sizing_box, 220, 28);
@@ -617,17 +769,16 @@ GtkWidget* create_audio_module() {
     
     gtk_stack_add_named(GTK_STACK(module->main_stack), module->media_overlay, "media_view");
     
-    // Popover (No animation)
     module->popover = gtk_popover_new();
     gtk_widget_set_parent(module->popover, module->main_stack);
-    module->sink_list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_widget_set_margin_top(module->sink_list_box, 5);
-    gtk_widget_set_margin_bottom(module->sink_list_box, 5);
-    gtk_widget_add_css_class(module->sink_list_box, "sink-list-popover");
-    gtk_popover_set_child(GTK_POPOVER(module->popover), module->sink_list_box);
+    module->popover_list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_margin_top(module->popover_list_box, 5);
+    gtk_widget_set_margin_bottom(module->popover_list_box, 5);
+    gtk_widget_add_css_class(module->popover_list_box, "sink-list-popover");
+    gtk_popover_set_child(GTK_POPOVER(module->popover), module->popover_list_box);
 
-    // Input
     GtkGesture *click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 0); 
     g_signal_connect(click, "pressed", G_CALLBACK(on_module_clicked), module);
     gtk_widget_add_controller(module->main_stack, GTK_EVENT_CONTROLLER(click));
 
@@ -635,22 +786,11 @@ GtkWidget* create_audio_module() {
     g_signal_connect(scroll, "scroll", G_CALLBACK(on_scroll), module);
     gtk_widget_add_controller(module->main_stack, scroll);
 
-    // Init
     g_dbus_object_manager_client_new_for_bus(G_BUS_TYPE_SYSTEM, G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE, "org.bluez", "/", NULL, NULL, NULL, NULL, (GAsyncReadyCallback)on_bluez_manager_created, module);
     
-    g_autoptr(GDBusConnection) bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
-    module->mpris_name_watcher_id = g_dbus_connection_signal_subscribe(bus, "org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged", "/org/freedesktop/DBus", NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_name_owner_changed, module, NULL);
-    
-    g_autoptr(GVariant) result = g_dbus_connection_call_sync(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames", NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
-    if (result) {
-        g_autoptr(GVariantIter) iter; g_variant_get(result, "(as)", &iter); gchar *name;
-        while (g_variant_iter_loop(iter, "s", &name)) {
-            if (g_str_has_prefix(name, "org.mpris.MediaPlayer2.")) {
-                connect_to_mpris_player(name, module);
-                break;
-            }
-        }
-    }
+    g_dbus_proxy_new_for_bus(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL,
+        "com.meismeric.aurora.MediaManager", "/com/meismeric/aurora/MediaManager", "com.meismeric.aurora.MediaManager",
+        NULL, on_media_manager_ready, module);
 
     gtk_widget_set_visible(module->main_stack, FALSE);
 

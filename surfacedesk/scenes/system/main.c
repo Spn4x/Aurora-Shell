@@ -1,19 +1,7 @@
 // FILE: ./scenes/system/main.c
 #include <gtk/gtk.h>
-#include <stdint.h>
-#include <stdlib.h> 
 #include <gio/gio.h>
-
-// Rust Interface
-typedef struct {
-    double cpu_usage;
-    double ram_usage;
-    double temp_c;
-    uint64_t new_total;
-    uint64_t new_idle;
-} SystemStats;
-
-extern void rust_get_system_stats(uint64_t prev_total, uint64_t prev_idle, SystemStats *out);
+#include <stdlib.h> 
 
 typedef struct {
     GtkWidget *cpu_bar; GtkWidget *cpu_lbl;
@@ -21,83 +9,95 @@ typedef struct {
     GtkWidget *temp_bar; GtkWidget *temp_lbl;
     GtkWidget *bat_bar; GtkWidget *bat_lbl;
     
-    uint64_t last_total;
-    uint64_t last_idle;
-    guint poll_timer_id;
-    GDBusProxy *battery_proxy;
+    GDBusProxy *stats_proxy;
 } SysModule;
 
-static gboolean on_poll(gpointer data) {
-    SysModule *mod = data;
-    SystemStats stats;
-    
-    rust_get_system_stats(mod->last_total, mod->last_idle, &stats);
-    
-    mod->last_total = stats.new_total;
-    mod->last_idle = stats.new_idle;
-    
-    if (mod->cpu_bar) gtk_level_bar_set_value(GTK_LEVEL_BAR(mod->cpu_bar), stats.cpu_usage);
-    if (mod->cpu_lbl) {
-        char buf[32]; snprintf(buf, 32, "%.0f%%", stats.cpu_usage * 100);
-        gtk_label_set_text(GTK_LABEL(mod->cpu_lbl), buf);
-    }
-    
-    if (mod->ram_bar) gtk_level_bar_set_value(GTK_LEVEL_BAR(mod->ram_bar), stats.ram_usage);
-    if (mod->ram_lbl) {
-        char buf[32]; snprintf(buf, 32, "%.0f%%", stats.ram_usage * 100);
-        gtk_label_set_text(GTK_LABEL(mod->ram_lbl), buf);
+static void update_ui(SysModule *mod) {
+    if (!mod->stats_proxy) return;
+
+    g_autoptr(GVariant) cpu_v = g_dbus_proxy_get_cached_property(mod->stats_proxy, "CpuUsage");
+    g_autoptr(GVariant) ram_v = g_dbus_proxy_get_cached_property(mod->stats_proxy, "RamUsage");
+    g_autoptr(GVariant) temp_v = g_dbus_proxy_get_cached_property(mod->stats_proxy, "TempC");
+    g_autoptr(GVariant) bat_v = g_dbus_proxy_get_cached_property(mod->stats_proxy, "BatteryPercent");
+
+    if (cpu_v) {
+        double cpu = g_variant_get_double(cpu_v);
+        if (mod->cpu_bar) gtk_level_bar_set_value(GTK_LEVEL_BAR(mod->cpu_bar), cpu);
+        if (mod->cpu_lbl) {
+            char buf[32]; snprintf(buf, 32, "%.0f%%", cpu * 100);
+            gtk_label_set_text(GTK_LABEL(mod->cpu_lbl), buf);
+        }
     }
 
-    if (mod->temp_bar) gtk_level_bar_set_value(GTK_LEVEL_BAR(mod->temp_bar), stats.temp_c / 100.0);
-    if (mod->temp_lbl) {
-        char buf[32]; snprintf(buf, 32, "%.0f°C", stats.temp_c);
-        gtk_label_set_text(GTK_LABEL(mod->temp_lbl), buf);
+    if (ram_v) {
+        double ram = g_variant_get_double(ram_v);
+        if (mod->ram_bar) gtk_level_bar_set_value(GTK_LEVEL_BAR(mod->ram_bar), ram);
+        if (mod->ram_lbl) {
+            char buf[32]; snprintf(buf, 32, "%.0f%%", ram * 100);
+            gtk_label_set_text(GTK_LABEL(mod->ram_lbl), buf);
+        }
     }
 
-    return G_SOURCE_CONTINUE;
-}
+    if (temp_v) {
+        double temp = g_variant_get_double(temp_v);
+        if (mod->temp_bar) gtk_level_bar_set_value(GTK_LEVEL_BAR(mod->temp_bar), temp / 100.0);
+        if (mod->temp_lbl) {
+            char buf[32]; snprintf(buf, 32, "%.0f°C", temp);
+            gtk_label_set_text(GTK_LABEL(mod->temp_lbl), buf);
+        }
+    }
 
-static void on_bat_change(GDBusProxy *proxy, GVariant *chg, const gchar *const *inv, gpointer user_data) {
-    (void)chg; (void)inv;
-    SysModule *mod = user_data;
-    g_autoptr(GVariant) v = g_dbus_proxy_get_cached_property(proxy, "Percentage");
-    if (v) {
-        double pct = g_variant_get_double(v);
-        if (mod->bat_bar) gtk_level_bar_set_value(GTK_LEVEL_BAR(mod->bat_bar), pct / 100.0);
+    if (bat_v) {
+        double bat = g_variant_get_double(bat_v);
+        if (mod->bat_bar) gtk_level_bar_set_value(GTK_LEVEL_BAR(mod->bat_bar), bat / 100.0);
         if (mod->bat_lbl) {
-            char buf[32]; snprintf(buf, 32, "%.0f%%", pct);
+            char buf[32]; snprintf(buf, 32, "%.0f%%", bat);
             gtk_label_set_text(GTK_LABEL(mod->bat_lbl), buf);
         }
     }
 }
 
-static void on_bat_ready(GObject *s, GAsyncResult *r, gpointer d) {
-    SysModule *mod = d; g_autoptr(GError) e = NULL;
-    mod->battery_proxy = g_dbus_proxy_new_for_bus_finish(r, &e);
-    if (mod->battery_proxy) {
-        g_signal_connect(mod->battery_proxy, "g-properties-changed", G_CALLBACK(on_bat_change), mod);
-        on_bat_change(mod->battery_proxy, NULL, NULL, mod);
+static void on_stats_changed(GDBusProxy *proxy, GVariant *chg, const gchar *const *inv, gpointer user_data) {
+    (void)proxy; (void)chg; (void)inv;
+    update_ui((SysModule*)user_data);
+}
+
+static void on_name_owner_changed(GObject *object, GParamSpec *pspec, gpointer user_data) {
+    (void)object; (void)pspec;
+    SysModule *mod = (SysModule*)user_data;
+    g_autofree gchar *owner = g_dbus_proxy_get_name_owner(mod->stats_proxy);
+    if (owner) update_ui(mod);
+}
+
+static void on_proxy_ready(GObject *source, GAsyncResult *res, gpointer user_data) {
+    SysModule *mod = user_data;
+    GError *error = NULL;
+    mod->stats_proxy = g_dbus_proxy_new_for_bus_finish(res, &error);
+    
+    if (mod->stats_proxy) {
+        g_signal_connect(mod->stats_proxy, "g-properties-changed", G_CALLBACK(on_stats_changed), mod);
+        g_signal_connect(mod->stats_proxy, "notify::g-name-owner", G_CALLBACK(on_name_owner_changed), mod);
+        
+        g_autofree gchar *owner = g_dbus_proxy_get_name_owner(mod->stats_proxy);
+        if (owner) update_ui(mod); // Initial paint
+    } else {
+        g_warning("System Widget failed to connect to Daemon: %s", error->message);
+        g_error_free(error);
     }
 }
 
-static void on_upower_ready(GDBusConnection *c, const gchar *n, const gchar *o, gpointer d) {
-    (void)c; (void)n; (void)o;
-    g_dbus_proxy_new_for_bus(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL, 
-        "org.freedesktop.UPower", "/org/freedesktop/UPower/devices/DisplayDevice", 
-        "org.freedesktop.UPower.Device", NULL, (GAsyncReadyCallback)on_bat_ready, d);
-}
-
 static void on_destroy(GtkWidget *w, gpointer data) {
+    (void)w;
     SysModule *mod = data;
-    if (mod->poll_timer_id) g_source_remove(mod->poll_timer_id);
-    if (mod->battery_proxy) g_object_unref(mod->battery_proxy);
+    if (mod->stats_proxy) g_object_unref(mod->stats_proxy);
     g_free(mod);
 }
 
 static void init_system_module(SysModule *mod, GtkWidget *wrapper) {
-    g_bus_watch_name(G_BUS_TYPE_SYSTEM, "org.freedesktop.UPower", G_BUS_NAME_WATCHER_FLAGS_NONE, on_upower_ready, NULL, mod, NULL);
-    on_poll(mod);
-    mod->poll_timer_id = g_timeout_add_seconds(2, on_poll, mod);
+    g_dbus_proxy_new_for_bus(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL,
+        "com.meismeric.aurora.Stats", "/com/meismeric/aurora/Stats", "com.meismeric.aurora.Stats",
+        NULL, on_proxy_ready, mod);
+    
     g_signal_connect(wrapper, "destroy", G_CALLBACK(on_destroy), mod);
 }
 
