@@ -15,6 +15,7 @@ static GtkWidget *shelf_box = NULL;
 static char *pending_preview_path = NULL; 
 static guint preview_debounce_id = 0;
 static gint64 last_scroll_time = 0;
+static int center_retries = 0;
 
 // CACHE SYSTEM
 static GHashTable *wallpaper_cache = NULL; 
@@ -226,9 +227,12 @@ static void trigger_snap_on_widget(GtkWidget *target_widget) {
     if (!shelf_scroller || !target_widget) return;
 
     graphene_rect_t bounds;
+    // IMPORTANT: Wait for GTK to physically allocate the box.
     if (!gtk_widget_compute_bounds(target_widget, shelf_box, &bounds)) return;
+    if (bounds.size.width <= 0) return;
 
     double item_center_box = bounds.origin.x + (bounds.size.width / 2.0);
+
     double viewport_w = (double)gtk_widget_get_width(shelf_scroller);
     if (viewport_w < 1) viewport_w = SHELF_WIDTH;
 
@@ -236,8 +240,9 @@ static void trigger_snap_on_widget(GtkWidget *target_widget) {
     
     GtkAdjustment *adj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(shelf_scroller));
     double max = gtk_adjustment_get_upper(adj) - gtk_adjustment_get_page_size(adj);
+    
     if (target_x < 0) target_x = 0;
-    if (target_x > max) target_x = max;
+    if (max > 0 && target_x > max) target_x = max; 
 
     gtk_adjustment_set_value(adj, target_x);
     update_active_item_visuals();
@@ -356,7 +361,6 @@ GtkWidget *create_wallpaper_shelf(void) {
     gtk_widget_set_hexpand(container, FALSE); 
     gtk_widget_set_halign(container, GTK_ALIGN_CENTER);
 
-    // CSS TRANSFORMS (UPDATED: Scale Only, No Shadow, No Lift)
     GtkCssProvider *p = gtk_css_provider_new();
     gtk_css_provider_load_from_string(p, 
         ".wallpaper-card { "
@@ -364,12 +368,11 @@ GtkWidget *create_wallpaper_shelf(void) {
         "   transition: transform 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94); "
         "}"
         ".active-item { "
-        "   transform: scale(1.15); " // Scales up relative to neighbors
-        "   z-index: 100; "           // Renders on top of neighbors
+        "   transform: scale(1.15); " 
+        "   z-index: 100; "           
         "}"
         ".active-item .wallpaper-img { "
         "   border: 3px solid white; "
-        "   /* No Shadow */ "
         "}"
     );
     gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(p), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -418,22 +421,66 @@ GtkWidget *create_wallpaper_shelf(void) {
     return revealer;
 }
 
+// --- POLLING LOOP (FAST) ---
+// Retries every 10ms until GTK has laid out the actual widget
 static gboolean initial_center_cb(gpointer user_data) {
-    if (shelf_box) {
-        GtkWidget *first = gtk_widget_get_first_child(shelf_box);
-        if (first) {
-            gtk_widget_grab_focus(first);
-            GtkAdjustment *adj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(shelf_scroller));
-            gtk_adjustment_set_value(adj, 0);
-            update_active_item_visuals();
+    if (!shelf_box || !shelf_scroller) return G_SOURCE_REMOVE;
+
+    GtkAdjustment *adj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(shelf_scroller));
+    double max = gtk_adjustment_get_upper(adj) - gtk_adjustment_get_page_size(adj);
+    
+    // If max is 0, GTK hasn't laid out the scrolled window yet. Retry shortly.
+    if (max <= 0 && center_retries < 20) {
+        center_retries++;
+        return G_SOURCE_CONTINUE;
+    }
+    center_retries = 0; 
+    
+    GtkWidget *target = NULL;
+    GtkWidget *child = gtk_widget_get_first_child(shelf_box);
+    
+    while (child) {
+        if (GTK_IS_LABEL(child)) {
+            child = gtk_widget_get_next_sibling(child);
+            continue;
+        }
+        
+        const char *path = g_object_get_data(G_OBJECT(child), "wallpaper-path");
+        if (path && app_state.current_wallpaper_path && g_strcmp0(path, app_state.current_wallpaper_path) == 0) {
+            target = child;
+            break;
+        }
+        child = gtk_widget_get_next_sibling(child);
+    }
+    
+    if (!target) target = gtk_widget_get_first_child(shelf_box);
+    
+    if (target && !GTK_IS_LABEL(target)) {
+        gtk_widget_grab_focus(target);
+        
+        graphene_rect_t bounds;
+        if (gtk_widget_compute_bounds(target, shelf_box, &bounds) && bounds.size.width > 0) {
+            double item_center_box = bounds.origin.x + (bounds.size.width / 2.0);
+            double viewport_w = (double)gtk_widget_get_width(shelf_scroller);
+            if (viewport_w < 1) viewport_w = SHELF_WIDTH;
+
+            double target_x = (item_center_box + SIDE_PADDING) - (viewport_w / 2.0);
+            if (target_x < 0) target_x = 0;
+            if (max > 0 && target_x > max) target_x = max; 
             
-            const char* path = g_object_get_data(G_OBJECT(first), "wallpaper-path");
-            perform_preview_now(path);
+            gtk_adjustment_set_value(adj, target_x);
+            update_active_item_visuals();
+        } else {
+            center_retries++;
+            return G_SOURCE_CONTINUE;
         }
     }
+    
     return G_SOURCE_REMOVE;
 }
 
 void wallpaper_chooser_grab_focus(void) {
-    g_idle_add(initial_center_cb, NULL);
+    center_retries = 0;
+    // We poll at 10ms until the layout is ready and bounds are computed successfully
+    g_timeout_add(10, initial_center_cb, NULL);
 }

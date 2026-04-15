@@ -3,6 +3,7 @@
 #include <gtk4-layer-shell.h>
 #include <math.h>
 #include <gdk/gdk.h>
+#include <gio/gunixsocketaddress.h>
 
 #include "globals.h"
 #include "drawer.h"
@@ -16,6 +17,84 @@
 SurfaceDeskApp app_state;
 static GtkWidget *dim_layer = NULL;
 static guint dbus_owner_id = 0;
+
+// --- GLOBALS FOR SPECIAL MODE (WORKSPACE & WIDGET TOGGLING) ---
+static int saved_workspace_id = -1;
+static gboolean is_in_special_mode = FALSE;
+static guint special_mode_delay_id = 0; 
+
+// --- FAST IPC HELPER ---
+static int get_active_workspace_ipc() {
+    const gchar *sig = g_getenv("HYPRLAND_INSTANCE_SIGNATURE");
+    const gchar *xdg = g_getenv("XDG_RUNTIME_DIR");
+    if (!sig || !xdg) return -1;
+    
+    g_autofree gchar *socket_path = g_build_filename(xdg, "hypr", sig, ".socket.sock", NULL);
+    
+    g_autoptr(GSocketClient) client = g_socket_client_new();
+    g_autoptr(GSocketAddress) address = g_unix_socket_address_new(socket_path);
+    g_autoptr(GError) error = NULL;
+    
+    g_autoptr(GSocketConnection) conn = g_socket_client_connect(client, G_SOCKET_CONNECTABLE(address), NULL, &error);
+    if (error || !conn) return -1;
+    
+    GOutputStream *ostream = g_io_stream_get_output_stream(G_IO_STREAM(conn));
+    GInputStream *istream = g_io_stream_get_input_stream(G_IO_STREAM(conn));
+    
+    const char *cmd = "activeworkspace";
+    if (!g_output_stream_write_all(ostream, cmd, strlen(cmd), NULL, NULL, NULL)) return -1;
+    
+    char buffer[256] = {0};
+    if (g_input_stream_read(istream, buffer, sizeof(buffer) - 1, NULL, NULL) > 0) {
+        int id = -1;
+        if (sscanf(buffer, "workspace ID %d", &id) == 1) {
+            return id;
+        }
+    }
+    return -1;
+}
+
+static void hide_orchestrator_widgets() {
+    g_autoptr(GDBusConnection) conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (conn) {
+        g_dbus_connection_call(conn, "com.meismeric.aurora.shell", "/com/meismeric/aurora/shell", "com.meismeric.aurora.shell", "HideAllWidgets", NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+    }
+}
+
+static void restore_orchestrator_widgets() {
+    g_autoptr(GDBusConnection) conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (conn) {
+        g_dbus_connection_call(conn, "com.meismeric.aurora.shell", "/com/meismeric/aurora/shell", "com.meismeric.aurora.shell", "RestoreAllWidgets", NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+    }
+}
+
+// 1. IMMEDIATELY change workspace
+static void enter_special_mode() {
+    if (is_in_special_mode) return;
+    is_in_special_mode = TRUE;
+
+    saved_workspace_id = get_active_workspace_ipc();
+    g_spawn_command_line_async("hyprctl dispatch workspace empty", NULL);
+
+    hide_orchestrator_widgets();
+}
+
+// Exit and restore everything
+static void exit_special_mode() {
+    if (!is_in_special_mode) return;
+    if (app_state.is_editing || app_state.is_picking_wallpaper) return; 
+    
+    is_in_special_mode = FALSE;
+
+    restore_orchestrator_widgets();
+
+    if (saved_workspace_id != -1) {
+        g_autofree gchar *cmd = g_strdup_printf("hyprctl dispatch workspace %d", saved_workspace_id);
+        g_spawn_command_line_async(cmd, NULL);
+        saved_workspace_id = -1; 
+    }
+}
+// ------------------------------------------------------------------
 
 static void load_css() {
     GtkCssProvider *provider = gtk_css_provider_new();
@@ -101,12 +180,10 @@ static void on_desktop_clicked(GtkGestureClick *gesture, int n_press, double x, 
     if (app_state.is_editing) editor_on_click_select(gesture, n_press, x, y, user_data);
 }
 
-// THE FIX: Scroll zoom disabled entirely!
 static gboolean on_desktop_scroll(GtkEventControllerScroll *controller, double dx, double dy, gpointer user_data) {
     return FALSE; 
 }
 
-// THE FIX: Properly capture Escape to untoggle, without letting it leak.
 static gboolean on_key_pressed(GtkEventControllerKey *c, guint keyval, guint keycode, GdkModifierType state, gpointer user_data) {
     if (keyval == GDK_KEY_Escape) {
         if (app_state.is_editing) set_edit_mode(FALSE);
@@ -121,79 +198,132 @@ static gboolean on_key_pressed(GtkEventControllerKey *c, guint keyval, guint key
     return FALSE;
 }
 
+// 2. DELAYED GTK scaling animations
+static gboolean delayed_wallpaper_visuals(gpointer data) {
+    special_mode_delay_id = 0;
+    
+    if (app_state.original_wallpaper_path) g_free(app_state.original_wallpaper_path);
+    app_state.original_wallpaper_path = g_strdup(app_state.current_wallpaper_path);
+    
+    gtk_widget_add_css_class(app_state.desktop_container, "editing");
+    gtk_widget_set_can_target(app_state.physics.overlay_draw, FALSE);
+    
+    if (app_state.window) {
+        gtk_layer_set_keyboard_mode(app_state.window, GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE);
+        gtk_window_present(app_state.window);
+        gtk_widget_grab_focus(app_state.desktop_container);
+    }
+    
+    if (dim_layer) gtk_widget_add_css_class(dim_layer, "dimmed");
+
+    recalculate_targets(-1, -1);
+    app_state.physics.current_offset_x = app_state.physics.target_offset_x;
+    app_state.physics.current_offset_y = app_state.physics.target_offset_y;
+
+    // Call update UI here, AFTER 400ms delay
+    update_ui_visibility();
+    gtk_widget_queue_draw(app_state.physics.overlay_draw);
+
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean delayed_editor_visuals(gpointer data) {
+    special_mode_delay_id = 0;
+
+    gtk_widget_add_css_class(app_state.desktop_container, "editing");
+    gtk_widget_set_visible(app_state.show_drawer_btn, FALSE);
+    gtk_widget_set_can_target(app_state.physics.overlay_draw, TRUE);
+    
+    if (app_state.window) {
+        gtk_layer_set_keyboard_mode(app_state.window, GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE);
+        gtk_window_present(app_state.window);
+        gtk_widget_grab_focus(app_state.desktop_container);
+    }
+    
+    if (dim_layer) gtk_widget_add_css_class(dim_layer, "dimmed");
+
+    drawer_show_library();
+    recalculate_targets(-1, -1);
+    app_state.physics.current_offset_x = app_state.physics.target_offset_x;
+    app_state.physics.current_offset_y = app_state.physics.target_offset_y;
+    for (GList *l = app_state.physics.boxes; l != NULL; l = l->next) update_widget_geometry_safe((Box*)l->data);
+
+    // Call update UI here, AFTER 400ms delay
+    update_ui_visibility();
+    gtk_widget_queue_draw(app_state.physics.overlay_draw);
+
+    return G_SOURCE_REMOVE;
+}
+
 void app_set_wallpaper_mode(gboolean enable) {
     if (app_state.is_picking_wallpaper == enable) return;
-    if (enable) {
-        app_state.is_editing = FALSE; app_state.is_picking_wallpaper = TRUE;
-        if (app_state.original_wallpaper_path) g_free(app_state.original_wallpaper_path);
-        app_state.original_wallpaper_path = g_strdup(app_state.current_wallpaper_path);
-        gtk_widget_add_css_class(app_state.desktop_container, "editing");
-        gtk_widget_set_can_target(app_state.physics.overlay_draw, FALSE);
-        
-        // THE FIX: Force window to grab focus so Esc key events register instantly
-        if (app_state.window) {
-            gtk_layer_set_keyboard_mode(app_state.window, GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE);
-            gtk_window_present(app_state.window);
-            gtk_widget_grab_focus(app_state.desktop_container);
-        }
-        
-        if (dim_layer) gtk_widget_add_css_class(dim_layer, "dimmed");
 
-        recalculate_targets(-1, -1);
-        app_state.physics.current_offset_x = app_state.physics.target_offset_x;
-        app_state.physics.current_offset_y = app_state.physics.target_offset_y;
+    if (special_mode_delay_id > 0) {
+        g_source_remove(special_mode_delay_id);
+        special_mode_delay_id = 0;
+    }
+
+    if (enable) {
+        app_state.is_editing = FALSE; 
+        app_state.is_picking_wallpaper = TRUE;
+        
+        enter_special_mode(); 
+        
+        // Wait 210ms for Hyprland to finish sliding before rendering GTK layout
+        special_mode_delay_id = g_timeout_add(210, delayed_wallpaper_visuals, NULL);
     } else {
         app_state.is_picking_wallpaper = FALSE;
+        
+        exit_special_mode(); 
+
         if (!app_state.is_editing) {
             gtk_widget_remove_css_class(app_state.desktop_container, "editing");
             gtk_widget_set_can_target(app_state.physics.overlay_draw, FALSE);
             
-            // THE FIX: Release keyboard focus so Esc drops cleanly and returns focus to other apps
             if (app_state.window) {
                 gtk_layer_set_keyboard_mode(app_state.window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
             }
             if (dim_layer) gtk_widget_remove_css_class(dim_layer, "dimmed");
         }
+        // Exiting is instant, no delay
+        update_ui_visibility();
+        gtk_widget_queue_draw(app_state.physics.overlay_draw);
     }
-    update_ui_visibility();
-    gtk_widget_queue_draw(app_state.physics.overlay_draw);
 }
 
 static void set_edit_mode(gboolean enable) {
     if (app_state.is_editing == enable) return;
-    if (enable) app_state.is_picking_wallpaper = FALSE;
-    app_state.is_editing = enable;
-    if (enable) {
-        gtk_widget_add_css_class(app_state.desktop_container, "editing");
-        gtk_widget_set_visible(app_state.show_drawer_btn, FALSE);
-        gtk_widget_set_can_target(app_state.physics.overlay_draw, TRUE);
-        
-        // THE FIX: Force window to grab focus so Esc key events register instantly
-        if (app_state.window) {
-            gtk_layer_set_keyboard_mode(app_state.window, GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE);
-            gtk_window_present(app_state.window);
-            gtk_widget_grab_focus(app_state.desktop_container);
-        }
-        
-        if (dim_layer) gtk_widget_add_css_class(dim_layer, "dimmed");
 
-        drawer_show_library();
-        recalculate_targets(-1, -1);
-        app_state.physics.current_offset_x = app_state.physics.target_offset_x;
-        app_state.physics.current_offset_y = app_state.physics.target_offset_y;
-        for (GList *l = app_state.physics.boxes; l != NULL; l = l->next) update_widget_geometry_safe((Box*)l->data);
+    if (special_mode_delay_id > 0) {
+        g_source_remove(special_mode_delay_id);
+        special_mode_delay_id = 0;
+    }
+
+    if (enable) {
+        app_state.is_picking_wallpaper = FALSE;
+        app_state.is_editing = TRUE;
+        
+        enter_special_mode(); 
+        
+        // Wait 400ms for Hyprland to finish sliding before rendering GTK layout
+        special_mode_delay_id = g_timeout_add(400, delayed_editor_visuals, NULL);
     } else {
+        app_state.is_editing = FALSE;
+        
+        exit_special_mode(); 
+        
         recalculate_targets(-1, -1);
         if (dim_layer) gtk_widget_remove_css_class(dim_layer, "dimmed");
+        
         if (!app_state.is_picking_wallpaper) {
             gtk_widget_remove_css_class(app_state.desktop_container, "editing");
             gtk_widget_set_can_target(app_state.physics.overlay_draw, FALSE);
             
-            // THE FIX: Release keyboard focus so Esc drops cleanly and returns focus to other apps
             if (app_state.window) {
                 gtk_layer_set_keyboard_mode(app_state.window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
             }
         }
+
         app_state.physics.active_box = NULL;
         app_state.physics.selected_box = NULL;
         if (app_state.window) {
@@ -201,9 +331,11 @@ static void set_edit_mode(gboolean enable) {
             GdkSurface *surface = gtk_native_get_surface(native);
             if (surface) gdk_surface_set_cursor(surface, NULL);
         }
+
+        // Exiting is instant, no delay
+        update_ui_visibility();
+        gtk_widget_queue_draw(app_state.physics.overlay_draw);
     }
-    update_ui_visibility();
-    gtk_widget_queue_draw(app_state.physics.overlay_draw);
 }
 
 static GtkWidget* create_trash_bin(void) {
@@ -297,7 +429,6 @@ static void on_bus_acquired(GDBusConnection *c, const gchar *name, gpointer ud) 
 
 static void on_realize(GtkWidget *widget, gpointer data) {
     app_state.window = GTK_WINDOW(gtk_widget_get_root(widget));
-    // THE FIX: Set background widget to NONE on boot so it never intercepts key presses
     gtk_layer_set_keyboard_mode(app_state.window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
 }
 
@@ -323,8 +454,6 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     gtk_widget_add_css_class(app_state.desktop_container, "desktop-container");
     gtk_widget_set_hexpand(app_state.desktop_container, TRUE);
     gtk_widget_set_vexpand(app_state.desktop_container, TRUE);
-    
-    // THE FIX: Allow GTK to focus the container so our key events fire reliably
     gtk_widget_set_focusable(app_state.desktop_container, TRUE);
 
     GtkEventController *scroll = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
@@ -336,8 +465,6 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     app_state.wallpaper_image = gtk_picture_new();
     gtk_picture_set_content_fit(GTK_PICTURE(app_state.wallpaper_image), GTK_CONTENT_FIT_COVER);
     gtk_widget_set_can_target(app_state.wallpaper_image, TRUE); 
-    
-    // THE FIX: Wallpaper goes back INSIDE desktop_container so it zooms down perfectly
     gtk_overlay_set_child(GTK_OVERLAY(app_state.desktop_container), app_state.wallpaper_image);
     
     GtkGesture *wall_click = gtk_gesture_click_new();

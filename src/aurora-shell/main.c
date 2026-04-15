@@ -15,6 +15,7 @@ typedef struct {
     GtkWidget *widget;
     gboolean is_interactive;
     JsonObject *config_obj;
+    gboolean was_visible; // NEW: Tracks if the widget was visible before being hidden
 } WidgetState;
 
 typedef struct {
@@ -306,7 +307,11 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     }
     
     WidgetState *state = g_new0(WidgetState, 1);
-    state->window = window; state->widget = widget; state->is_interactive = is_interactive; state->config_obj = item_obj;
+    state->window = window; 
+    state->widget = widget; 
+    state->is_interactive = is_interactive; 
+    state->config_obj = item_obj;
+    state->was_visible = FALSE; // Init
 
     g_signal_connect(window, "destroy", G_CALLBACK(on_widget_window_destroyed), state);
 
@@ -374,6 +379,47 @@ static void on_qscreen_pre_capture_finished(GPid pid, gint status, gpointer user
     } else { g_remove(data->temp_path); }
     g_free(data->temp_path); g_free(data);
 }
+
+// --- NEW: D-Bus Command Receiver to Hide/Restore Widgets for the Editor ---
+static void handle_shell_method_call(GDBusConnection *c, const gchar *s, const gchar *o, const gchar *i, const gchar *method, GVariant *p, GDBusMethodInvocation *inv, gpointer ud) {
+    (void)c; (void)s; (void)o; (void)i; (void)p;
+    AuroraShell *shell = (AuroraShell *)ud;
+    
+    if (g_strcmp0(method, "HideAllWidgets") == 0) {
+        GHashTableIter iter;
+        gpointer key, value;
+        g_hash_table_iter_init(&iter, shell->widgets);
+        while (g_hash_table_iter_next(&iter, &key, &value)) {
+            const char *name = (const char *)key;
+            WidgetState *ws = (WidgetState *)value;
+            if (g_strcmp0(name, "surfacedesk") != 0 && ws->window) {
+                ws->was_visible = gtk_widget_get_visible(GTK_WIDGET(ws->window));
+                if (ws->was_visible) {
+                    gtk_widget_set_visible(GTK_WIDGET(ws->window), FALSE);
+                }
+            }
+        }
+        g_dbus_method_invocation_return_value(inv, NULL);
+    } 
+    else if (g_strcmp0(method, "RestoreAllWidgets") == 0) {
+        GHashTableIter iter;
+        gpointer key, value;
+        g_hash_table_iter_init(&iter, shell->widgets);
+        while (g_hash_table_iter_next(&iter, &key, &value)) {
+            WidgetState *ws = (WidgetState *)value;
+            if (ws->window && ws->was_visible) {
+                gtk_widget_set_visible(GTK_WIDGET(ws->window), TRUE);
+                ws->was_visible = FALSE;
+            }
+        }
+        g_dbus_method_invocation_return_value(inv, NULL);
+    } 
+    else {
+        g_dbus_method_invocation_return_error(inv, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD, "Unknown method %s", method);
+    }
+}
+
+static const GDBusInterfaceVTable shell_vtable = { .method_call = handle_shell_method_call };
 
 static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdline, gpointer user_data) {
     AuroraShell *shell = (AuroraShell *)user_data;
@@ -453,6 +499,19 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
 
 static void activate_handler(GApplication *app, gpointer user_data) {
     (void)app; AuroraShell *shell = (AuroraShell *)user_data;
+
+    // Register our D-Bus interface so plugins like surfacedesk can communicate back to us
+    GDBusConnection *conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (conn) {
+        const gchar* xml = "<node><interface name='com.meismeric.aurora.shell'>"
+                           "<method name='HideAllWidgets'/>"
+                           "<method name='RestoreAllWidgets'/>"
+                           "</interface></node>";
+        GDBusNodeInfo *node = g_dbus_node_info_new_for_xml(xml, NULL);
+        g_dbus_connection_register_object(conn, "/com/meismeric/aurora/shell", node->interfaces[0], &shell_vtable, shell, NULL, NULL);
+        g_dbus_node_info_unref(node);
+        g_object_unref(conn);
+    }
 
     ensure_user_config_exists();
     load_global_theme(shell);
