@@ -92,29 +92,62 @@ static void apply_icon_name(TrayItem *item, const gchar *icon_name) {
 
     GtkIconTheme *theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
 
-    // 1. Try IconName from Theme (Native Apps -> Sharp 16px)
+    // 1. Support IconThemePath (CRITICAL for Electron/Chromium/Spotify apps)
+    if (item->item_proxy) {
+        g_autoptr(GVariant) theme_path_var = g_dbus_proxy_get_cached_property(item->item_proxy, "IconThemePath");
+        if (theme_path_var) {
+            const gchar *theme_path = g_variant_get_string(theme_path_var, NULL);
+            if (theme_path && strlen(theme_path) > 0) {
+                // Add the app's temporary folder to GTK's icon search path
+                gtk_icon_theme_add_search_path(theme, theme_path);
+            }
+        }
+    }
+
+    // 2. Try Absolute Path directly (Some apps pass the direct file path as the IconName)
+    if (icon_name && g_path_is_absolute(icon_name) && g_file_test(icon_name, G_FILE_TEST_EXISTS)) {
+        gtk_image_set_pixel_size(GTK_IMAGE(item->icon), 20); // 20px looks better for full-color icons
+        gtk_image_set_from_file(GTK_IMAGE(item->icon), icon_name);
+        return;
+    }
+
+    // 3. Try IconName from Theme (Native Apps -> Sharp 16px)
     if (icon_name && strlen(icon_name) > 0) {
         g_autofree gchar *sym_name = g_strdup_printf("%s-symbolic", icon_name);
-        if (gtk_icon_theme_has_icon(theme, sym_name) || gtk_icon_theme_has_icon(theme, icon_name)) { 
+        
+        if (gtk_icon_theme_has_icon(theme, sym_name)) { 
             gtk_image_set_pixel_size(GTK_IMAGE(item->icon), 16);
-            gtk_image_set_from_icon_name(GTK_IMAGE(item->icon), 
-                gtk_icon_theme_has_icon(theme, sym_name) ? sym_name : icon_name); 
+            gtk_image_set_from_icon_name(GTK_IMAGE(item->icon), sym_name); 
+            return;
+        } else if (gtk_icon_theme_has_icon(theme, icon_name)) {
+            gtk_image_set_pixel_size(GTK_IMAGE(item->icon), 20);
+            gtk_image_set_from_icon_name(GTK_IMAGE(item->icon), icon_name); 
+            return;
+        }
+        
+        // Fuzzy matching for common stubborn apps
+        g_autofree gchar *lower_icon = g_ascii_strdown(icon_name, -1);
+        if (strstr(lower_icon, "spotify")) {
+            gtk_image_set_pixel_size(GTK_IMAGE(item->icon), 20);
+            gtk_image_set_from_icon_name(GTK_IMAGE(item->icon), "spotify");
+            return;
+        } else if (strstr(lower_icon, "discord")) {
+            gtk_image_set_pixel_size(GTK_IMAGE(item->icon), 20);
+            gtk_image_set_from_icon_name(GTK_IMAGE(item->icon), "discord");
             return;
         }
     }
 
-    // 2. Try IconPixmap fallback (Flatpaks / OBS / Discord -> Scaled 24px)
+    // 4. Try IconPixmap fallback (Flatpaks / OBS)
     if (item->item_proxy) {
         g_autoptr(GVariant) pixmap_var = g_dbus_proxy_get_cached_property(item->item_proxy, "IconPixmap");
         if (pixmap_var) {
             GdkPixbuf *pixbuf = extract_pixmap(pixmap_var);
             if (pixbuf) {
-                // 24px offsets the massive transparent padding apps like OBS add internally
                 int target_size = 20; 
                 GdkPixbuf *scaled = gdk_pixbuf_scale_simple(pixbuf, target_size, target_size, GDK_INTERP_BILINEAR);
                 GdkTexture *texture = gdk_texture_new_for_pixbuf(scaled);
                 
-                // Tell GTK this widget is allowed to take up the larger footprint
                 gtk_image_set_pixel_size(GTK_IMAGE(item->icon), target_size);
                 gtk_image_set_from_paintable(GTK_IMAGE(item->icon), GDK_PAINTABLE(texture));
                 
@@ -125,8 +158,24 @@ static void apply_icon_name(TrayItem *item, const gchar *icon_name) {
             }
         }
     }
+    
+    // 5. Try using the 'Id' property as a fallback (Spotify often relies on this)
+    if (item->item_proxy) {
+        g_autoptr(GVariant) id_var = g_dbus_proxy_get_cached_property(item->item_proxy, "Id");
+        if (id_var) {
+            const gchar *id_str = g_variant_get_string(id_var, NULL);
+            if (id_str && strlen(id_str) > 0) {
+                g_autofree gchar *lower_id = g_ascii_strdown(id_str, -1);
+                if (gtk_icon_theme_has_icon(theme, lower_id)) {
+                    gtk_image_set_pixel_size(GTK_IMAGE(item->icon), 20);
+                    gtk_image_set_from_icon_name(GTK_IMAGE(item->icon), lower_id);
+                    return;
+                }
+            }
+        }
+    }
 
-    // 3. Absolute Last Resort Fallbacks (Standard -> 16px)
+    // 6. Absolute Last Resort Fallbacks
     gtk_image_set_pixel_size(GTK_IMAGE(item->icon), 16);
     
     gchar *final_icon = "application-x-executable-symbolic";
