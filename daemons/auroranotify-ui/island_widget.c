@@ -30,7 +30,6 @@ void island_widget_set_expanded(IslandWidget *self, gboolean expanded) {
         gtk_stack_set_visible_child_name(GTK_STACK(self->content_stack), "expanded");
         gtk_widget_add_css_class(GTK_WIDGET(self), "expanded");
     } else {
-        // Instantly drop the expanded stack's required height to 0
         GtkWidget *placeholder = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
         island_widget_transition_to_expanded_child(self, placeholder);
 
@@ -76,9 +75,6 @@ static void island_widget_init(IslandWidget *self) {
     gtk_widget_set_halign(GTK_WIDGET(self), GTK_ALIGN_CENTER);
     gtk_widget_set_valign(GTK_WIDGET(self), GTK_ALIGN_START);
 
-    // FIX: Set ALL stacks to vhomogeneous = FALSE and hhomogeneous = FALSE.
-    // This stops the fading-out expanded notification from propping the ceiling up 
-    // and causing the vertical thickness/snap bug!
     self->content_stack = gtk_stack_new();
     gtk_stack_set_vhomogeneous(GTK_STACK(self->content_stack), FALSE);
     gtk_stack_set_hhomogeneous(GTK_STACK(self->content_stack), FALSE);
@@ -96,12 +92,21 @@ static void island_widget_init(IslandWidget *self) {
     self->expanded_stack = gtk_stack_new();
     gtk_stack_set_vhomogeneous(GTK_STACK(self->expanded_stack), FALSE);
     gtk_stack_set_hhomogeneous(GTK_STACK(self->expanded_stack), FALSE);
-    gtk_stack_set_transition_type(GTK_STACK(self->expanded_stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
+    gtk_stack_set_transition_type(GTK_STACK(self->expanded_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_UP_DOWN);
     gtk_stack_set_transition_duration(GTK_STACK(self->expanded_stack), 400);
     gtk_stack_add_named(GTK_STACK(self->content_stack), self->expanded_stack, "expanded");
 
-    island_widget_transition_to_pill_child(self, gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));
-    island_widget_transition_to_expanded_child(self, gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));
+    // THE FIX: Manually inject initial placeholders instead of calling public API methods
+    // that invoke strict GObject type checks on a partially initialized instance.
+    GtkWidget *center_box = gtk_center_box_new();
+    gtk_widget_set_hexpand(center_box, TRUE);
+    gtk_center_box_set_center_widget(GTK_CENTER_BOX(center_box), gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));
+    gtk_stack_add_child(GTK_STACK(self->pill_stack), center_box);
+    self->current_pill_child = center_box;
+
+    GtkWidget *exp_child = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_stack_add_child(GTK_STACK(self->expanded_stack), exp_child);
+    self->current_expanded_child = exp_child;
 }
 
 static void island_widget_class_init(IslandWidgetClass *klass G_GNUC_UNUSED) {}

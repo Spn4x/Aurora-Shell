@@ -38,9 +38,14 @@ static gboolean is_expanded = FALSE;
 static gboolean is_transitioning = FALSE;
 static NotificationData *current_notification_data = NULL;
 
-// --- PRIVACY STATE GLOBALS ---
+// --- PRIVACY & OSD STATE GLOBALS ---
 static gboolean privacy_mic_active = FALSE;
 static gboolean privacy_cam_active = FALSE;
+
+static gboolean is_osd_active = FALSE;
+static GtkWidget *current_osd_level_bar = NULL;
+static GtkWidget *current_osd_icon = NULL;
+static GtkWidget *current_osd_overvol_label = NULL; // NEW TRACKER
 
 static void create_main_window();
 static gboolean dismiss_or_transition(gpointer user_data);
@@ -63,12 +68,61 @@ static void free_notification_data(gpointer data) {
     g_free(notif);
 }
 
-// --- PRIVACY PILL BUILDER (Fixed Native Sizing & Text) ---
+// --- OSD PILL BUILDER ---
+static GtkWidget* create_osd_pill(const gchar *icon_name, double level) {
+    GtkWidget *overlay = gtk_overlay_new();
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
+    gtk_widget_set_margin_start(box, 14);
+    gtk_widget_set_margin_end(box, 14);
+
+    current_osd_icon = gtk_image_new_from_icon_name(icon_name);
+    gtk_image_set_pixel_size(GTK_IMAGE(current_osd_icon), 18);
+
+    current_osd_level_bar = gtk_level_bar_new();
+    gtk_level_bar_set_min_value(GTK_LEVEL_BAR(current_osd_level_bar), 0.0);
+    gtk_level_bar_set_max_value(GTK_LEVEL_BAR(current_osd_level_bar), 1.0);
+    gtk_widget_set_valign(current_osd_level_bar, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(current_osd_level_bar, "osd-bar");
+
+    current_osd_overvol_label = gtk_label_new("");
+    gtk_widget_add_css_class(current_osd_overvol_label, "osd-overvol");
+
+    // Check if over 100% volume
+    if (level > 1.0) {
+        gtk_level_bar_set_value(GTK_LEVEL_BAR(current_osd_level_bar), 1.0);
+        g_autofree gchar *text = g_strdup_printf("+%.0f%%", (level - 1.0) * 100.0);
+        gtk_label_set_text(GTK_LABEL(current_osd_overvol_label), text);
+        
+        // Shrink bar to accommodate text
+        gtk_widget_set_size_request(current_osd_level_bar, 150, 6);
+        gtk_widget_set_visible(current_osd_overvol_label, TRUE);
+    } else {
+        gtk_level_bar_set_value(GTK_LEVEL_BAR(current_osd_level_bar), level);
+        
+        // Full width bar, hide text
+        gtk_widget_set_size_request(current_osd_level_bar, 200, 6);
+        gtk_widget_set_visible(current_osd_overvol_label, FALSE);
+    }
+
+    gtk_box_append(GTK_BOX(box), current_osd_icon);
+    gtk_box_append(GTK_BOX(box), current_osd_level_bar);
+    gtk_box_append(GTK_BOX(box), current_osd_overvol_label);
+
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), box);
+
+    // Force strict dimensions so it matches normal notifications exactly
+    gtk_widget_set_size_request(overlay, 260, 42);
+
+    return overlay;
+}
+
+// --- PRIVACY PILL BUILDER ---
 static GtkWidget* create_privacy_pill(gboolean mic, gboolean cam) {
     GtkWidget *overlay = gtk_overlay_new();
 
-    // DUMMY BASE: Forces exact same native width and height as a normal notification
-    // using a space " " to establish the font line-height.
     GtkWidget *dummy_label = gtk_label_new(" ");
     gtk_widget_add_css_class(dummy_label, "summary");
     gtk_label_set_width_chars(GTK_LABEL(dummy_label), 25);
@@ -87,7 +141,7 @@ static GtkWidget* create_privacy_pill(gboolean mic, gboolean cam) {
     const char *text = "";
     if (mic && cam) {
         gtk_widget_add_css_class(dot, "both");
-        text = "Mic & Screen/Camera"; // Encompasses both OBS and Webcams
+        text = "Mic & Screen/Camera"; 
     } else if (mic) {
         gtk_widget_add_css_class(dot, "mic");
         text = "Microphone in use";
@@ -101,7 +155,6 @@ static GtkWidget* create_privacy_pill(gboolean mic, gboolean cam) {
 
     gtk_box_append(GTK_BOX(box), dot);
     gtk_box_append(GTK_BOX(box), label);
-
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), box);
 
     return overlay;
@@ -156,8 +209,6 @@ static void show_next_notification() {
         dismiss_or_transition(NULL);
         return;
     }
-    
-    g_print("UI: Processing notification: %s\n", current_notification_data->summary);
 
     GtkWidget *pill_summary = gtk_label_new(current_notification_data->summary);
     gtk_widget_add_css_class(pill_summary, "summary");
@@ -179,7 +230,6 @@ static void show_next_notification() {
 
 static gboolean outro_finished_callback(gpointer user_data G_GNUC_UNUSED) {
     if (!g_queue_is_empty(&notification_queue)) {
-        g_print("UI: Outro complete, but new items queued. Restarting.\n");
         g_timeout_add(50, add_dot_class_cb, island);
         g_timeout_add(ANIMATION_FINISH_DELAY_MS, process_initial_notification, NULL);
     } else {
@@ -203,6 +253,12 @@ static gboolean dismiss_or_transition(gpointer user_data G_GNUC_UNUSED) {
         current_timeout_id = 0;
     }
 
+    // Reset OSD state
+    is_osd_active = FALSE;
+    current_osd_level_bar = NULL;
+    current_osd_icon = NULL;
+    current_osd_overvol_label = NULL;
+
     if (!g_queue_is_empty(&notification_queue)) {
         show_next_notification();
     } 
@@ -217,6 +273,7 @@ static gboolean dismiss_or_transition(gpointer user_data G_GNUC_UNUSED) {
             island_widget_set_expanded(island, FALSE);
         }
         
+        // --- PRIVACY CHECK FALLBACK ---
         if (privacy_mic_active || privacy_cam_active) {
             GtkWidget *pill = create_privacy_pill(privacy_mic_active, privacy_cam_active);
             island_widget_transition_to_pill_child(island, pill);
@@ -226,9 +283,7 @@ static gboolean dismiss_or_transition(gpointer user_data G_GNUC_UNUSED) {
             
             g_timeout_add(ANIMATION_FINISH_DELAY_MS, outro_finished_callback, NULL);
         } else {
-            if (island) {
-                gtk_widget_remove_css_class(GTK_WIDGET(island), "pill");
-            }
+            if (island) gtk_widget_remove_css_class(GTK_WIDGET(island), "pill");
             g_timeout_add(250, remove_dot_class_cb, island);
             g_timeout_add(ANIMATION_FINISH_DELAY_MS, outro_finished_callback, NULL);
         }
@@ -245,7 +300,7 @@ static gboolean populate_expanded_content_cb(gpointer user_data G_GNUC_UNUSED) {
 }
 
 static void on_island_clicked(GtkGestureClick *g G_GNUC_UNUSED, int n G_GNUC_UNUSED, double x G_GNUC_UNUSED, double y G_GNUC_UNUSED, gpointer u G_GNUC_UNUSED) {
-    if (is_transitioning) return;
+    if (is_transitioning || is_osd_active) return;
 
     if (!is_expanded) {
         if (!current_notification_data) return; 
@@ -305,6 +360,7 @@ static gboolean remove_dot_class_cb(gpointer user_data) {
     return G_SOURCE_REMOVE;
 }
 
+// --- D-BUS HANDLERS ---
 static void handle_show_notification(GDBusMethodInvocation *inv, NotificationData *data) {
     g_queue_push_tail(&notification_queue, data);
     
@@ -330,16 +386,74 @@ static void handle_set_privacy_status(GDBusMethodInvocation *inv, gboolean mic, 
             GtkWidget *pill = create_privacy_pill(mic, cam);
             island_widget_transition_to_pill_child(island, pill);
             
+            gboolean was_visible = gtk_widget_get_visible(GTK_WIDGET(main_window));
+            gtk_widget_set_visible(GTK_WIDGET(main_window), TRUE);
+            
+            if (!was_visible) {
+                gtk_widget_add_css_class(GTK_WIDGET(island), "dot");
+                g_timeout_add(100, add_pill_class_cb, island);
+            } else {
+                gtk_widget_add_css_class(GTK_WIDGET(island), "dot");
+                gtk_widget_add_css_class(GTK_WIDGET(island), "pill");
+            }
+        } else {
+            if (island && gtk_widget_get_visible(GTK_WIDGET(main_window))) {
+                is_transitioning = TRUE;
+                gtk_widget_remove_css_class(GTK_WIDGET(island), "pill");
+                g_timeout_add(250, remove_dot_class_cb, island);
+                g_timeout_add(ANIMATION_FINISH_DELAY_MS, outro_finished_callback, NULL);
+            }
+        }
+    }
+    g_dbus_method_invocation_return_value(inv, NULL);
+}
+
+static void handle_show_osd(GDBusMethodInvocation *inv, const gchar *icon, double level) {
+    if (is_osd_active && current_osd_level_bar && current_osd_icon && current_osd_overvol_label) {
+        // Just update existing if it's already showing
+        gtk_image_set_from_icon_name(GTK_IMAGE(current_osd_icon), icon);
+        
+        if (level > 1.0) {
+            gtk_level_bar_set_value(GTK_LEVEL_BAR(current_osd_level_bar), 1.0);
+            g_autofree gchar *text = g_strdup_printf("+%.0f%%", (level - 1.0) * 100.0);
+            gtk_label_set_text(GTK_LABEL(current_osd_overvol_label), text);
+            gtk_widget_set_size_request(current_osd_level_bar, 150, 6);
+            gtk_widget_set_visible(current_osd_overvol_label, TRUE);
+        } else {
+            gtk_level_bar_set_value(GTK_LEVEL_BAR(current_osd_level_bar), level);
+            gtk_widget_set_size_request(current_osd_level_bar, 200, 6);
+            gtk_widget_set_visible(current_osd_overvol_label, FALSE);
+        }
+        
+        if (current_timeout_id > 0) g_source_remove(current_timeout_id);
+        current_timeout_id = g_timeout_add(1500, dismiss_or_transition, NULL);
+
+    } else {
+        // Force takeover of the island
+        is_busy = TRUE;
+        is_osd_active = TRUE;
+        if (main_window == NULL) create_main_window();
+
+        GtkWidget *pill = create_osd_pill(icon, level);
+        island_widget_transition_to_pill_child(island, pill);
+
+        gboolean was_visible = gtk_widget_get_visible(GTK_WIDGET(main_window));
+        gtk_widget_set_visible(GTK_WIDGET(main_window), TRUE);
+
+        if (!was_visible) {
+            gtk_widget_add_css_class(GTK_WIDGET(island), "dot");
+            g_timeout_add(100, add_pill_class_cb, island);
+        } else {
+            if (is_expanded) {
+                island_widget_set_expanded(island, FALSE);
+                is_expanded = FALSE;
+            }
             gtk_widget_add_css_class(GTK_WIDGET(island), "dot");
             gtk_widget_add_css_class(GTK_WIDGET(island), "pill");
-            gtk_widget_set_visible(GTK_WIDGET(main_window), TRUE);
-        } else {
-            if (island) {
-                gtk_widget_remove_css_class(GTK_WIDGET(island), "pill");
-                gtk_widget_remove_css_class(GTK_WIDGET(island), "dot");
-            }
-            if (main_window) gtk_widget_set_visible(GTK_WIDGET(main_window), FALSE);
         }
+        
+        if (current_timeout_id > 0) g_source_remove(current_timeout_id);
+        current_timeout_id = g_timeout_add(1500, dismiss_or_transition, NULL);
     }
     g_dbus_method_invocation_return_value(inv, NULL);
 }
@@ -357,6 +471,10 @@ static void dbus_method_dispatcher(GDBusConnection *c, const gchar *s, const gch
         gboolean mic, cam;
         g_variant_get(p, "(bb)", &mic, &cam);
         handle_set_privacy_status(inv, mic, cam);
+    } else if (g_strcmp0(m, "ShowOSD") == 0) {
+        gchar *icon; double level;
+        g_variant_get(p, "(&sd)", &icon, &level);
+        handle_show_osd(inv, icon, level);
     } else {
         g_dbus_method_invocation_return_error(inv, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD, "Unknown method '%s'", m);
     }
@@ -378,7 +496,13 @@ void create_main_window() {
     g_signal_connect(main_window, "destroy", G_CALLBACK(on_window_destroyed), NULL);
     
     GtkWidget *wrapper_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    // Buffer space to allow the bouncy animation to not get clipped by Wayland margins
+    gtk_widget_set_margin_start(wrapper_box, 40);
+    gtk_widget_set_margin_end(wrapper_box, 40);
+    gtk_widget_set_margin_bottom(wrapper_box, 40);
+    
     island = ISLAND_WIDGET(island_widget_new());
+    
     gtk_box_append(GTK_BOX(wrapper_box), GTK_WIDGET(island));
     gtk_window_set_child(main_window, wrapper_box);
 
@@ -416,13 +540,17 @@ static void on_bus_acquired(GDBusConnection *c, const gchar *n G_GNUC_UNUSED, gp
         "      <arg type='b' name='mic' direction='in'/>"
         "      <arg type='b' name='cam' direction='in'/>"
         "    </method>"
+        "    <method name='ShowOSD'>"
+        "      <arg type='s' name='icon' direction='in'/>"
+        "      <arg type='d' name='level' direction='in'/>"
+        "    </method>"
         "  </interface>"
         "</node>";
     
     static const GDBusInterfaceVTable vtable = { .method_call = dbus_method_dispatcher };
 
     GDBusNodeInfo *node = g_dbus_node_info_new_for_xml(xml, NULL);
-    guint registration_id = g_dbus_connection_register_object(c, UI_OBJECT_PATH, node->interfaces[0], &vtable, NULL, NULL, NULL);
+    g_dbus_connection_register_object(c, UI_OBJECT_PATH, node->interfaces[0], &vtable, NULL, NULL, NULL);
     g_dbus_node_info_unref(node);
 }
 
@@ -438,7 +566,8 @@ static void on_stylesheet_changed(GFileMonitor *monitor, GFile *file, GFile *oth
     }
 }
 
-static void free_css_reload_data(gpointer data) {
+static void free_css_reload_data(gpointer data, GClosure *closure) {
+    (void)closure;
     CssReloadData *reload_data = data;
     g_free(reload_data->path);
     g_free(reload_data);
@@ -502,6 +631,19 @@ static void on_app_startup(GApplication *a, gpointer ud G_GNUC_UNUSED) {
             loaded_css_path = g_strdup(system_css_path);
         }
     }
+
+    // --- Inject OSD LevelBar CSS Internally ---
+    const char *osd_css = 
+        ".osd-bar { margin: 0; padding: 0; transition: min-width 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94); }"
+        ".osd-bar trough { background-color: rgba(255,255,255,0.2); border-radius: 99px; min-height: 6px; margin: 0; }"
+        ".osd-bar block.filled { background-color: #ffffff; border-radius: 99px; border: none; box-shadow: none; }"
+        ".osd-bar block.empty { background-color: transparent; border: none; box-shadow: none; }"
+        ".osd-overvol { font-size: 12px; font-weight: 900; color: #ffffff; margin-left: 2px; }";
+    GtkCssProvider *osd_p = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(osd_p, osd_css);
+    gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(osd_p), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(osd_p);
+    // ------------------------------------------
 
     gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(p), GTK_STYLE_PROVIDER_PRIORITY_USER);
     

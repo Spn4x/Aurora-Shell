@@ -174,7 +174,7 @@ static void on_config_changed(GFileMonitor *monitor, GFile *file, GFile *other_f
         system("pkill -15 -x auroranotifyd"); 
         system("pkill -15 -x aurora-insight-daemon");
         system("pkill -15 -x auroralauncherd"); 
-        
+        system("pkill -15 -x aurora-osd-daemon");
         if (global_argv) execv("/proc/self/exe", global_argv);
         else execl("/proc/self/exe", "aurora-shell", NULL);
         exit(1);
