@@ -49,43 +49,92 @@ static void free_tray_item(gpointer data);
 static void on_menu_layout_ready(GObject *source, GAsyncResult *res, gpointer user_data);
 static void on_menu_signal(GDBusConnection *conn, const gchar *sender, const gchar *path, const gchar *iface, const gchar *signal, GVariant *params, gpointer user_data);
 
+// --- PIXMAP EXTRACTION (Fixes OBS & Flatpak Icons) ---
+static GdkPixbuf* extract_pixmap(GVariant *pixmap_var) {
+    GdkPixbuf *best_pixbuf = NULL;
+    int best_width = 0;
+
+    if (!g_variant_is_of_type(pixmap_var, G_VARIANT_TYPE("a(iiay)"))) return NULL;
+
+    GVariantIter iter;
+    g_variant_iter_init(&iter, pixmap_var);
+    int width, height;
+    GVariant *bytes_var;
+
+    while (g_variant_iter_loop(&iter, "(ii@ay)", &width, &height, &bytes_var)) {
+        // Cap size to 128x128 to prevent massive memory usage
+        if (width > best_width && width <= 128) {
+            gsize n_bytes;
+            gconstpointer data = g_variant_get_fixed_array(bytes_var, &n_bytes, sizeof(guint8));
+            if (n_bytes == (gsize)(width * height * 4)) {
+                guchar *pixels = g_malloc(n_bytes);
+                const guchar *src = data;
+                for (gsize i = 0; i < n_bytes; i += 4) {
+                    // DBus SNI uses ARGB32 network byte order (A, R, G, B)
+                    // GdkPixbuf expects RGBA
+                    pixels[i+0] = src[i+1]; // R
+                    pixels[i+1] = src[i+2]; // G
+                    pixels[i+2] = src[i+3]; // B
+                    pixels[i+3] = src[i+0]; // A
+                }
+                if (best_pixbuf) g_object_unref(best_pixbuf);
+                best_pixbuf = gdk_pixbuf_new_from_data(pixels, GDK_COLORSPACE_RGB, TRUE, 8, width, height, width * 4, (GdkPixbufDestroyNotify)g_free, NULL);
+                best_width = width;
+            }
+        }
+    }
+    return best_pixbuf;
+}
+
 // --- Dynamic Icon Updater ---
 static void apply_icon_name(TrayItem *item, const gchar *icon_name) {
     if (!item || !item->icon) return;
 
-    gchar *final_icon = NULL;
     GtkIconTheme *theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
 
+    // 1. Try IconName from Theme (Native Apps)
     if (icon_name && strlen(icon_name) > 0) {
         g_autofree gchar *sym_name = g_strdup_printf("%s-symbolic", icon_name);
         if (gtk_icon_theme_has_icon(theme, sym_name)) { 
-            final_icon = g_strdup(sym_name); 
+            gtk_image_set_from_icon_name(GTK_IMAGE(item->icon), sym_name); 
+            return;
         } else if (gtk_icon_theme_has_icon(theme, icon_name)) { 
-            final_icon = g_strdup(icon_name); 
-        } else {
-            if (g_strrstr(icon_name, "no-connection") || g_strrstr(icon_name, "disconnected")) {
-                final_icon = g_strdup("network-offline-symbolic");
-            } else if (g_strrstr(icon_name, "wired") || g_strrstr(icon_name, "ethernet")) {
-                final_icon = g_strdup("network-wired-symbolic");
-            } else if (g_strrstr(item->service, "nm-applet")) {
-                final_icon = g_strdup("network-wireless-symbolic");
-            } else {
-                final_icon = g_strdup("application-x-executable-symbolic");
+            gtk_image_set_from_icon_name(GTK_IMAGE(item->icon), icon_name); 
+            return;
+        }
+    }
+
+    // 2. Try IconPixmap fallback (Flatpaks / OBS / Steam)
+    if (item->item_proxy) {
+        g_autoptr(GVariant) pixmap_var = g_dbus_proxy_get_cached_property(item->item_proxy, "IconPixmap");
+        if (pixmap_var) {
+            GdkPixbuf *pixbuf = extract_pixmap(pixmap_var);
+            if (pixbuf) {
+                GdkPixbuf *scaled = gdk_pixbuf_scale_simple(pixbuf, 20, 20, GDK_INTERP_BILINEAR);
+                GdkTexture *texture = gdk_texture_new_for_pixbuf(scaled);
+                gtk_image_set_from_paintable(GTK_IMAGE(item->icon), GDK_PAINTABLE(texture));
+                g_object_unref(texture);
+                g_object_unref(scaled);
+                g_object_unref(pixbuf);
+                return;
             }
         }
+    }
+
+    // 3. Absolute Last Resort Fallbacks
+    gchar *final_icon = "application-x-executable-symbolic";
+    if (icon_name) {
+        if (g_strrstr(icon_name, "no-connection") || g_strrstr(icon_name, "disconnected")) final_icon = "network-offline-symbolic";
+        else if (g_strrstr(icon_name, "wired") || g_strrstr(icon_name, "ethernet")) final_icon = "network-wired-symbolic";
+        else if (g_strrstr(item->service, "nm-applet")) final_icon = "network-wireless-symbolic";
     } else {
         g_autoptr(GVariant) id_var = g_dbus_proxy_get_cached_property(item->item_proxy, "Id");
         const gchar *id_str = id_var ? g_variant_get_string(id_var, NULL) : "";
-        if (g_strrstr(id_str, "nm-applet") || g_strrstr(item->service, "nm-applet")) 
-            final_icon = g_strdup("network-wireless-symbolic");
-        else if (g_strrstr(id_str, "blueman") || g_strrstr(item->service, "blueman")) 
-            final_icon = g_strdup("bluetooth-active-symbolic");
-        else 
-            final_icon = g_strdup("application-x-executable-symbolic");
+        if (g_strrstr(id_str, "nm-applet") || g_strrstr(item->service, "nm-applet")) final_icon = "network-wireless-symbolic";
+        else if (g_strrstr(id_str, "blueman") || g_strrstr(item->service, "blueman")) final_icon = "bluetooth-active-symbolic";
     }
     
     gtk_image_set_from_icon_name(GTK_IMAGE(item->icon), final_icon);
-    g_free(final_icon);
 }
 
 static void on_icon_fetched(GObject *source, GAsyncResult *res, gpointer user_data) {
@@ -334,11 +383,17 @@ static void cleanup_sub_popovers(GtkWidget *vbox) {
 static void on_menu_layout_ready(GObject *source, GAsyncResult *res, gpointer user_data) {
     g_autoptr(GError) error = NULL;
     g_autoptr(GVariant) result = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &error);
+    TrayItem *item = (TrayItem*)user_data;
 
     if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) return;
-    if (error || !result) return;
+    
+    // FIX: ContextMenu Fallback for Apps that expose a Menu path but don't populate it (e.g. OBS)
+    if (error || !result) {
+        g_warning("TrayItem GetLayout failed. Falling back to native ContextMenu.");
+        g_dbus_proxy_call(item->item_proxy, "ContextMenu", g_variant_new("(ii)", 0, 0), G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, NULL, NULL);
+        return;
+    }
 
-    TrayItem *item = (TrayItem*)user_data;
     g_autoptr(GVariant) layout_tuple = g_variant_get_child_value(result, 1);
     if (!layout_tuple || !g_variant_is_of_type(layout_tuple, G_VARIANT_TYPE("(ia{sv}av)"))) return;
 
@@ -356,7 +411,6 @@ static void on_menu_layout_ready(GObject *source, GAsyncResult *res, gpointer us
         already_open = gtk_widget_get_mapped(item->active_popover);
         anim_state = g_object_get_data(G_OBJECT(item->active_popover), "anim-state");
         if (anim_state && anim_state->animation_id > 0) {
-            // Find exactly how many items we've already animated
             current_anim_index = g_list_position(anim_state->revealers, anim_state->current_item);
         }
     }
@@ -380,8 +434,6 @@ static void on_menu_layout_ready(GObject *source, GAsyncResult *res, gpointer us
     if (already_open) {
         if (anim_state) {
             if (anim_state->animation_id > 0 && current_anim_index >= 0) {
-                // THE FIX: The animation was running when nm-applet updated!
-                // 1. Instantly reveal only the items that were ALREADY visible before the refresh
                 GList *l = anim_state->revealers;
                 for (int i = 0; i < current_anim_index && l != NULL; i++, l = l->next) {
                     GtkRevealer *rev = GTK_REVEALER(l->data);
@@ -389,10 +441,8 @@ static void on_menu_layout_ready(GObject *source, GAsyncResult *res, gpointer us
                     gtk_revealer_set_reveal_child(rev, TRUE);
                     gtk_revealer_set_transition_duration(rev, 150);
                 }
-                // 2. Point the timer to the next hidden item so the cascade continues smoothly!
                 anim_state->current_item = l;
             } else {
-                // Animation was already finished. Just reveal all instantly.
                 for (GList *l = anim_state->revealers; l != NULL; l = l->next) {
                     GtkRevealer *rev = GTK_REVEALER(l->data);
                     gtk_revealer_set_transition_duration(rev, 0); 
@@ -422,14 +472,17 @@ static void on_menu_signal(GDBusConnection *conn, const gchar *sender, const gch
 static void on_about_to_show_ready(GObject *source, GAsyncResult *res, gpointer user_data) {
     g_autoptr(GError) error = NULL;
     g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &error);
+    TrayItem *item = (TrayItem*)user_data;
 
     if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) return;
 
+    // FIX: ContextMenu Fallback
     if (error) {
-        g_warning("TrayItem AboutToShow failed: %s", error->message);
+        g_warning("TrayItem AboutToShow failed: %s. Falling back to native ContextMenu.", error->message);
+        g_dbus_proxy_call(item->item_proxy, "ContextMenu", g_variant_new("(ii)", 0, 0), G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, NULL, NULL);
+        return;
     }
 
-    TrayItem *item = (TrayItem*)user_data;
     g_dbus_connection_call(item->module->dbus_conn, item->bus_name, item->menu_path,
                            MENU_IFACE, "GetLayout", g_variant_new("(iias)", 0, -1, NULL),
                            NULL, G_DBUS_CALL_FLAGS_NONE, -1, item->cancellable, on_menu_layout_ready, item);
@@ -510,10 +563,22 @@ static void on_item_proxy_ready(GObject *source, GAsyncResult *res, gpointer use
     gtk_box_append(GTK_BOX(item->module->container), item->button);
 }
 
+// --- FIX: Proper Zombie Cleanup ---
 static void on_applet_vanished(GDBusConnection *connection, const gchar *name, gpointer user_data) {
-    (void)connection; (void)name;
+    (void)connection;
     GHashTable *items_table = (GHashTable *)user_data;
-    g_hash_table_remove(items_table, name);
+    
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, items_table);
+    
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        TrayItem *item = (TrayItem *)value;
+        // Check against the bus_name, not the full path key
+        if (g_strcmp0(item->bus_name, name) == 0) {
+            g_hash_table_iter_remove(&iter);
+        }
+    }
 }
 
 // --- Boilerplate D-Bus Server ---
