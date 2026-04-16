@@ -30,6 +30,7 @@ void island_widget_set_expanded(IslandWidget *self, gboolean expanded) {
         gtk_stack_set_visible_child_name(GTK_STACK(self->content_stack), "expanded");
         gtk_widget_add_css_class(GTK_WIDGET(self), "expanded");
     } else {
+        // Instantly drop the expanded stack's required height to 0
         GtkWidget *placeholder = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
         island_widget_transition_to_expanded_child(self, placeholder);
 
@@ -75,18 +76,27 @@ static void island_widget_init(IslandWidget *self) {
     gtk_widget_set_halign(GTK_WIDGET(self), GTK_ALIGN_CENTER);
     gtk_widget_set_valign(GTK_WIDGET(self), GTK_ALIGN_START);
 
+    // FIX: Set ALL stacks to vhomogeneous = FALSE and hhomogeneous = FALSE.
+    // This stops the fading-out expanded notification from propping the ceiling up 
+    // and causing the vertical thickness/snap bug!
     self->content_stack = gtk_stack_new();
+    gtk_stack_set_vhomogeneous(GTK_STACK(self->content_stack), FALSE);
+    gtk_stack_set_hhomogeneous(GTK_STACK(self->content_stack), FALSE);
     gtk_stack_set_transition_type(GTK_STACK(self->content_stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
     gtk_stack_set_transition_duration(GTK_STACK(self->content_stack), 400);
     gtk_box_append(GTK_BOX(self), self->content_stack);
 
     self->pill_stack = gtk_stack_new();
+    gtk_stack_set_vhomogeneous(GTK_STACK(self->pill_stack), FALSE);
+    gtk_stack_set_hhomogeneous(GTK_STACK(self->pill_stack), FALSE);
     gtk_stack_set_transition_type(GTK_STACK(self->pill_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_UP_DOWN);
     gtk_stack_set_transition_duration(GTK_STACK(self->pill_stack), 400);
     gtk_stack_add_named(GTK_STACK(self->content_stack), self->pill_stack, "pill");
 
     self->expanded_stack = gtk_stack_new();
-    gtk_stack_set_transition_type(GTK_STACK(self->expanded_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_UP_DOWN);
+    gtk_stack_set_vhomogeneous(GTK_STACK(self->expanded_stack), FALSE);
+    gtk_stack_set_hhomogeneous(GTK_STACK(self->expanded_stack), FALSE);
+    gtk_stack_set_transition_type(GTK_STACK(self->expanded_stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
     gtk_stack_set_transition_duration(GTK_STACK(self->expanded_stack), 400);
     gtk_stack_add_named(GTK_STACK(self->content_stack), self->expanded_stack, "expanded");
 

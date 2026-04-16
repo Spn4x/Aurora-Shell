@@ -92,27 +92,32 @@ static void apply_icon_name(TrayItem *item, const gchar *icon_name) {
 
     GtkIconTheme *theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
 
-    // 1. Try IconName from Theme (Native Apps)
+    // 1. Try IconName from Theme (Native Apps -> Sharp 16px)
     if (icon_name && strlen(icon_name) > 0) {
         g_autofree gchar *sym_name = g_strdup_printf("%s-symbolic", icon_name);
-        if (gtk_icon_theme_has_icon(theme, sym_name)) { 
-            gtk_image_set_from_icon_name(GTK_IMAGE(item->icon), sym_name); 
-            return;
-        } else if (gtk_icon_theme_has_icon(theme, icon_name)) { 
-            gtk_image_set_from_icon_name(GTK_IMAGE(item->icon), icon_name); 
+        if (gtk_icon_theme_has_icon(theme, sym_name) || gtk_icon_theme_has_icon(theme, icon_name)) { 
+            gtk_image_set_pixel_size(GTK_IMAGE(item->icon), 16);
+            gtk_image_set_from_icon_name(GTK_IMAGE(item->icon), 
+                gtk_icon_theme_has_icon(theme, sym_name) ? sym_name : icon_name); 
             return;
         }
     }
 
-    // 2. Try IconPixmap fallback (Flatpaks / OBS / Steam)
+    // 2. Try IconPixmap fallback (Flatpaks / OBS / Discord -> Scaled 24px)
     if (item->item_proxy) {
         g_autoptr(GVariant) pixmap_var = g_dbus_proxy_get_cached_property(item->item_proxy, "IconPixmap");
         if (pixmap_var) {
             GdkPixbuf *pixbuf = extract_pixmap(pixmap_var);
             if (pixbuf) {
-                GdkPixbuf *scaled = gdk_pixbuf_scale_simple(pixbuf, 20, 20, GDK_INTERP_BILINEAR);
+                // 24px offsets the massive transparent padding apps like OBS add internally
+                int target_size = 20; 
+                GdkPixbuf *scaled = gdk_pixbuf_scale_simple(pixbuf, target_size, target_size, GDK_INTERP_BILINEAR);
                 GdkTexture *texture = gdk_texture_new_for_pixbuf(scaled);
+                
+                // Tell GTK this widget is allowed to take up the larger footprint
+                gtk_image_set_pixel_size(GTK_IMAGE(item->icon), target_size);
                 gtk_image_set_from_paintable(GTK_IMAGE(item->icon), GDK_PAINTABLE(texture));
+                
                 g_object_unref(texture);
                 g_object_unref(scaled);
                 g_object_unref(pixbuf);
@@ -121,7 +126,9 @@ static void apply_icon_name(TrayItem *item, const gchar *icon_name) {
         }
     }
 
-    // 3. Absolute Last Resort Fallbacks
+    // 3. Absolute Last Resort Fallbacks (Standard -> 16px)
+    gtk_image_set_pixel_size(GTK_IMAGE(item->icon), 16);
+    
     gchar *final_icon = "application-x-executable-symbolic";
     if (icon_name) {
         if (g_strrstr(icon_name, "no-connection") || g_strrstr(icon_name, "disconnected")) final_icon = "network-offline-symbolic";
@@ -550,7 +557,6 @@ static void on_item_proxy_ready(GObject *source, GAsyncResult *res, gpointer use
     
     item->icon = gtk_image_new();
     gtk_image_set_pixel_size(GTK_IMAGE(item->icon), 16);
-    gtk_widget_add_css_class(item->icon, "systray-icon");
     gtk_button_set_child(GTK_BUTTON(item->button), item->icon);
     
     update_item_icon(item);

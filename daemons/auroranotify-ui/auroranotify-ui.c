@@ -19,16 +19,10 @@ typedef struct {
 } NotificationData;
 
 typedef struct {
-    gchar *id;
-    gchar *text;
-} PersistentStatus;
-
-typedef struct {
     GtkCssProvider *provider;
     gchar *path;
 } CssReloadData;
 
-// --- NEW STRUCT FOR GLOBAL THEME MONITORING ---
 typedef struct {
     GtkCssProvider *provider;
     char *path;
@@ -38,16 +32,18 @@ static GtkApplication *app = NULL;
 static GtkWindow *main_window = NULL;
 static IslandWidget *island = NULL;
 static GQueue notification_queue = G_QUEUE_INIT;
-static GHashTable *persistent_statuses = NULL;
 static gboolean is_busy = FALSE;
 static guint current_timeout_id = 0;
 static gboolean is_expanded = FALSE;
 static gboolean is_transitioning = FALSE;
 static NotificationData *current_notification_data = NULL;
 
+// --- PRIVACY STATE GLOBALS ---
+static gboolean privacy_mic_active = FALSE;
+static gboolean privacy_cam_active = FALSE;
+
 static void create_main_window();
 static gboolean dismiss_or_transition(gpointer user_data);
-static void update_island_to_persistent_state();
 static void show_next_notification();
 static gboolean process_initial_notification(gpointer user_data);
 static gboolean add_dot_class_cb(gpointer user_data);
@@ -58,7 +54,6 @@ static void on_island_enter(GtkEventControllerMotion *controller, double x, doub
 static void on_island_leave(GtkEventControllerMotion *controller, gpointer user_data);
 static gboolean outro_finished_callback(gpointer user_data);
 
-
 static void free_notification_data(gpointer data) {
     if (!data) return;
     NotificationData *notif = (NotificationData *)data;
@@ -68,38 +63,48 @@ static void free_notification_data(gpointer data) {
     g_free(notif);
 }
 
-static void free_persistent_status(gpointer data) {
-    PersistentStatus *status = data;
-    g_free(status->id);
-    g_free(status->text);
-    g_free(status);
-}
+// --- PRIVACY PILL BUILDER (Fixed Native Sizing & Text) ---
+static GtkWidget* create_privacy_pill(gboolean mic, gboolean cam) {
+    GtkWidget *overlay = gtk_overlay_new();
 
-static void update_island_to_persistent_state() {
-    if (g_hash_table_size(persistent_statuses) > 0) {
-        GHashTableIter iter;
-        gpointer key, value;
-        g_hash_table_iter_init(&iter, persistent_statuses);
-        g_hash_table_iter_next(&iter, &key, &value);
-        PersistentStatus *status = value;
-        
-        GtkWidget *pill_content = gtk_label_new(status->text);
-        gtk_widget_add_css_class(pill_content, "summary");
-        island_widget_transition_to_pill_child(island, pill_content);
-        
-        is_busy = TRUE;
-        if(main_window) gtk_widget_set_visible(GTK_WIDGET(main_window), TRUE);
-        gtk_widget_add_css_class(GTK_WIDGET(island), "pill");
-        gtk_widget_add_css_class(GTK_WIDGET(island), "dot");
+    // DUMMY BASE: Forces exact same native width and height as a normal notification
+    // using a space " " to establish the font line-height.
+    GtkWidget *dummy_label = gtk_label_new(" ");
+    gtk_widget_add_css_class(dummy_label, "summary");
+    gtk_label_set_width_chars(GTK_LABEL(dummy_label), 25);
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), dummy_label);
 
-    } else {
-        if (island) {
-            gtk_widget_remove_css_class(GTK_WIDGET(island), "pill");
-            gtk_widget_remove_css_class(GTK_WIDGET(island), "dot");
-        }
-        is_busy = FALSE;
-        if (main_window) gtk_widget_set_visible(GTK_WIDGET(main_window), FALSE);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
+
+    GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_size_request(dot, 12, 12);
+    gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
+    gtk_widget_set_halign(dot, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(dot, "privacy-indicator");
+    
+    const char *text = "";
+    if (mic && cam) {
+        gtk_widget_add_css_class(dot, "both");
+        text = "Mic & Screen/Camera"; // Encompasses both OBS and Webcams
+    } else if (mic) {
+        gtk_widget_add_css_class(dot, "mic");
+        text = "Microphone in use";
+    } else if (cam) {
+        gtk_widget_add_css_class(dot, "cam");
+        text = "Screen/Camera in use";
     }
+
+    GtkWidget *label = gtk_label_new(text);
+    gtk_widget_add_css_class(label, "summary");
+
+    gtk_box_append(GTK_BOX(box), dot);
+    gtk_box_append(GTK_BOX(box), label);
+
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), box);
+
+    return overlay;
 }
 
 static GtkWidget* create_expanded_content_widget(NotificationData *data) {
@@ -169,19 +174,23 @@ static void show_next_notification() {
     }
     
     g_timeout_add(ANIMATION_FINISH_DELAY_MS, unlock_transition_callback, NULL);
-    
     current_timeout_id = g_timeout_add(is_expanded ? (EXPANDED_STATE_DURATION_S * 1000) : PILL_STATE_DURATION_MS, dismiss_or_transition, NULL);
 }
 
 static gboolean outro_finished_callback(gpointer user_data G_GNUC_UNUSED) {
     if (!g_queue_is_empty(&notification_queue)) {
-        g_print("UI: Outro complete, but new items are queued. Restarting cycle.\n");
+        g_print("UI: Outro complete, but new items queued. Restarting.\n");
         g_timeout_add(50, add_dot_class_cb, island);
         g_timeout_add(ANIMATION_FINISH_DELAY_MS, process_initial_notification, NULL);
     } else {
-        g_print("UI: Outro complete. Reverting to persistent state check.\n");
-        update_island_to_persistent_state();
+        if (!privacy_mic_active && !privacy_cam_active) {
+            is_busy = FALSE;
+            if (main_window) gtk_widget_set_visible(GTK_WIDGET(main_window), FALSE);
+        } else {
+            is_busy = FALSE; 
+        }
     }
+    is_transitioning = FALSE;
     return G_SOURCE_REMOVE;
 }
 
@@ -195,12 +204,9 @@ static gboolean dismiss_or_transition(gpointer user_data G_GNUC_UNUSED) {
     }
 
     if (!g_queue_is_empty(&notification_queue)) {
-        g_print("UI: Queue has items. Transitioning content.\n");
         show_next_notification();
     } 
     else {
-        g_print("UI: Queue is empty. Starting dot->nothing outro.\n");
-
         if (current_notification_data) {
             free_notification_data(current_notification_data);
             current_notification_data = NULL;
@@ -211,12 +217,21 @@ static gboolean dismiss_or_transition(gpointer user_data G_GNUC_UNUSED) {
             island_widget_set_expanded(island, FALSE);
         }
         
-        if (island) {
-            gtk_widget_remove_css_class(GTK_WIDGET(island), "pill");
+        if (privacy_mic_active || privacy_cam_active) {
+            GtkWidget *pill = create_privacy_pill(privacy_mic_active, privacy_cam_active);
+            island_widget_transition_to_pill_child(island, pill);
+            
+            gtk_widget_add_css_class(GTK_WIDGET(island), "pill");
+            gtk_widget_add_css_class(GTK_WIDGET(island), "dot");
+            
+            g_timeout_add(ANIMATION_FINISH_DELAY_MS, outro_finished_callback, NULL);
+        } else {
+            if (island) {
+                gtk_widget_remove_css_class(GTK_WIDGET(island), "pill");
+            }
+            g_timeout_add(250, remove_dot_class_cb, island);
+            g_timeout_add(ANIMATION_FINISH_DELAY_MS, outro_finished_callback, NULL);
         }
-        
-        g_timeout_add(250, remove_dot_class_cb, island);
-        g_timeout_add(ANIMATION_FINISH_DELAY_MS, outro_finished_callback, NULL);
     }
     return G_SOURCE_REMOVE;
 }
@@ -233,16 +248,13 @@ static void on_island_clicked(GtkGestureClick *g G_GNUC_UNUSED, int n G_GNUC_UNU
     if (is_transitioning) return;
 
     if (!is_expanded) {
-        if (!current_notification_data) return;
+        if (!current_notification_data) return; 
         is_transitioning = TRUE;
         if (current_timeout_id > 0) { g_source_remove(current_timeout_id); current_timeout_id = 0; }
         
         is_expanded = TRUE;
         island_widget_set_expanded(island, TRUE);
-        
         g_timeout_add(50, populate_expanded_content_cb, NULL);
-
-        g_print("UI: Clicked to expand.\n");
         
         g_timeout_add(ANIMATION_FINISH_DELAY_MS, unlock_transition_callback, NULL);
         current_timeout_id = g_timeout_add_seconds(EXPANDED_STATE_DURATION_S, dismiss_or_transition, NULL);
@@ -254,16 +266,13 @@ static void on_island_clicked(GtkGestureClick *g G_GNUC_UNUSED, int n G_GNUC_UNU
 
 static void on_island_right_clicked(GtkGestureClick *g G_GNUC_UNUSED, int n G_GNUC_UNUSED, double x G_GNUC_UNUSED, double y G_GNUC_UNUSED, gpointer u G_GNUC_UNUSED) {
     if (is_transitioning) return;
-    
     if (current_notification_data || is_busy) {
-        g_print("UI: Right-click detected. Dismissing notification immediately.\n");
         dismiss_or_transition(NULL);
     }
 }
 
 static void on_island_enter(GtkEventControllerMotion *controller G_GNUC_UNUSED, double x G_GNUC_UNUSED, double y G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
     if (is_expanded && current_timeout_id > 0) {
-        g_print("UI: Pointer entered, pausing dismissal timer.\n");
         g_source_remove(current_timeout_id);
         current_timeout_id = 0;
     }
@@ -271,7 +280,6 @@ static void on_island_enter(GtkEventControllerMotion *controller G_GNUC_UNUSED, 
 
 static void on_island_leave(GtkEventControllerMotion *controller G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
     if (is_expanded && current_timeout_id == 0) {
-        g_print("UI: Pointer left, restarting dismissal timer.\n");
         current_timeout_id = g_timeout_add_seconds(EXPANDED_STATE_DURATION_S, dismiss_or_transition, NULL);
     }
 }
@@ -298,16 +306,11 @@ static gboolean remove_dot_class_cb(gpointer user_data) {
 }
 
 static void handle_show_notification(GDBusMethodInvocation *inv, NotificationData *data) {
-    g_print("UI: Received and queued: %s\n", data->summary);
     g_queue_push_tail(&notification_queue, data);
     
     if (!is_busy) {
         is_busy = TRUE;
-        g_print("UI: UI is idle. Starting display cycle.\n");
-        
-        if (main_window == NULL) {
-            create_main_window();
-        }
+        if (main_window == NULL) create_main_window();
 
         gtk_widget_set_visible(GTK_WIDGET(main_window), TRUE);
         g_timeout_add(50, add_dot_class_cb, island);
@@ -316,22 +319,28 @@ static void handle_show_notification(GDBusMethodInvocation *inv, NotificationDat
     g_dbus_method_invocation_return_value(inv, NULL);
 }
 
-static void handle_set_persistent_status(GDBusMethodInvocation *inv, gchar *id, gboolean active, gchar *text) {
-    if (active) {
-        PersistentStatus *status = g_new0(PersistentStatus, 1);
-        status->id = g_strdup(id);
-        status->text = g_strdup(text);
-        g_hash_table_replace(persistent_statuses, g_strdup(id), status);
-        g_print("UI: Added/Updated persistent status '%s'\n", id);
-    } else {
-        g_hash_table_remove(persistent_statuses, id);
-        g_print("UI: Removed persistent status '%s'\n", id);
-    }
+static void handle_set_privacy_status(GDBusMethodInvocation *inv, gboolean mic, gboolean cam) {
+    privacy_mic_active = mic;
+    privacy_cam_active = cam;
 
     if (!is_busy && g_queue_is_empty(&notification_queue)) {
-        update_island_to_persistent_state();
+        if (mic || cam) {
+            if (main_window == NULL) create_main_window();
+            
+            GtkWidget *pill = create_privacy_pill(mic, cam);
+            island_widget_transition_to_pill_child(island, pill);
+            
+            gtk_widget_add_css_class(GTK_WIDGET(island), "dot");
+            gtk_widget_add_css_class(GTK_WIDGET(island), "pill");
+            gtk_widget_set_visible(GTK_WIDGET(main_window), TRUE);
+        } else {
+            if (island) {
+                gtk_widget_remove_css_class(GTK_WIDGET(island), "pill");
+                gtk_widget_remove_css_class(GTK_WIDGET(island), "dot");
+            }
+            if (main_window) gtk_widget_set_visible(GTK_WIDGET(main_window), FALSE);
+        }
     }
-    
     g_dbus_method_invocation_return_value(inv, NULL);
 }
 
@@ -344,18 +353,16 @@ static void dbus_method_dispatcher(GDBusConnection *c, const gchar *s, const gch
         data->summary = g_strdup(data->summary);
         data->body = g_strdup(data->body);
         handle_show_notification(inv, data);
-    } else if (g_strcmp0(m, "SetPersistentStatus") == 0) {
-        gchar *id, *text;
-        gboolean active;
-        g_variant_get(p, "(&s&b&s)", &id, &active, &text);
-        handle_set_persistent_status(inv, g_strdup(id), active, g_strdup(text));
+    } else if (g_strcmp0(m, "SetPrivacyStatus") == 0) {
+        gboolean mic, cam;
+        g_variant_get(p, "(bb)", &mic, &cam);
+        handle_set_privacy_status(inv, mic, cam);
     } else {
         g_dbus_method_invocation_return_error(inv, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD, "Unknown method '%s'", m);
     }
 }
 
 static void on_window_destroyed(GtkWidget *w G_GNUC_UNUSED, gpointer ud G_GNUC_UNUSED) {
-    g_print("UI: Window destroyed.\n");
     g_queue_clear_full(&notification_queue, free_notification_data);
     if (current_notification_data) {
         free_notification_data(current_notification_data);
@@ -371,11 +378,8 @@ void create_main_window() {
     g_signal_connect(main_window, "destroy", G_CALLBACK(on_window_destroyed), NULL);
     
     GtkWidget *wrapper_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    
     island = ISLAND_WIDGET(island_widget_new());
-
     gtk_box_append(GTK_BOX(wrapper_box), GTK_WIDGET(island));
-    
     gtk_window_set_child(main_window, wrapper_box);
 
     GtkGesture *click = gtk_gesture_click_new();
@@ -408,10 +412,9 @@ static void on_bus_acquired(GDBusConnection *c, const gchar *n G_GNUC_UNUSED, gp
         "      <arg type='s' name='summary' direction='in'/>"
         "      <arg type='s' name='body' direction='in'/>"
         "    </method>"
-        "    <method name='SetPersistentStatus'>"
-        "      <arg type='s' name='id' direction='in'/>"
-        "      <arg type='b' name='active' direction='in'/>"
-        "      <arg type='s' name='text' direction='in'/>"
+        "    <method name='SetPrivacyStatus'>"
+        "      <arg type='b' name='mic' direction='in'/>"
+        "      <arg type='b' name='cam' direction='in'/>"
         "    </method>"
         "  </interface>"
         "</node>";
@@ -421,11 +424,6 @@ static void on_bus_acquired(GDBusConnection *c, const gchar *n G_GNUC_UNUSED, gp
     GDBusNodeInfo *node = g_dbus_node_info_new_for_xml(xml, NULL);
     guint registration_id = g_dbus_connection_register_object(c, UI_OBJECT_PATH, node->interfaces[0], &vtable, NULL, NULL, NULL);
     g_dbus_node_info_unref(node);
-    
-    if (registration_id > 0)
-        g_print("UI: Headless service is running with persistent status support.\n");
-    else
-        g_warning("UI: Failed to register D-Bus object.\n");
 }
 
 static void on_name_acquired(GDBusConnection *c G_GNUC_UNUSED, const gchar *n G_GNUC_UNUSED, gpointer ud) { g_application_hold(G_APPLICATION(ud)); }
@@ -436,7 +434,6 @@ static void on_stylesheet_changed(GFileMonitor *monitor, GFile *file, GFile *oth
     (void)monitor; (void)file; (void)other_file;
     if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
         CssReloadData *data = user_data;
-        g_print("UI CSS Hot-Reload: File '%s' changed, reloading styles.\n", data->path);
         gtk_css_provider_load_from_path(data->provider, data->path);
     }
 }
@@ -447,15 +444,10 @@ static void free_css_reload_data(gpointer data) {
     g_free(reload_data);
 }
 
-// ===================================================================
-//  Global Theme Loading & Monitoring (The Fix)
-// ===================================================================
-
 static void on_global_theme_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
     (void)monitor; (void)file; (void)other_file;
     if (event_type == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT) {
         GlobalThemeData *data = (GlobalThemeData *)user_data;
-        g_print("Daemon Global theme colors changed. Reloading from: %s\n", data->path);
         gtk_css_provider_load_from_path(data->provider, data->path);
     }
 }
@@ -467,24 +459,20 @@ static void load_global_theme_colors(GApplication *app_instance) {
         GtkCssProvider *provider = gtk_css_provider_new();
         gtk_css_provider_load_from_path(provider, colors_path);
         
-        // Add with USER priority
         gtk_style_context_add_provider_for_display(
             gdk_display_get_default(), 
             GTK_STYLE_PROVIDER(provider), 
             GTK_STYLE_PROVIDER_PRIORITY_USER
         );
 
-        // SETUP MONITORING
         GFile *file = g_file_new_for_path(colors_path);
         GFileMonitor *monitor = g_file_monitor_file(file, G_FILE_MONITOR_NONE, NULL, NULL);
         if (monitor) {
             GlobalThemeData *data = g_new(GlobalThemeData, 1);
-            data->provider = provider; // keep ref
+            data->provider = provider; 
             data->path = g_strdup(colors_path);
             
             g_signal_connect(monitor, "changed", G_CALLBACK(on_global_theme_changed), data);
-            
-            // Attach monitor to the app to keep it alive
             g_object_set_data_full(G_OBJECT(app_instance), "global-theme-monitor", monitor, g_object_unref);
         }
         g_object_unref(file);
@@ -492,14 +480,10 @@ static void load_global_theme_colors(GApplication *app_instance) {
 }
 
 static void on_app_startup(GApplication *a, gpointer ud G_GNUC_UNUSED) {
-    // --- CALL IT HERE, FIRST THING ---
     load_global_theme_colors(a);
-
-    persistent_statuses = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, free_persistent_status);
     
     GtkCssProvider *p = gtk_css_provider_new();
     gchar *loaded_css_path = NULL;
-    
     g_autofree gchar *user_css_path = g_build_filename(g_get_user_config_dir(), "aurora-shell", "templates", "organizer", "organizer.css", NULL);
 
     if (g_file_test(user_css_path, G_FILE_TEST_EXISTS)) {
@@ -516,8 +500,6 @@ static void on_app_startup(GApplication *a, gpointer ud G_GNUC_UNUSED) {
         if(g_file_test(system_css_path, G_FILE_TEST_EXISTS)) {
             gtk_css_provider_load_from_path(p, system_css_path);
             loaded_css_path = g_strdup(system_css_path);
-        } else {
-            g_warning("ERROR: No CSS file found at user or system path.\n");
         }
     }
 
@@ -536,11 +518,9 @@ static void on_app_startup(GApplication *a, gpointer ud G_GNUC_UNUSED) {
             g_object_set_data_full(G_OBJECT(a), "css-file-monitor", g_object_ref(monitor), g_object_unref);
         }
     }
-    
     g_object_unref(p);
     g_free(loaded_css_path);
 }
-
 
 int main(int argc, char **argv) {
     app = gtk_application_new("com.meismeric.auranotify.ui", G_APPLICATION_IS_SERVICE);

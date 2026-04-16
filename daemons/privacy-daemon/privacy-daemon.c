@@ -96,16 +96,13 @@ static gboolean update_status_on_main_thread(gpointer user_data) {
     gboolean mic_active = (g_list_length(active_mic_streams) > 0);
     gboolean screen_active = (g_list_length(active_screen_streams) > 0);
 
-    g_print("Privacy Daemon: Updating status -> Mic: %s, Screen: %s\n", mic_active ? "ON" : "OFF", screen_active ? "ON" : "OFF");
+    g_print("Privacy Daemon: Updating status -> Mic: %s, Cam/Screen: %s\n", 
+            mic_active ? "ON" : "OFF", screen_active ? "ON" : "OFF");
 
+    // Send a single command with both states
     g_dbus_connection_call(session_bus, UI_BUS_NAME, UI_OBJECT_PATH, UI_INTERFACE_NAME,
-                           "SetPersistentStatus",
-                           g_variant_new("(sbs)", "mic_status", mic_active, "● Microphone in use"),
-                           NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
-
-    g_dbus_connection_call(session_bus, UI_BUS_NAME, UI_OBJECT_PATH, UI_INTERFACE_NAME,
-                           "SetPersistentStatus",
-                           g_variant_new("(sbs)", "screen_status", screen_active, "● Screen is being shared"),
+                           "SetPrivacyStatus",
+                           g_variant_new("(bb)", mic_active, screen_active),
                            NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
 
     return G_SOURCE_REMOVE;
