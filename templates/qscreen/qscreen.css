@@ -11,18 +11,27 @@
 
 /* --- Main Control Panel --- */
 #qscreen-widget frame.panel,
-#qscreen-widget frame.panel > box {
+#qscreen-widget frame.panel > box,
+#qscreen-widget frame.panel > border {
   background-color: transparent;
   border: none;
   box-shadow: none;
   padding: 0;
 }
 
+/* Now apply your actual styling only to the inner box so it floats cleanly */
+#qscreen-widget frame.panel > box {
+  background-color: @gnome-bg;
+  border: 2px solid alpha(@accent, 0.2);
+  border-radius: 12px; /* Give it soft corners */
+  padding: 3px;
+}
+
 /* --- Button Styles --- */
 #qscreen-widget button {
   background-image: none;
   background-color: @gnome-bg;
-  border: 2px solid alpha(@accent, 0.2);
+  border: none;
   box-shadow: none;
   border-radius: 10px;
   padding: 8px 12px;
@@ -74,4 +83,73 @@
   font-weight: bold;
   font-size: 1.1rem;
   margin-top: 20px;
+}
+
+
+/* --- Color Buttons for Annotations --- */
+#qscreen-widget button.color-btn {
+  border-radius: 9999px; /* Force into a circle */
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  margin: 0 4px;
+  border: 2px solid transparent;
+}
+
+#qscreen-widget button.color-btn:hover {
+  opacity: 0.8;
+}
+
+/* Give the active color a thick white outline */
+#qscreen-widget button.color-btn.active-color {
+  border: 3px solid white;
+}
+
+/* Ensure the text entry box is completely invisible while typing */
+#qscreen-widget entry.annotation-text-entry {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+}
+
+#qscreen-widget entry.annotation-text-entry:focus {
+  outline: 1px dashed rgba(255,255,255,0.4);
+  outline-offset: 4px;
+}
+
+/* --- Size SpinButton --- */
+#qscreen-widget spinbutton {
+  background-color: @gnome-bg;
+  border: 2px solid alpha(@accent, 0.2);
+  border-radius: 10px;
+  padding: 3px 4px;
+  box-shadow: none;
+  min-height: 0;
+}
+
+/* The number text */
+#qscreen-widget spinbutton text {
+  color: @text-color;
+  background-color: transparent;
+  padding: 0 4px;
+}
+
+/* The inner + and - buttons */
+#qscreen-widget spinbutton button {
+  background-color: transparent;
+  border: none;
+  border-radius: 6px;
+  margin: 2px 2px; /* Reinstates gap between buttons */
+  padding: 2px 8px; /* Heavily slims the vertical padding */
+  min-height: 0;
+}
+
+#qscreen-widget spinbutton button:hover {
+  background-color: @gnome-highlight;
+}
+
+#qscreen-widget spinbutton button:active {
+  background-color: alpha(@accent, 0.4);
 }

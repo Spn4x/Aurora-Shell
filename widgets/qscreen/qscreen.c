@@ -1,66 +1,95 @@
 #include "qscreen.h"
+#include "ui_state.h"
 #include "utils.h"
 #include "features/ocr.h"
+#include "features/annotation_ui.h"
 #include <gdk/gdkcairo.h>
 #include <glib/gstdio.h>
 #include <json-glib/json-glib.h>
 #include <math.h>
 
-typedef enum {
-    MODE_REGION,
-    MODE_WINDOW,
-    MODE_TEXT
-} SelectionMode;
-
-typedef struct {
-    QScreenState *app_state;
-    GtkWindow *window;
-    GtkWidget *drawing_area;
-    GdkPixbuf *screenshot_pixbuf;
-    gchar *temp_screenshot_path;
-    SelectionMode current_mode;
-    GtkWidget *region_button, *window_button, *text_button, *screen_button, *save_button;
-    guint animation_timer_id;
-    gboolean is_animating;
-    double current_x, current_y, current_w, current_h;
-    double target_x, target_y, target_w, target_h;
-    double scale_x, scale_y;
-    GtkGesture *drag_gesture;
-    GtkEventController *motion_controller;
-    GtkGesture *click_gesture;
-    double drag_start_x, drag_start_y;
-    GList *window_geometries, *text_boxes, *selected_text_boxes;
-    GtkWidget *ocr_notification_revealer, *ocr_notification_stack;
-    gboolean ocr_has_run;
-} UIState;
-
 // --- Forward Declarations ---
+static void capture_selection_immediately(UIState *state);
 static void on_widget_realize(GtkWidget *widget, gpointer user_data);
 static void on_window_destroy(GtkWidget *widget, gpointer user_data);
 static void set_selection_target(UIState *state, double x, double y, double w, double h);
 static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data);
-static void on_selection_finalized(UIState *state);
 static void on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data);
 static void on_drag_update(GtkGestureDrag *gesture, double offset_x, double offset_y, gpointer data);
 static void on_drag_end(GtkGestureDrag *gesture, double offset_x, double offset_y, gpointer data);
 static void on_mouse_motion(GtkEventControllerMotion *controller, double x, double y, gpointer data);
 static void on_window_click(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data);
-static void set_mode(UIState *state, SelectionMode mode);
 static void on_region_button_toggled(GtkToggleButton *button, gpointer user_data);
 static void on_window_button_toggled(GtkToggleButton *button, gpointer user_data);
 static void on_text_button_toggled(GtkToggleButton *button, gpointer user_data);
 static void on_screen_button_clicked(GtkButton *button, gpointer user_data);
+static void on_annotate_toggle_changed(GtkToggleButton *button, gpointer user_data);
 static void ui_state_free(gpointer data);
 static void on_ocr_finished(GList *text_boxes, gpointer user_data);
 static gboolean hide_notification_and_redraw(gpointer user_data);
 static gboolean animation_tick(gpointer data);
 static void create_rounded_rect_path(cairo_t *cr, double x, double y, double w, double h, double r);
-static void on_key_pressed(GtkEventControllerKey* controller, guint keyval, guint keycode, GdkModifierType state, gpointer user_data);
+static gboolean on_key_pressed(GtkEventControllerKey* controller, guint keyval, guint keycode, GdkModifierType mod_state, gpointer user_data);
 static void on_drawing_area_resize(GtkWidget *widget, int width, int height, gpointer user_data);
 
 // ===================================================================
-//  Plugin Lifecycle Functions
+//  State Persistence Helpers
 // ===================================================================
+
+static char* get_state_file_path() {
+    const char *cache_dir = g_get_user_cache_dir();
+    return g_build_filename(cache_dir, "qscreen_state.json", NULL);
+}
+
+static gboolean get_saved_annotation_state() {
+    g_autofree char *path = get_state_file_path();
+    gboolean enabled = TRUE; 
+    
+    if (g_file_test(path, G_FILE_TEST_EXISTS)) {
+        g_autoptr(GError) error = NULL;
+        g_autoptr(JsonParser) parser = json_parser_new();
+        if (json_parser_load_from_file(parser, path, &error)) {
+            JsonObject *root = json_node_get_object(json_parser_get_root(parser));
+            if (json_object_has_member(root, "annotation_enabled")) {
+                enabled = json_object_get_boolean_member(root, "annotation_enabled");
+            }
+        }
+    }
+    return enabled;
+}
+
+static void save_annotation_state(gboolean enabled) {
+    g_autofree char *path = get_state_file_path();
+    JsonObject *root = json_object_new();
+    json_object_set_boolean_member(root, "annotation_enabled", enabled);
+    
+    JsonNode *node = json_node_new(JSON_NODE_OBJECT);
+    json_node_set_object(node, root);
+    
+    g_autoptr(JsonGenerator) gen = json_generator_new();
+    json_generator_set_root(gen, node);
+    json_generator_to_file(gen, path, NULL);
+    json_node_free(node);
+}
+
+static void on_annotate_toggle_changed(GtkToggleButton *button, gpointer user_data) {
+    (void)user_data;
+    save_annotation_state(gtk_toggle_button_get_active(button));
+}
+
+// ===================================================================
+//  Lifecycle & Main Callbacks
+// ===================================================================
+
+static void capture_selection_immediately(UIState *state) {
+    GdkRectangle g = { 
+        (int)round(state->current_x), (int)round(state->current_y), 
+        (int)round(state->current_w), (int)round(state->current_h) 
+    };
+    gboolean save = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(state->save_button));
+    process_final_screenshot(state->temp_screenshot_path, &g, save, state->app_state);
+    if (state->window) gtk_window_destroy(state->window);
+}
 
 static void on_widget_realize(GtkWidget *widget, gpointer user_data) {
     UIState *state = (UIState*)user_data;
@@ -84,23 +113,19 @@ static void ui_state_free(gpointer data) {
     if (state->window_geometries) g_list_free_full(state->window_geometries, g_free);
     if (state->text_boxes) free_ocr_results(state->text_boxes);
     g_list_free(state->selected_text_boxes);
+    annotation_items_free_list(state->strokes);
+    annotation_items_free_list(state->redo_strokes);
+    g_list_free(state->color_indicators);
     g_free(state->app_state);
     g_free(state);
 }
 
 static void on_drawing_area_resize(GtkWidget *widget, int width, int height, gpointer user_data) {
-    (void)widget;
-    UIState *state = user_data;
+    (void)widget; UIState *state = user_data;
     if (!state->screenshot_pixbuf || width == 0 || height == 0) return;
-    int pixbuf_width = gdk_pixbuf_get_width(state->screenshot_pixbuf);
-    int pixbuf_height = gdk_pixbuf_get_height(state->screenshot_pixbuf);
-    state->scale_x = (double)pixbuf_width / (double)width;
-    state->scale_y = (double)pixbuf_height / (double)height;
+    state->scale_x = (double)gdk_pixbuf_get_width(state->screenshot_pixbuf) / (double)width;
+    state->scale_y = (double)gdk_pixbuf_get_height(state->screenshot_pixbuf) / (double)height;
 }
-
-// ===================================================================
-//  Internal UI Logic and Callbacks
-// ===================================================================
 
 static gboolean animation_tick(gpointer data) {
     UIState *state = data;
@@ -134,9 +159,13 @@ static void create_rounded_rect_path(cairo_t *cr, double x, double y, double w, 
 }
 
 static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data) {
-    (void)area;
-    UIState *state = data;
+    (void)area; UIState *state = data;
     if (!state->screenshot_pixbuf || width == 0 || height == 0) return;
+
+    double sel_x = state->current_x / state->scale_x;
+    double sel_y = state->current_y / state->scale_y;
+    double sel_w = state->current_w / state->scale_x;
+    double sel_h = state->current_h / state->scale_y;
 
     if (state->current_mode != MODE_TEXT) {
         cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.5);
@@ -144,24 +173,27 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
     }
     
     if (state->current_w > 1 && state->current_h > 1 && state->current_mode != MODE_TEXT) {
-        double sel_x = state->current_x / state->scale_x;
-        double sel_y = state->current_y / state->scale_y;
-        double sel_w = state->current_w / state->scale_x;
-        double sel_h = state->current_h / state->scale_y;
-
         cairo_save(cr);
         create_rounded_rect_path(cr, sel_x, sel_y, sel_w, sel_h, 10.0);
         cairo_clip(cr);
-        
         cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
         cairo_paint(cr);
-        
         cairo_restore(cr);
 
         cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
         cairo_set_line_width(cr, 2.0);
         create_rounded_rect_path(cr, sel_x, sel_y, sel_w, sel_h, 10.0);
         cairo_stroke(cr);
+    }
+
+    if (state->strokes) {
+        cairo_save(cr);
+        if (state->current_w > 1 && state->current_h > 1) {
+            create_rounded_rect_path(cr, sel_x, sel_y, sel_w, sel_h, 10.0);
+            cairo_clip(cr);
+        }
+        annotation_draw_all(cr, state->strokes, 0, 0, 1.0 / state->scale_x, 1.0 / state->scale_y);
+        cairo_restore(cr);
     }
 
     if (state->current_mode == MODE_TEXT && state->text_boxes) {
@@ -180,52 +212,45 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
             cairo_rectangle(cr, box->geometry.x / state->scale_x, box->geometry.y / state->scale_y, box->geometry.width / state->scale_x, box->geometry.height / state->scale_y);
         }
         cairo_fill(cr);
-
-        if (state->current_w > 1 && state->current_h > 1) {
-            double sel_x = state->current_x / state->scale_x;
-            double sel_y = state->current_y / state->scale_y;
-            double sel_w = state->current_w / state->scale_x;
-            double sel_h = state->current_h / state->scale_y;
-            cairo_set_source_rgba(cr, 0.5, 0.5, 0.5, 0.2);
-            cairo_rectangle(cr, sel_x, sel_y, sel_w, sel_h);
-            cairo_fill(cr);
-            cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.8);
-            cairo_set_line_width(cr, 1.0);
-            cairo_rectangle(cr, sel_x, sel_y, sel_w, sel_h);
-            cairo_stroke(cr);
-        }
     }
 }
 
-static void on_selection_finalized(UIState *state) {
-    if (!state->window || !gtk_widget_get_visible(GTK_WIDGET(state->window))) return;
-    if (state->current_w < 5 || state->current_h < 5) { gtk_window_destroy(state->window); return; }
-    GdkRectangle geometry = { (int)round(state->current_x), (int)round(state->current_y), (int)round(state->current_w), (int)round(state->current_h) };
-    gboolean save_to_disk = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(state->save_button));
-    process_final_screenshot(state->temp_screenshot_path, &geometry, save_to_disk, state->app_state);
-    if (state->window) gtk_window_destroy(state->window);
-}
+// ===================================================================
+//  Gestures & Input
+// ===================================================================
 
 static void on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data) {
-    (void)gesture; 
-    UIState *state = data;
+    (void)gesture; UIState *state = data;
     double scaled_x = x * state->scale_x;
     double scaled_y = y * state->scale_y;
-    state->drag_start_x = scaled_x; state->drag_start_y = scaled_y;
+    state->drag_start_x = scaled_x; 
+    state->drag_start_y = scaled_y;
+
+    if (state->is_annotating) {
+        annotation_ui_drag_begin(state, scaled_x, scaled_y, x, y);
+        return;
+    }
+
     state->current_x = scaled_x; state->current_y = scaled_y;
     state->current_w = 0; state->current_h = 0;
     if (state->current_mode == MODE_TEXT) { g_list_free(state->selected_text_boxes); state->selected_text_boxes = NULL; }
 }
 
 static void on_drag_update(GtkGestureDrag *gesture, double offset_x, double offset_y, gpointer data) {
-    (void)gesture; 
-    UIState *state = data;
+    (void)gesture; UIState *state = data;
     double scaled_offset_x = offset_x * state->scale_x;
     double scaled_offset_y = offset_y * state->scale_y;
     double end_x = state->drag_start_x + scaled_offset_x;
     double end_y = state->drag_start_y + scaled_offset_y;
+
+    if (state->is_annotating) {
+        annotation_ui_drag_update(state, end_x, end_y);
+        return;
+    }
+
     state->current_x = MIN(state->drag_start_x, end_x); state->current_y = MIN(state->drag_start_y, end_y);
     state->current_w = fabs(end_x - state->drag_start_x); state->current_h = fabs(end_y - state->drag_start_y);
+    
     if (state->current_mode == MODE_TEXT) {
         g_list_free(state->selected_text_boxes); state->selected_text_boxes = NULL; 
         GdkRectangle selection_rect = { (int)state->current_x, (int)state->current_y, (int)state->current_w, (int)state->current_h };
@@ -239,8 +264,10 @@ static void on_drag_update(GtkGestureDrag *gesture, double offset_x, double offs
 }
 
 static void on_drag_end(GtkGestureDrag *gesture, double offset_x, double offset_y, gpointer data) {
-    (void)gesture; (void)offset_x; (void)offset_y; 
-    UIState *state = data;
+    (void)gesture; (void)offset_x; (void)offset_y; UIState *state = data;
+    
+    if (state->is_annotating) return;
+
     if (state->current_mode == MODE_TEXT) {
         if (state->selected_text_boxes) {
             GString *final_text = g_string_new(""); 
@@ -255,13 +282,23 @@ static void on_drag_end(GtkGestureDrag *gesture, double offset_x, double offset_
             g_string_free(final_text, TRUE);
         } 
         if (state->window) gtk_window_destroy(state->window);
-    } else on_selection_finalized(state);
+    } else {
+        if (state->current_w > 5 && state->current_h > 5) {
+            if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(state->annotate_toggle_btn))) {
+                enter_annotation_phase(state);
+            } else {
+                capture_selection_immediately(state);
+            }
+        } else {
+            if (state->window) gtk_window_destroy(state->window);
+        }
+    }
 }
 
 static void on_mouse_motion(GtkEventControllerMotion *controller, double x, double y, gpointer data) {
-    (void)controller; 
-    UIState *state = data; 
-    if (state->current_mode != MODE_WINDOW) return; 
+    (void)controller; UIState *state = data; 
+    if (state->current_mode != MODE_WINDOW || state->is_annotating) return; 
+    
     double scaled_x = x * state->scale_x;
     double scaled_y = y * state->scale_y;
     gboolean found_window = FALSE;
@@ -277,20 +314,33 @@ static void on_mouse_motion(GtkEventControllerMotion *controller, double x, doub
 }
 
 static void on_window_click(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
-    (void)gesture; (void)n_press; (void)x; (void)y; 
-    UIState *state = data;
-    if (state->current_mode == MODE_WINDOW && state->current_w > 0 && state->current_h > 0) on_selection_finalized(state);
-}
-
-static void on_key_pressed(GtkEventControllerKey* controller, guint keyval, guint keycode, GdkModifierType state, gpointer user_data) {
-    (void)controller; (void)keycode; (void)state;
-    UIState *ui_state = user_data;
-    if (keyval == GDK_KEY_Escape) {
-        if (ui_state && ui_state->window) { gtk_window_destroy(ui_state->window); }
+    (void)gesture; (void)n_press; (void)x; (void)y; UIState *state = data;
+    if (state->current_mode == MODE_WINDOW && !state->is_annotating && state->current_w > 0 && state->current_h > 0) {
+        if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(state->annotate_toggle_btn))) {
+            enter_annotation_phase(state);
+        } else {
+            capture_selection_immediately(state);
+        }
     }
 }
 
-static void set_mode(UIState *state, SelectionMode mode) {
+static gboolean on_key_pressed(GtkEventControllerKey* controller, guint keyval, guint keycode, GdkModifierType mod_state, gpointer user_data) {
+    (void)controller; (void)keycode; UIState *state = user_data;
+    
+    if (annotation_ui_handle_key(state, keyval, mod_state)) return TRUE;
+
+    if (keyval == GDK_KEY_Escape && !state->is_annotating) {
+        if (state->window) gtk_window_destroy(state->window);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// ===================================================================
+//  Phase 1 Tools & OCR
+// ===================================================================
+
+void qscreen_set_mode(UIState *state, SelectionMode mode) {
     state->current_mode = mode;
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(state->motion_controller), (mode == MODE_WINDOW) ? GTK_PHASE_CAPTURE : GTK_PHASE_NONE);
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(state->click_gesture), (mode == MODE_WINDOW) ? GTK_PHASE_CAPTURE : GTK_PHASE_NONE);
@@ -308,15 +358,22 @@ static void set_mode(UIState *state, SelectionMode mode) {
     }
 }
 
-static void on_region_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); set_mode(s,MODE_REGION); }}
-static void on_window_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); set_mode(s,MODE_WINDOW); }}
-static void on_text_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); set_mode(s,MODE_TEXT); }}
+static void on_region_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); qscreen_set_mode(s,MODE_REGION); }}
+static void on_window_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); qscreen_set_mode(s,MODE_WINDOW); }}
+static void on_text_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); qscreen_set_mode(s,MODE_TEXT); }}
 static void on_screen_button_clicked(GtkButton *b, gpointer d) { 
     (void)b; UIState *s=d; 
-    GdkRectangle g={0,0,gdk_pixbuf_get_width(s->screenshot_pixbuf),gdk_pixbuf_get_height(s->screenshot_pixbuf)}; 
-    gboolean save=gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->save_button)); 
-    process_final_screenshot(s->temp_screenshot_path,&g,save,s->app_state); 
-    if (s->window) gtk_window_destroy(s->window); 
+    
+    s->current_x = 0;
+    s->current_y = 0;
+    s->current_w = gdk_pixbuf_get_width(s->screenshot_pixbuf);
+    s->current_h = gdk_pixbuf_get_height(s->screenshot_pixbuf);
+
+    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->annotate_toggle_btn))) {
+        enter_annotation_phase(s);
+    } else {
+        capture_selection_immediately(s);
+    }
 }
 
 static gboolean hide_notification_and_redraw(gpointer d) { UIState *s=d; gtk_revealer_set_reveal_child(GTK_REVEALER(s->ocr_notification_revealer),FALSE); gtk_widget_queue_draw(s->drawing_area); return G_SOURCE_REMOVE; }
@@ -331,34 +388,21 @@ static void on_ocr_finished(GList *text_boxes, gpointer data) {
 
 G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     g_autoptr(JsonParser) parser = json_parser_new();
-    
-    // FIX 1: If parsing fails, return a safe dummy widget instead of NULL
     if (!config_string || !json_parser_load_from_data(parser, config_string, -1, NULL)) {
-        g_warning("qscreen: Failed to parse config string."); 
-        GtkWidget *dummy = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-        gtk_widget_set_size_request(dummy, 1, 1);
-        gtk_widget_set_opacity(dummy, 0.0);
-        return dummy;
+        GtkWidget *dummy = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0); gtk_widget_set_size_request(dummy, 1, 1); gtk_widget_set_opacity(dummy, 0.0); return dummy;
     }
     
     JsonObject *root_obj = json_node_get_object(json_parser_get_root(parser));
-    
-    // FIX 2: Safely check for member existence before retrieval.
     if (!json_object_has_member(root_obj, "temp_screenshot_path")) {
-        // This means the widget was loaded on boot before being toggled.
-        // Return a transparent 1x1 box so GTK 4.22 creates a Wayland surface and doesn't crash.
-        GtkWidget *dummy = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-        gtk_widget_set_size_request(dummy, 1, 1);
-        gtk_widget_set_opacity(dummy, 0.0);
-        return dummy;
+        GtkWidget *dummy = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0); gtk_widget_set_size_request(dummy, 1, 1); gtk_widget_set_opacity(dummy, 0.0); return dummy;
     }
     
-    const char *temp_path = json_object_get_string_member(root_obj, "temp_screenshot_path");
-
     UIState *state = g_new0(UIState, 1);
     state->app_state = g_new0(QScreenState, 1);
-    state->temp_screenshot_path = g_strdup(temp_path);
+    state->temp_screenshot_path = g_strdup(json_object_get_string_member(root_obj, "temp_screenshot_path"));
     state->scale_x = 1.0; state->scale_y = 1.0;
+    state->current_brush_size = 6.0;
+    state->current_font_size = 32.0;
 
     if (json_object_has_member(root_obj, "config")) {
         JsonObject *config = json_object_get_object_member(root_obj, "config");
@@ -371,61 +415,51 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     
     g_autoptr(GError) error = NULL;
     state->screenshot_pixbuf = gdk_pixbuf_new_from_file(state->temp_screenshot_path, &error);
-    
-    // FIX 3: Return dummy if loading image fails
-    if (error) {
-        g_warning("qscreen: Failed to load pre-captured screenshot '%s': %s", state->temp_screenshot_path, error->message);
-        ui_state_free(state); 
-        GtkWidget *dummy = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-        gtk_widget_set_size_request(dummy, 1, 1);
-        gtk_widget_set_opacity(dummy, 0.0);
-        return dummy;
-    }
+    if (error) { ui_state_free(state); GtkWidget *dummy = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0); gtk_widget_set_size_request(dummy, 1, 1); gtk_widget_set_opacity(dummy, 0.0); return dummy; }
 
     GtkAspectFrame *aspect_frame = GTK_ASPECT_FRAME(gtk_aspect_frame_new(0.5, 0.5, (float)gdk_pixbuf_get_width(state->screenshot_pixbuf) / (float)gdk_pixbuf_get_height(state->screenshot_pixbuf), FALSE));
     GtkWidget *overlay = gtk_overlay_new();
     gtk_aspect_frame_set_child(aspect_frame, overlay);
-    
     gtk_widget_set_name(GTK_WIDGET(aspect_frame), "qscreen-widget");
     g_object_set_data_full(G_OBJECT(aspect_frame), "ui-state", state, ui_state_free);
     
-    // --- NEW WIDGET HIERARCHY ---
-    GtkWidget *picture = gtk_picture_new_for_pixbuf(state->screenshot_pixbuf);
+    GtkWidget *picture = gtk_picture_new_for_filename(state->temp_screenshot_path);
     gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_FILL);
     gtk_overlay_set_child(GTK_OVERLAY(overlay), picture);
 
     state->drawing_area = gtk_drawing_area_new();
+    gtk_widget_set_focusable(state->drawing_area, TRUE); 
     g_signal_connect(state->drawing_area, "resize", G_CALLBACK(on_drawing_area_resize), state);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(state->drawing_area), draw_selection_overlay, state, NULL);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), state->drawing_area);
-    // --- END NEW HIERARCHY ---
+
+    state->annotation_fixed = gtk_fixed_new();
+    gtk_widget_set_can_target(state->annotation_fixed, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), state->annotation_fixed);
 
     g_signal_connect(GTK_WIDGET(aspect_frame), "unrealize", G_CALLBACK(on_window_destroy), NULL);
     GtkEventController *key_controller = gtk_event_controller_key_new();
     g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), state);
     gtk_widget_add_controller(GTK_WIDGET(aspect_frame), key_controller);
     
+    // Notifications
     state->ocr_notification_revealer = gtk_revealer_new();
     gtk_revealer_set_transition_type(GTK_REVEALER(state->ocr_notification_revealer), GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
     gtk_revealer_set_transition_duration(GTK_REVEALER(state->ocr_notification_revealer), 250);
-    GtkWidget *notification_container = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_widget_add_css_class(notification_container, "ocr-notification");
+    GtkWidget *notification_container = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0); gtk_widget_add_css_class(notification_container, "ocr-notification");
     state->ocr_notification_stack = gtk_stack_new();
     gtk_stack_set_transition_type(GTK_STACK(state->ocr_notification_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_UP);
-    gtk_stack_set_transition_duration(GTK_STACK(state->ocr_notification_stack), 300);
-    GtkWidget *scanning_content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    GtkWidget *spinner = gtk_spinner_new(); gtk_spinner_start(GTK_SPINNER(spinner));
+    GtkWidget *scanning_content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6); GtkWidget *spinner = gtk_spinner_new(); gtk_spinner_start(GTK_SPINNER(spinner));
     gtk_box_append(GTK_BOX(scanning_content), spinner); gtk_box_append(GTK_BOX(scanning_content), gtk_label_new("Scanning for text..."));
-    GtkWidget *done_content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_box_append(GTK_BOX(done_content), gtk_label_new("✓ Done!"));
-    gtk_stack_add_named(GTK_STACK(state->ocr_notification_stack), scanning_content, "scanning");
-    gtk_stack_add_named(GTK_STACK(state->ocr_notification_stack), done_content, "done");
-    gtk_box_append(GTK_BOX(notification_container), state->ocr_notification_stack);
-    gtk_revealer_set_child(GTK_REVEALER(state->ocr_notification_revealer), notification_container);
+    GtkWidget *done_content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6); gtk_box_append(GTK_BOX(done_content), gtk_label_new("\u2713 Done!"));
+    gtk_stack_add_named(GTK_STACK(state->ocr_notification_stack), scanning_content, "scanning"); gtk_stack_add_named(GTK_STACK(state->ocr_notification_stack), done_content, "done");
+    gtk_box_append(GTK_BOX(notification_container), state->ocr_notification_stack); gtk_revealer_set_child(GTK_REVEALER(state->ocr_notification_revealer), notification_container);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), state->ocr_notification_revealer);
-    gtk_widget_set_valign(state->ocr_notification_revealer, GTK_ALIGN_START);
-    gtk_widget_set_halign(state->ocr_notification_revealer, GTK_ALIGN_CENTER);
-    
+    gtk_widget_set_valign(state->ocr_notification_revealer, GTK_ALIGN_START); gtk_widget_set_halign(state->ocr_notification_revealer, GTK_ALIGN_CENTER);
+
+    // Phase 1 Toolbar
+    state->bottom_panel_revealer = GTK_REVEALER(gtk_revealer_new());
+    gtk_revealer_set_transition_type(state->bottom_panel_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
     GtkWidget *panel_frame = gtk_frame_new(NULL); gtk_widget_add_css_class(panel_frame, "panel");
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     gtk_widget_set_margin_start(main_box, 15); gtk_widget_set_margin_end(main_box, 15); gtk_widget_set_margin_top(main_box, 15); gtk_widget_set_margin_bottom(main_box, 15);
@@ -435,25 +469,52 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     state->region_button = gtk_toggle_button_new(); gtk_button_set_child(GTK_BUTTON(state->region_button), gtk_image_new_from_icon_name("image-x-generic-symbolic"));
     state->window_button = gtk_toggle_button_new(); gtk_button_set_child(GTK_BUTTON(state->window_button), gtk_image_new_from_icon_name("window-new-symbolic"));
     state->text_button = gtk_toggle_button_new(); gtk_button_set_child(GTK_BUTTON(state->text_button), gtk_image_new_from_icon_name("edit-find-symbolic"));
-    gtk_widget_set_tooltip_text(state->text_button, "Select Text (OCR)");
     gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->window_button), GTK_TOGGLE_BUTTON(state->region_button));
     gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->text_button), GTK_TOGGLE_BUTTON(state->region_button));
     state->screen_button = gtk_button_new_from_icon_name("video-display-symbolic");
     state->save_button = gtk_toggle_button_new(); gtk_button_set_child(GTK_BUTTON(state->save_button), gtk_image_new_from_icon_name("document-save-symbolic"));
-    gtk_widget_set_tooltip_text(state->save_button, "Save to disk"); gtk_widget_add_css_class(state->save_button, "save-button");
-    gtk_box_append(GTK_BOX(button_box), state->region_button);
-    gtk_box_append(GTK_BOX(button_box), state->window_button);
-    gtk_box_append(GTK_BOX(button_box), state->text_button);
-    gtk_box_append(GTK_BOX(button_box), state->screen_button);
-    GtkWidget *separator = gtk_separator_new(GTK_ORIENTATION_VERTICAL); gtk_widget_add_css_class(separator, "vertical-separator");
-    gtk_box_append(GTK_BOX(button_box), separator);
-    gtk_box_append(GTK_BOX(button_box), state->save_button);
+    gtk_widget_add_css_class(state->save_button, "save-button");
+
+    state->annotate_toggle_btn = gtk_toggle_button_new(); 
+    gtk_button_set_child(GTK_BUTTON(state->annotate_toggle_btn), gtk_image_new_from_icon_name("document-edit-symbolic"));
+    gtk_widget_set_tooltip_text(state->annotate_toggle_btn, "Annotate before capturing");
+    
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->annotate_toggle_btn), get_saved_annotation_state());
+    g_signal_connect(state->annotate_toggle_btn, "toggled", G_CALLBACK(on_annotate_toggle_changed), NULL);
+
+    gtk_widget_set_focusable(state->region_button, FALSE);
+    gtk_widget_set_focusable(state->window_button, FALSE);
+    gtk_widget_set_focusable(state->text_button, FALSE);
+    gtk_widget_set_focusable(state->screen_button, FALSE);
+    gtk_widget_set_focusable(state->save_button, FALSE);
+    gtk_widget_set_focusable(state->annotate_toggle_btn, FALSE);
+    
+    gtk_box_append(GTK_BOX(button_box), state->region_button); gtk_box_append(GTK_BOX(button_box), state->window_button);
+    gtk_box_append(GTK_BOX(button_box), state->text_button); gtk_box_append(GTK_BOX(button_box), state->screen_button);
+    GtkWidget *separator1 = gtk_separator_new(GTK_ORIENTATION_VERTICAL); gtk_widget_add_css_class(separator1, "vertical-separator");
+    gtk_box_append(GTK_BOX(button_box), separator1); gtk_box_append(GTK_BOX(button_box), state->annotate_toggle_btn);
+    GtkWidget *separator2 = gtk_separator_new(GTK_ORIENTATION_VERTICAL); gtk_widget_add_css_class(separator2, "vertical-separator");
+    gtk_box_append(GTK_BOX(button_box), separator2); gtk_box_append(GTK_BOX(button_box), state->save_button);
     gtk_box_append(GTK_BOX(main_box), button_box);
     
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), panel_frame);
-    gtk_widget_set_valign(panel_frame, GTK_ALIGN_END); gtk_widget_set_halign(panel_frame, GTK_ALIGN_CENTER);
-    gtk_widget_set_margin_bottom(panel_frame, 40);
+    gtk_revealer_set_child(state->bottom_panel_revealer, panel_frame);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(state->bottom_panel_revealer));
+    gtk_widget_set_valign(GTK_WIDGET(state->bottom_panel_revealer), GTK_ALIGN_END); 
+    gtk_widget_set_halign(GTK_WIDGET(state->bottom_panel_revealer), GTK_ALIGN_CENTER);
+    gtk_widget_set_margin_bottom(GTK_WIDGET(state->bottom_panel_revealer), 40);
+    gtk_revealer_set_reveal_child(state->bottom_panel_revealer, TRUE);
 
+    // Phase 2 Toolbar 
+    state->top_panel_revealer = GTK_REVEALER(gtk_revealer_new());
+    gtk_revealer_set_transition_type(state->top_panel_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+    GtkWidget *annotation_toolbar = create_annotation_toolbar(state);
+    gtk_revealer_set_child(state->top_panel_revealer, annotation_toolbar);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(state->top_panel_revealer));
+    gtk_widget_set_valign(GTK_WIDGET(state->top_panel_revealer), GTK_ALIGN_START);
+    gtk_widget_set_halign(GTK_WIDGET(state->top_panel_revealer), GTK_ALIGN_CENTER);
+    gtk_widget_set_margin_top(GTK_WIDGET(state->top_panel_revealer), 15); // FIX: Tucked nicely against the edge
+
+    // Gestures
     g_signal_connect(state->region_button, "toggled", G_CALLBACK(on_region_button_toggled), state);
     g_signal_connect(state->window_button, "toggled", G_CALLBACK(on_window_button_toggled), state);
     g_signal_connect(state->text_button, "toggled", G_CALLBACK(on_text_button_toggled), state);
@@ -473,9 +534,8 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
 
     state->window_geometries = get_hyprland_windows_geometry(state->app_state);
     
-    set_mode(state, (SelectionMode)state->app_state->initial_mode);
+    qscreen_set_mode(state, (SelectionMode)state->app_state->initial_mode);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->save_button), state->app_state->save_on_launch);
-    
     g_signal_connect(GTK_WIDGET(aspect_frame), "realize", G_CALLBACK(on_widget_realize), state);
     
     return GTK_WIDGET(aspect_frame);

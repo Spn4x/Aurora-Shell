@@ -10,5 +10,7 @@ void process_final_screenshot(const char *source_path, GdkRectangle *geometry, g
 void process_fullscreen_screenshot(QScreenState *state);
 GList* get_hyprland_windows_geometry(QScreenState *state);
 void capture_fullscreen_for_overlay(GChildWatchFunc on_captured, gpointer user_data);
+void process_precomposited_screenshot(const char *source_path, gboolean save_to_disk, QScreenState *state); // NEW
+void process_fullscreen_screenshot(QScreenState *state);
 
 #endif // QSCREEN_UTILS_H

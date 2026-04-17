@@ -36,10 +36,6 @@
             "name" : "audio"
           },
           {
-            "name" : "zen",
-            "on-click-right" : "aurora-shell --toggle organizer"
-          },
-          {
              "name": "systray" 
           },
      {
@@ -176,7 +172,7 @@
       "width" : 275,
       "height" : 450
     },
-    "exclusive" : true
+    "exclusive" : false
   },
   {
     "name" : "launcher",
@@ -240,6 +236,25 @@
   {
     "type" : "daemon",
     "command" : "aurora-privacy-daemon"
+  },
+  {
+        "name": "auroralauncherd",
+        "type": "daemon",
+        "command": "auroralauncherd"
+  },
+  {
+    "type": "daemon",
+    "name": "Widget Data Provider",
+    "command": "aurorawidgetd"
+  },
+  {
+    "type": "daemon",
+    "name": "media-manager-daemon",
+    "command": "auroramediad"
+  },
+  {
+  "type": "daemon",
+  "command": "aurora-osd-daemon"
   },
   {
     "type" : "widget",

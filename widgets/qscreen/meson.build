@@ -18,7 +18,9 @@ dependencies = [
 sources = [
   'qscreen.c',
   'utils.c',
-  'features/ocr.c'
+  'features/ocr.c',
+  'features/annotation.c',
+  'features/annotation_ui.c'
 ]
 
 # The command to build the shared library (the .so plugin).

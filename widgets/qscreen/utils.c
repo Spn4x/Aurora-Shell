@@ -57,6 +57,40 @@ void run_command_with_stdin_sync(const gchar *command, const gchar *input) {
     }
 }
 
+void process_precomposited_screenshot(const char *source_path, gboolean save_to_disk, QScreenState *state) {
+    (void)state;
+    g_autofree char *output_path = NULL;
+    g_autofree char *command = NULL;
+
+    if (save_to_disk) {
+        g_autofree char *pictures_dir = g_strdup(g_get_user_special_dir(G_USER_DIRECTORY_PICTURES));
+        g_autoptr(GDateTime) now = g_date_time_new_now_local();
+        g_autofree char *timestamp = g_date_time_format(now, "%Y-%m-%d_%H-%M-%S");
+        g_autofree char *filename = g_strdup_printf("screenshot-%s.png", timestamp);
+        output_path = g_build_filename(pictures_dir, filename, NULL);
+        
+        command = g_strdup_printf("cp \"%s\" \"%s\" && wl-copy < \"%s\"", source_path, output_path, output_path);
+    } else {
+        command = g_strdup_printf("wl-copy < \"%s\"", source_path);
+    }
+
+    g_print("Running composited command: %s\n", command);
+
+    g_autoptr(GError) error = NULL;
+    gint exit_status = 0;
+    gboolean success = g_spawn_sync(NULL, (gchar*[]){ "sh", "-c", command, NULL }, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, &exit_status, &error);
+    
+    if (success && exit_status == 0 && !error) {
+        const char* msg = save_to_disk ? "Annotated screenshot saved and copied." : "Annotated image is on your clipboard.";
+        g_autofree char* notify_cmd = g_strdup_printf("notify-send 'Screenshot Captured' '%s'", msg);
+        // We reuse the async command runner you already have
+        g_spawn_command_line_async(notify_cmd, NULL);
+    } else {
+        g_warning("Annotated screenshot command failed: %s", error ? error->message : "Unknown error");
+        g_spawn_command_line_async("notify-send -u critical 'Screenshot Failed' 'Could not process the image.'", NULL);
+    }
+}
+
 void process_fullscreen_screenshot(QScreenState *state) {
     g_autofree char* command = NULL;
     if (state->save_on_launch) {
