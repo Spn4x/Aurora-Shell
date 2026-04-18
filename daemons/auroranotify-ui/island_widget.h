@@ -12,4 +12,7 @@ void island_widget_set_expanded (IslandWidget *self, gboolean expanded);
 void island_widget_transition_to_pill_child (IslandWidget *self, GtkWidget *child);
 void island_widget_transition_to_expanded_child (IslandWidget *self, GtkWidget *child);
 
+// --- Expose the pill stack so we can attach isolated click events ---
+GtkWidget* island_widget_get_pill_stack (IslandWidget *self);
+
 #endif // __ISLAND_WIDGET_H__

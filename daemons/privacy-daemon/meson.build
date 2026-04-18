@@ -6,6 +6,7 @@ executable('aurora-privacy-daemon',
     dependency('gio-2.0'),
     dependency('libpipewire-0.3', version: '>= 0.3.38'),
     dependency('libspa-0.2'),
+    dependency('json-glib-1.0') 
     # Use GLib's threading, which is handled by gio-2.0
   ],
   # Add the C flag to expose POSIX definitions

@@ -81,7 +81,9 @@ typedef struct {
     GtkWidget *annotation_fixed;
     GtkWidget *active_text_entry;
     double active_text_x, active_text_y;
-    double active_text_rotation; // --- NEW: Preserves rotation during edit ---
+    double active_text_rotation; 
+    
+    gboolean ignore_next_drag; 
 } UIState;
 
 void qscreen_set_mode(UIState *state, SelectionMode mode);

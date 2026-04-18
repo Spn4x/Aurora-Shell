@@ -55,7 +55,10 @@ static void update_active_text_appearance(UIState *state) {
 void finalize_text_entry(UIState *state) {
     if (!state->active_text_entry) return;
     
-    const char *text = gtk_editable_get_text(GTK_EDITABLE(state->active_text_entry));
+    GtkWidget *entry = state->active_text_entry;
+    state->active_text_entry = NULL;
+    
+    const char *text = gtk_editable_get_text(GTK_EDITABLE(entry));
     if (text && strlen(text) > 0) {
         AnnotationItem *item = annotation_text_new(&state->current_color, text, state->active_text_x, state->active_text_y, state->current_font_size);
         item->rotation = state->active_text_rotation; 
@@ -66,16 +69,15 @@ void finalize_text_entry(UIState *state) {
             annotation_items_free_list(state->redo_strokes);
             state->redo_strokes = NULL;
         }
-        
-        state->selected_item = item;
-        state->current_ann_mode = ANN_MODE_SELECT;
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->ann_select_btn), TRUE);
     }
     
     state->active_text_rotation = 0.0; 
     
-    gtk_fixed_remove(GTK_FIXED(state->annotation_fixed), state->active_text_entry);
-    state->active_text_entry = NULL;
+    gtk_fixed_remove(GTK_FIXED(state->annotation_fixed), entry);
+    
+    // --- FIX: Turn off the invisible shield so we can click the canvas again! ---
+    gtk_widget_set_can_target(state->annotation_fixed, FALSE);
+    
     gtk_widget_queue_draw(state->drawing_area);
     gtk_widget_grab_focus(state->drawing_area);
 }
@@ -90,6 +92,8 @@ static void on_text_entry_changed(GtkEditable *editable, gpointer user_data) {
 
 void enter_annotation_phase(UIState *state) {
     state->is_annotating = TRUE;
+    state->ignore_next_drag = FALSE;
+    
     gtk_revealer_set_reveal_child(state->bottom_panel_revealer, FALSE);
     gtk_revealer_set_reveal_child(state->top_panel_revealer, TRUE);
     gtk_revealer_set_reveal_child(state->ann_bottom_panel_revealer, TRUE); 
@@ -126,6 +130,7 @@ void cancel_annotation_phase(UIState *state) {
     finalize_text_entry(state); 
     state->is_annotating = FALSE;
     state->selected_item = NULL;
+    state->ignore_next_drag = FALSE;
     
     gtk_revealer_set_reveal_child(state->top_panel_revealer, FALSE);
     gtk_revealer_set_reveal_child(state->ann_bottom_panel_revealer, FALSE); 
@@ -191,6 +196,11 @@ static void on_angle_spin_changed(GtkSpinButton *spin, gpointer user_data);
 static void on_size_spin_changed(GtkSpinButton *spin, gpointer user_data);
 
 void annotation_ui_drag_begin(UIState *state, double scaled_x, double scaled_y, double raw_x, double raw_y) {
+    if (state->ignore_next_drag) {
+        state->ignore_next_drag = FALSE;
+        return;
+    }
+
     finalize_text_entry(state);
 
     if (state->current_ann_mode == ANN_MODE_SELECT) {
@@ -280,6 +290,9 @@ void annotation_ui_drag_begin(UIState *state, double scaled_x, double scaled_y, 
         gtk_editable_set_text(GTK_EDITABLE(state->active_text_entry), "Enter text");
         gtk_editable_select_region(GTK_EDITABLE(state->active_text_entry), 0, -1);
         resize_text_entry(state);
+
+        // Turn on the invisible shield so the entry can receive mouse focus
+        gtk_widget_set_can_target(state->annotation_fixed, TRUE);
 
         gtk_fixed_put(GTK_FIXED(state->annotation_fixed), state->active_text_entry, raw_x, raw_y);
         g_signal_connect(state->active_text_entry, "activate", G_CALLBACK(on_text_entry_activate), state);
@@ -426,9 +439,15 @@ void annotation_ui_double_click(UIState *state, double raw_x, double raw_y) {
                 gtk_editable_select_region(GTK_EDITABLE(state->active_text_entry), 0, -1);
                 resize_text_entry(state);
 
+                // Turn on the invisible shield again!
+                gtk_widget_set_can_target(state->annotation_fixed, TRUE);
+
                 gtk_fixed_put(GTK_FIXED(state->annotation_fixed), state->active_text_entry, place_raw_x, place_raw_y);
                 g_signal_connect(state->active_text_entry, "activate", G_CALLBACK(on_text_entry_activate), state);
                 g_signal_connect(state->active_text_entry, "changed", G_CALLBACK(on_text_entry_changed), state);
+                
+                state->ignore_next_drag = TRUE;
+                
                 gtk_widget_grab_focus(state->active_text_entry);
                 
                 state->strokes = g_list_remove(state->strokes, item);
@@ -441,19 +460,16 @@ void annotation_ui_double_click(UIState *state, double raw_x, double raw_y) {
     }
 }
 
-
 static void paste_from_clipboard(UIState *state) {
     gint exit_status = 0;
     g_autofree gchar *tmp_img_path = g_build_filename(g_get_tmp_dir(), "qscreen_paste.png", NULL);
     
     g_autofree gchar *cmd = g_strdup_printf("sh -c \"wl-paste -t image/png > '%s'\"", tmp_img_path);
-    
     gboolean success = g_spawn_command_line_sync(cmd, NULL, NULL, &exit_status, NULL);
     
     double cx = gdk_pixbuf_get_width(state->screenshot_pixbuf) / 2.0;
     double cy = gdk_pixbuf_get_height(state->screenshot_pixbuf) / 2.0;
 
-    // 1. Try Image
     if (success && exit_status == 0) {
         GError *err = NULL;
         GdkPixbuf *pasted_pixbuf = gdk_pixbuf_new_from_file(tmp_img_path, &err);
@@ -462,7 +478,6 @@ static void paste_from_clipboard(UIState *state) {
             double pw = gdk_pixbuf_get_width(pasted_pixbuf);
             double ph = gdk_pixbuf_get_height(pasted_pixbuf);
             
-            // --- FIX: Safely scale down massive images so they fit nicely on the screen! ---
             double max_w = gdk_pixbuf_get_width(state->screenshot_pixbuf) * 0.7;
             double max_h = gdk_pixbuf_get_height(state->screenshot_pixbuf) * 0.7;
             
@@ -491,7 +506,6 @@ static void paste_from_clipboard(UIState *state) {
         if (err) g_error_free(err);
     }
     
-    // 2. Fallback to Text
     g_autofree gchar *paste_text = NULL;
     success = g_spawn_command_line_sync("wl-paste -t text/plain", &paste_text, NULL, &exit_status, NULL);
     
@@ -514,7 +528,6 @@ static void paste_from_clipboard(UIState *state) {
 gboolean annotation_ui_handle_key(UIState *state, guint keyval, GdkModifierType mod_state) {
     if (!state->is_annotating) return FALSE;
 
-    // --- NEW: Intercept Ctrl+V to trigger paste ---
     if ((keyval == GDK_KEY_v || keyval == GDK_KEY_V) && (mod_state & GDK_CONTROL_MASK) && state->active_text_entry == NULL) {
         paste_from_clipboard(state);
         return TRUE;
@@ -655,7 +668,11 @@ static GtkWidget* create_color_button(const char *color_hex, UIState *state) {
         (int)(rgba->red*255), (int)(rgba->green*255), (int)(rgba->blue*255));
     
     gtk_css_provider_load_from_string(p, css);
+    
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
     gtk_style_context_add_provider(gtk_widget_get_style_context(btn), GTK_STYLE_PROVIDER(p), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    
     g_object_unref(p);
 
     state->color_indicators = g_list_append(state->color_indicators, btn);

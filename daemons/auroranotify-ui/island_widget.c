@@ -80,6 +80,8 @@ static void island_widget_init(IslandWidget *self) {
     gtk_stack_set_hhomogeneous(GTK_STACK(self->content_stack), FALSE);
     gtk_stack_set_transition_type(GTK_STACK(self->content_stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
     gtk_stack_set_transition_duration(GTK_STACK(self->content_stack), 400);
+    // Interpolate size shrinks the Wayland surface dynamically!
+    gtk_stack_set_interpolate_size(GTK_STACK(self->content_stack), TRUE);
     gtk_box_append(GTK_BOX(self), self->content_stack);
 
     self->pill_stack = gtk_stack_new();
@@ -87,6 +89,7 @@ static void island_widget_init(IslandWidget *self) {
     gtk_stack_set_hhomogeneous(GTK_STACK(self->pill_stack), FALSE);
     gtk_stack_set_transition_type(GTK_STACK(self->pill_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_UP_DOWN);
     gtk_stack_set_transition_duration(GTK_STACK(self->pill_stack), 400);
+    gtk_stack_set_interpolate_size(GTK_STACK(self->pill_stack), TRUE);
     gtk_stack_add_named(GTK_STACK(self->content_stack), self->pill_stack, "pill");
 
     self->expanded_stack = gtk_stack_new();
@@ -94,10 +97,9 @@ static void island_widget_init(IslandWidget *self) {
     gtk_stack_set_hhomogeneous(GTK_STACK(self->expanded_stack), FALSE);
     gtk_stack_set_transition_type(GTK_STACK(self->expanded_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_UP_DOWN);
     gtk_stack_set_transition_duration(GTK_STACK(self->expanded_stack), 400);
+    gtk_stack_set_interpolate_size(GTK_STACK(self->expanded_stack), TRUE);
     gtk_stack_add_named(GTK_STACK(self->content_stack), self->expanded_stack, "expanded");
 
-    // THE FIX: Manually inject initial placeholders instead of calling public API methods
-    // that invoke strict GObject type checks on a partially initialized instance.
     GtkWidget *center_box = gtk_center_box_new();
     gtk_widget_set_hexpand(center_box, TRUE);
     gtk_center_box_set_center_widget(GTK_CENTER_BOX(center_box), gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));
@@ -110,3 +112,8 @@ static void island_widget_init(IslandWidget *self) {
 }
 
 static void island_widget_class_init(IslandWidgetClass *klass G_GNUC_UNUSED) {}
+
+GtkWidget* island_widget_get_pill_stack(IslandWidget *self) {
+    g_return_val_if_fail(ISLAND_IS_WIDGET(self), NULL);
+    return self->pill_stack;
+}

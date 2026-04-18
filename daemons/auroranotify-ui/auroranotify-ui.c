@@ -2,6 +2,7 @@
 #include <gtk4-layer-shell.h>
 #include <gio/gio.h>
 #include "island_widget.h"
+#include "privacy_widget.h"
 #include <glib/gstdio.h>
 
 const guint PILL_STATE_DURATION_MS = 4000;
@@ -38,14 +39,13 @@ static gboolean is_expanded = FALSE;
 static gboolean is_transitioning = FALSE;
 static NotificationData *current_notification_data = NULL;
 
-// --- PRIVACY & OSD STATE GLOBALS ---
-static gboolean privacy_mic_active = FALSE;
-static gboolean privacy_cam_active = FALSE;
+static gboolean is_privacy_currently_showing = FALSE;
 
+// --- OSD STATE ---
 static gboolean is_osd_active = FALSE;
 static GtkWidget *current_osd_level_bar = NULL;
 static GtkWidget *current_osd_icon = NULL;
-static GtkWidget *current_osd_overvol_label = NULL; // NEW TRACKER
+static GtkWidget *current_osd_overvol_label = NULL;
 
 static void create_main_window();
 static gboolean dismiss_or_transition(gpointer user_data);
@@ -68,11 +68,8 @@ static void free_notification_data(gpointer data) {
     g_free(notif);
 }
 
-// --- OSD PILL BUILDER ---
 static GtkWidget* create_osd_pill(const gchar *icon_name, double level) {
     GtkWidget *overlay = gtk_overlay_new();
-
-    // MATCH STANDARD PILL WIDTH using the dummy label trick
     GtkWidget *dummy_label = gtk_label_new(" ");
     gtk_widget_add_css_class(dummy_label, "summary");
     gtk_label_set_width_chars(GTK_LABEL(dummy_label), 25);
@@ -91,14 +88,13 @@ static GtkWidget* create_osd_pill(const gchar *icon_name, double level) {
     gtk_level_bar_set_min_value(GTK_LEVEL_BAR(current_osd_level_bar), 0.0);
     gtk_level_bar_set_max_value(GTK_LEVEL_BAR(current_osd_level_bar), 1.0);
     gtk_widget_set_valign(current_osd_level_bar, GTK_ALIGN_CENTER);
-    gtk_widget_set_hexpand(current_osd_level_bar, TRUE); // Dynamically fill the remaining space
-    gtk_widget_set_size_request(current_osd_level_bar, -1, 6); // Lock height only
+    gtk_widget_set_hexpand(current_osd_level_bar, TRUE); 
+    gtk_widget_set_size_request(current_osd_level_bar, -1, 6); 
     gtk_widget_add_css_class(current_osd_level_bar, "osd-bar");
 
     current_osd_overvol_label = gtk_label_new("");
     gtk_widget_add_css_class(current_osd_overvol_label, "osd-overvol");
 
-    // Check if over 100% volume
     if (level > 1.0) {
         gtk_level_bar_set_value(GTK_LEVEL_BAR(current_osd_level_bar), 1.0);
         g_autofree gchar *text = g_strdup_printf("+%.0f%%", (level - 1.0) * 100.0);
@@ -114,48 +110,6 @@ static GtkWidget* create_osd_pill(const gchar *icon_name, double level) {
     gtk_box_append(GTK_BOX(box), current_osd_overvol_label);
 
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), box);
-
-    return overlay;
-}
-
-// --- PRIVACY PILL BUILDER ---
-static GtkWidget* create_privacy_pill(gboolean mic, gboolean cam) {
-    GtkWidget *overlay = gtk_overlay_new();
-
-    GtkWidget *dummy_label = gtk_label_new(" ");
-    gtk_widget_add_css_class(dummy_label, "summary");
-    gtk_label_set_width_chars(GTK_LABEL(dummy_label), 25);
-    gtk_overlay_set_child(GTK_OVERLAY(overlay), dummy_label);
-
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
-
-    GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_widget_set_size_request(dot, 12, 12);
-    gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
-    gtk_widget_set_halign(dot, GTK_ALIGN_CENTER);
-    gtk_widget_add_css_class(dot, "privacy-indicator");
-    
-    const char *text = "";
-    if (mic && cam) {
-        gtk_widget_add_css_class(dot, "both");
-        text = "Mic & Screen/Camera"; 
-    } else if (mic) {
-        gtk_widget_add_css_class(dot, "mic");
-        text = "Microphone in use";
-    } else if (cam) {
-        gtk_widget_add_css_class(dot, "cam");
-        text = "Screen/Camera in use";
-    }
-
-    GtkWidget *label = gtk_label_new(text);
-    gtk_widget_add_css_class(label, "summary");
-
-    gtk_box_append(GTK_BOX(box), dot);
-    gtk_box_append(GTK_BOX(box), label);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), box);
-
     return overlay;
 }
 
@@ -196,6 +150,7 @@ static gboolean unlock_transition_callback(gpointer user_data G_GNUC_UNUSED) {
 
 static void show_next_notification() {
     is_transitioning = TRUE;
+    is_privacy_currently_showing = FALSE;
 
     if (current_notification_data) {
         free_notification_data(current_notification_data);
@@ -227,12 +182,65 @@ static void show_next_notification() {
     current_timeout_id = g_timeout_add(is_expanded ? (EXPANDED_STATE_DURATION_S * 1000) : PILL_STATE_DURATION_MS, dismiss_or_transition, NULL);
 }
 
+static void update_privacy_ui_state() {
+    if (privacy_widget_has_active_apps()) {
+        if (main_window == NULL) create_main_window();
+        
+        if (!is_privacy_currently_showing) {
+            GtkWidget *pill = privacy_widget_create_pill();
+            island_widget_transition_to_pill_child(island, pill);
+            
+            if (is_expanded) {
+                GtkWidget *expanded = privacy_widget_create_dashboard();
+                island_widget_transition_to_expanded_child(island, expanded);
+            }
+            is_privacy_currently_showing = TRUE;
+        } else {
+            privacy_widget_refresh_ui();
+            
+            if (is_expanded && !privacy_widget_has_dashboard()) {
+                GtkWidget *expanded = privacy_widget_create_dashboard();
+                island_widget_transition_to_expanded_child(island, expanded);
+            }
+        }
+
+        gboolean was_visible = gtk_widget_get_visible(GTK_WIDGET(main_window));
+        gtk_widget_set_visible(GTK_WIDGET(main_window), TRUE);
+        
+        if (!was_visible) {
+            gtk_widget_add_css_class(GTK_WIDGET(island), "dot");
+            g_timeout_add(100, add_pill_class_cb, island);
+        } else {
+            gtk_widget_add_css_class(GTK_WIDGET(island), "dot");
+            gtk_widget_add_css_class(GTK_WIDGET(island), "pill");
+        }
+    } else {
+        is_privacy_currently_showing = FALSE;
+        if (island && gtk_widget_get_visible(GTK_WIDGET(main_window))) {
+            is_transitioning = TRUE;
+            if (is_expanded) {
+                island_widget_set_expanded(island, FALSE);
+                is_expanded = FALSE;
+            }
+            gtk_widget_remove_css_class(GTK_WIDGET(island), "pill");
+            g_timeout_add(250, remove_dot_class_cb, island);
+            g_timeout_add(ANIMATION_FINISH_DELAY_MS, outro_finished_callback, NULL);
+        }
+    }
+}
+
+static void privacy_state_changed_cb(void) {
+    if (!is_busy && g_queue_is_empty(&notification_queue)) {
+        update_privacy_ui_state();
+    }
+}
+
 static gboolean outro_finished_callback(gpointer user_data G_GNUC_UNUSED) {
     if (!g_queue_is_empty(&notification_queue)) {
         g_timeout_add(50, add_dot_class_cb, island);
         g_timeout_add(ANIMATION_FINISH_DELAY_MS, process_initial_notification, NULL);
     } else {
-        if (!privacy_mic_active && !privacy_cam_active) {
+        if (!privacy_widget_has_active_apps()) {
             is_busy = FALSE;
             if (main_window) gtk_widget_set_visible(GTK_WIDGET(main_window), FALSE);
         } else {
@@ -244,7 +252,12 @@ static gboolean outro_finished_callback(gpointer user_data G_GNUC_UNUSED) {
 }
 
 static gboolean dismiss_or_transition(gpointer user_data G_GNUC_UNUSED) {
-    if (is_transitioning) return G_SOURCE_REMOVE;
+    // --- THE FIX 1: Safely reschedule if an animation is actively playing ---
+    if (is_transitioning) {
+        current_timeout_id = g_timeout_add(100, dismiss_or_transition, NULL);
+        return G_SOURCE_REMOVE;
+    }
+    
     is_transitioning = TRUE;
 
     if (current_timeout_id > 0) {
@@ -252,7 +265,6 @@ static gboolean dismiss_or_transition(gpointer user_data G_GNUC_UNUSED) {
         current_timeout_id = 0;
     }
 
-    // Reset OSD state
     is_osd_active = FALSE;
     current_osd_level_bar = NULL;
     current_osd_icon = NULL;
@@ -272,14 +284,10 @@ static gboolean dismiss_or_transition(gpointer user_data G_GNUC_UNUSED) {
             island_widget_set_expanded(island, FALSE);
         }
         
-        // --- PRIVACY CHECK FALLBACK ---
-        if (privacy_mic_active || privacy_cam_active) {
-            GtkWidget *pill = create_privacy_pill(privacy_mic_active, privacy_cam_active);
-            island_widget_transition_to_pill_child(island, pill);
-            
-            gtk_widget_add_css_class(GTK_WIDGET(island), "pill");
-            gtk_widget_add_css_class(GTK_WIDGET(island), "dot");
-            
+        if (privacy_widget_has_active_apps()) {
+            // Force the privacy pill to explicitly rebuild and claim the island back from the OSD
+            is_privacy_currently_showing = FALSE; 
+            update_privacy_ui_state();
             g_timeout_add(ANIMATION_FINISH_DELAY_MS, outro_finished_callback, NULL);
         } else {
             if (island) gtk_widget_remove_css_class(GTK_WIDGET(island), "pill");
@@ -294,6 +302,9 @@ static gboolean populate_expanded_content_cb(gpointer user_data G_GNUC_UNUSED) {
     if (current_notification_data) {
         GtkWidget *expanded_widget = create_expanded_content_widget(current_notification_data);
         island_widget_transition_to_expanded_child(island, expanded_widget);
+    } else if (privacy_widget_has_active_apps()) {
+        GtkWidget *expanded_widget = privacy_widget_create_dashboard();
+        island_widget_transition_to_expanded_child(island, expanded_widget);
     }
     return G_SOURCE_REMOVE;
 }
@@ -302,7 +313,7 @@ static void on_island_clicked(GtkGestureClick *g G_GNUC_UNUSED, int n G_GNUC_UNU
     if (is_transitioning || is_osd_active) return;
 
     if (!is_expanded) {
-        if (!current_notification_data) return; 
+        if (!current_notification_data && !privacy_widget_has_active_apps()) return; 
         is_transitioning = TRUE;
         if (current_timeout_id > 0) { g_source_remove(current_timeout_id); current_timeout_id = 0; }
         
@@ -311,7 +322,9 @@ static void on_island_clicked(GtkGestureClick *g G_GNUC_UNUSED, int n G_GNUC_UNU
         g_timeout_add(50, populate_expanded_content_cb, NULL);
         
         g_timeout_add(ANIMATION_FINISH_DELAY_MS, unlock_transition_callback, NULL);
-        current_timeout_id = g_timeout_add_seconds(EXPANDED_STATE_DURATION_S, dismiss_or_transition, NULL);
+        if (current_notification_data) {
+            current_timeout_id = g_timeout_add_seconds(EXPANDED_STATE_DURATION_S, dismiss_or_transition, NULL);
+        }
     } 
     else {
         dismiss_or_transition(NULL);
@@ -333,7 +346,7 @@ static void on_island_enter(GtkEventControllerMotion *controller G_GNUC_UNUSED, 
 }
 
 static void on_island_leave(GtkEventControllerMotion *controller G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
-    if (is_expanded && current_timeout_id == 0) {
+    if (is_expanded && current_timeout_id == 0 && current_notification_data) {
         current_timeout_id = g_timeout_add_seconds(EXPANDED_STATE_DURATION_S, dismiss_or_transition, NULL);
     }
 }
@@ -374,42 +387,8 @@ static void handle_show_notification(GDBusMethodInvocation *inv, NotificationDat
     g_dbus_method_invocation_return_value(inv, NULL);
 }
 
-static void handle_set_privacy_status(GDBusMethodInvocation *inv, gboolean mic, gboolean cam) {
-    privacy_mic_active = mic;
-    privacy_cam_active = cam;
-
-    if (!is_busy && g_queue_is_empty(&notification_queue)) {
-        if (mic || cam) {
-            if (main_window == NULL) create_main_window();
-            
-            GtkWidget *pill = create_privacy_pill(mic, cam);
-            island_widget_transition_to_pill_child(island, pill);
-            
-            gboolean was_visible = gtk_widget_get_visible(GTK_WIDGET(main_window));
-            gtk_widget_set_visible(GTK_WIDGET(main_window), TRUE);
-            
-            if (!was_visible) {
-                gtk_widget_add_css_class(GTK_WIDGET(island), "dot");
-                g_timeout_add(100, add_pill_class_cb, island);
-            } else {
-                gtk_widget_add_css_class(GTK_WIDGET(island), "dot");
-                gtk_widget_add_css_class(GTK_WIDGET(island), "pill");
-            }
-        } else {
-            if (island && gtk_widget_get_visible(GTK_WIDGET(main_window))) {
-                is_transitioning = TRUE;
-                gtk_widget_remove_css_class(GTK_WIDGET(island), "pill");
-                g_timeout_add(250, remove_dot_class_cb, island);
-                g_timeout_add(ANIMATION_FINISH_DELAY_MS, outro_finished_callback, NULL);
-            }
-        }
-    }
-    g_dbus_method_invocation_return_value(inv, NULL);
-}
-
 static void handle_show_osd(GDBusMethodInvocation *inv, const gchar *icon, double level) {
     if (is_osd_active && current_osd_level_bar && current_osd_icon && current_osd_overvol_label) {
-        // Just update existing if it's already showing
         gtk_image_set_from_icon_name(GTK_IMAGE(current_osd_icon), icon);
         
         if (level > 1.0) {
@@ -426,9 +405,9 @@ static void handle_show_osd(GDBusMethodInvocation *inv, const gchar *icon, doubl
         current_timeout_id = g_timeout_add(1500, dismiss_or_transition, NULL);
 
     } else {
-        // Force takeover of the island
         is_busy = TRUE;
         is_osd_active = TRUE;
+        is_privacy_currently_showing = FALSE; // THE FIX 2: Relinquish privacy claim so it re-renders after OSD
         if (main_window == NULL) create_main_window();
 
         GtkWidget *pill = create_osd_pill(icon, level);
@@ -465,9 +444,15 @@ static void dbus_method_dispatcher(GDBusConnection *c, const gchar *s, const gch
         data->body = g_strdup(data->body);
         handle_show_notification(inv, data);
     } else if (g_strcmp0(m, "SetPrivacyStatus") == 0) {
-        gboolean mic, cam;
-        g_variant_get(p, "(bb)", &mic, &cam);
-        handle_set_privacy_status(inv, mic, cam);
+        const gchar *json_payload;
+        g_variant_get(p, "(&s)", &json_payload);
+        
+        privacy_widget_update_from_json(json_payload);
+        if (!is_busy && g_queue_is_empty(&notification_queue)) {
+            update_privacy_ui_state();
+        }
+        g_dbus_method_invocation_return_value(inv, NULL);
+        
     } else if (g_strcmp0(m, "ShowOSD") == 0) {
         gchar *icon; double level;
         g_variant_get(p, "(&sd)", &icon, &level);
@@ -484,33 +469,39 @@ static void on_window_destroyed(GtkWidget *w G_GNUC_UNUSED, gpointer ud G_GNUC_U
         current_notification_data = NULL;
     }
     if (current_timeout_id > 0) g_source_remove(current_timeout_id);
+    privacy_widget_cleanup();
     main_window = NULL;
     island = NULL;
+    is_privacy_currently_showing = FALSE;
 }
 
 void create_main_window() {
     main_window = GTK_WINDOW(gtk_application_window_new(app));
     g_signal_connect(main_window, "destroy", G_CALLBACK(on_window_destroyed), NULL);
     
+    // We keep the wrapper box to give the bounce animation room to breathe, 
+    // but the invisible frame bug is solved by the interpolate-size fix we did in island_widget.c
     GtkWidget *wrapper_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    // Buffer space to allow the bouncy animation to not get clipped by Wayland margins
-    gtk_widget_set_margin_start(wrapper_box, 40);
-    gtk_widget_set_margin_end(wrapper_box, 40);
-    gtk_widget_set_margin_bottom(wrapper_box, 40);
+    gtk_widget_set_margin_start(wrapper_box, 50);
+    gtk_widget_set_margin_end(wrapper_box, 50);
+    gtk_widget_set_margin_bottom(wrapper_box, 50);
     
     island = ISLAND_WIDGET(island_widget_new());
     
     gtk_box_append(GTK_BOX(wrapper_box), GTK_WIDGET(island));
     gtk_window_set_child(main_window, wrapper_box);
 
+    // --- THE FIX: Attach to the WHOLE ISLAND, but use "released" ---
+    // If you click a button inside, the button consumes the click.
+    // If you click the background, the island consumes it and de-expands!
     GtkGesture *click = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
-    g_signal_connect(click, "pressed", G_CALLBACK(on_island_clicked), NULL);
+    g_signal_connect(click, "released", G_CALLBACK(on_island_clicked), NULL);
     gtk_widget_add_controller(GTK_WIDGET(island), GTK_EVENT_CONTROLLER(click));
 
     GtkGesture *right_click = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right_click), GDK_BUTTON_SECONDARY);
-    g_signal_connect(right_click, "pressed", G_CALLBACK(on_island_right_clicked), NULL);
+    g_signal_connect(right_click, "released", G_CALLBACK(on_island_right_clicked), NULL);
     gtk_widget_add_controller(GTK_WIDGET(island), GTK_EVENT_CONTROLLER(right_click));
 
     GtkEventController *hover_controller = gtk_event_controller_motion_new();
@@ -534,8 +525,7 @@ static void on_bus_acquired(GDBusConnection *c, const gchar *n G_GNUC_UNUSED, gp
         "      <arg type='s' name='body' direction='in'/>"
         "    </method>"
         "    <method name='SetPrivacyStatus'>"
-        "      <arg type='b' name='mic' direction='in'/>"
-        "      <arg type='b' name='cam' direction='in'/>"
+        "      <arg type='s' name='payload' direction='in'/>"
         "    </method>"
         "    <method name='ShowOSD'>"
         "      <arg type='s' name='icon' direction='in'/>"
@@ -606,6 +596,7 @@ static void load_global_theme_colors(GApplication *app_instance) {
 }
 
 static void on_app_startup(GApplication *a, gpointer ud G_GNUC_UNUSED) {
+    privacy_widget_init(privacy_state_changed_cb);
     load_global_theme_colors(a);
     
     GtkCssProvider *p = gtk_css_provider_new();
@@ -629,18 +620,25 @@ static void on_app_startup(GApplication *a, gpointer ud G_GNUC_UNUSED) {
         }
     }
 
-    // --- Inject OSD LevelBar CSS Internally ---
-    const char *osd_css = 
+    const char *internal_css = 
         ".osd-bar { margin: 0; padding: 0; transition: min-width 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94); }"
         ".osd-bar trough { background-color: rgba(255,255,255,0.2); border-radius: 99px; min-height: 6px; margin: 0; }"
         ".osd-bar block.filled { background-color: #ffffff; border-radius: 99px; border: none; box-shadow: none; }"
         ".osd-bar block.empty { background-color: transparent; border: none; box-shadow: none; }"
-        ".osd-overvol { font-size: 12px; font-weight: 900; color: #ffffff; margin-left: 2px; }";
-    GtkCssProvider *osd_p = gtk_css_provider_new();
-    gtk_css_provider_load_from_string(osd_p, osd_css);
-    gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(osd_p), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-    g_object_unref(osd_p);
-    // ------------------------------------------
+        ".osd-overvol { font-size: 12px; font-weight: 900; color: #ffffff; margin-left: 2px; }"
+        
+        ".privacy-row { padding: 4px 8px; border-radius: 8px; transition: background 0.15s ease; }"
+        ".privacy-row:hover { background-color: alpha(white, 0.05); }"
+        ".privacy-action-btn { font-size: 0.9em; padding: 4px 10px; border-radius: 6px; opacity: 0.8; }"
+        ".privacy-action-btn:hover { opacity: 1.0; background-color: alpha(white, 0.1); }"
+        ".privacy-kill-btn { color: @destructive; font-weight: bold; }"
+        ".privacy-icon-mic { color: #8ff0a4; }"
+        ".privacy-icon-cam { color: #ff7b63; }";
+        
+    GtkCssProvider *internal_p = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(internal_p, internal_css);
+    gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(internal_p), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(internal_p);
 
     gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(p), GTK_STYLE_PROVIDER_PRIORITY_USER);
     
