@@ -192,6 +192,10 @@ void annotation_ui_drag_begin(UIState *state, double scaled_x, double scaled_y, 
             state->current_stroke = annotation_shape_new(ANNOTATION_RECTANGLE, &state->current_color, state->current_brush_size, scaled_x, scaled_y);
         } else if (state->current_ann_mode == ANN_MODE_CIRCLE) {
             state->current_stroke = annotation_shape_new(ANNOTATION_CIRCLE, &state->current_color, state->current_brush_size, scaled_x, scaled_y);
+        } else if (state->current_ann_mode == ANN_MODE_ARROW) {
+            state->current_stroke = annotation_shape_new(ANNOTATION_ARROW, &state->current_color, state->current_brush_size, scaled_x, scaled_y);
+        } else if (state->current_ann_mode == ANN_MODE_PIXELATE) { // NEW
+            state->current_stroke = annotation_shape_new(ANNOTATION_PIXELATE, &state->current_color, state->current_brush_size, scaled_x, scaled_y);
         }
         
         state->strokes = g_list_append(state->strokes, state->current_stroke);
@@ -203,7 +207,9 @@ void annotation_ui_drag_update(UIState *state, double scaled_x, double scaled_y)
     
     if (state->current_ann_mode == ANN_MODE_DRAW) {
         annotation_stroke_add_point(state->current_stroke, scaled_x, scaled_y);
-    } else if (state->current_ann_mode == ANN_MODE_RECTANGLE || state->current_ann_mode == ANN_MODE_CIRCLE) {
+    } 
+    // Trigger shape update for PIXELATE as well
+    else if (state->current_ann_mode == ANN_MODE_RECTANGLE || state->current_ann_mode == ANN_MODE_CIRCLE || state->current_ann_mode == ANN_MODE_ARROW || state->current_ann_mode == ANN_MODE_PIXELATE) {
         annotation_shape_update(state->current_stroke, scaled_x, scaled_y);
     }
     gtk_widget_queue_draw(state->drawing_area);
@@ -258,6 +264,8 @@ static void on_ann_mode_toggled(GtkToggleButton *btn, gpointer user_data) {
         if (GTK_WIDGET(btn) == state->ann_draw_btn) state->current_ann_mode = ANN_MODE_DRAW;
         else if (GTK_WIDGET(btn) == state->ann_rect_btn) state->current_ann_mode = ANN_MODE_RECTANGLE;
         else if (GTK_WIDGET(btn) == state->ann_circle_btn) state->current_ann_mode = ANN_MODE_CIRCLE;
+        else if (GTK_WIDGET(btn) == state->ann_arrow_btn) state->current_ann_mode = ANN_MODE_ARROW;
+        else if (GTK_WIDGET(btn) == state->ann_pixelate_btn) state->current_ann_mode = ANN_MODE_PIXELATE; // NEW
 
         gtk_spin_button_set_range(GTK_SPIN_BUTTON(state->size_scale), 2.0, 40.0);
         gtk_spin_button_set_increments(GTK_SPIN_BUTTON(state->size_scale), 1.0, 5.0);
@@ -311,7 +319,6 @@ GtkWidget* create_annotation_toolbar(UIState *state) {
     GtkWidget *frame = gtk_frame_new(NULL); 
     gtk_widget_add_css_class(frame, "panel"); 
     
-    // Reduced spacing and margins significantly to squash the UI down vertically
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_set_margin_start(box, 12); gtk_widget_set_margin_end(box, 12); 
     gtk_widget_set_margin_top(box, 6); gtk_widget_set_margin_bottom(box, 6); 
@@ -339,12 +346,23 @@ GtkWidget* create_annotation_toolbar(UIState *state) {
     gtk_widget_set_focusable(state->ann_circle_btn, FALSE); 
     gtk_button_set_child(GTK_BUTTON(state->ann_circle_btn), gtk_image_new_from_icon_name("media-record-symbolic"));
 
+    state->ann_arrow_btn = gtk_toggle_button_new(); 
+    gtk_widget_set_focusable(state->ann_arrow_btn, FALSE); 
+    gtk_button_set_child(GTK_BUTTON(state->ann_arrow_btn), gtk_image_new_from_icon_name("go-next-symbolic"));
+
+    // NEW: Pixelate Tool Button (view-conceal-symbolic is standard for hiding things)
+    state->ann_pixelate_btn = gtk_toggle_button_new(); 
+    gtk_widget_set_focusable(state->ann_pixelate_btn, FALSE); 
+    gtk_button_set_child(GTK_BUTTON(state->ann_pixelate_btn), gtk_image_new_from_icon_name("view-conceal-symbolic"));
+
     state->ann_text_btn = gtk_toggle_button_new(); 
     gtk_widget_set_focusable(state->ann_text_btn, FALSE); 
     gtk_button_set_child(GTK_BUTTON(state->ann_text_btn), gtk_image_new_from_icon_name("insert-text-symbolic"));
     
     gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_rect_btn), GTK_TOGGLE_BUTTON(state->ann_draw_btn));
     gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_circle_btn), GTK_TOGGLE_BUTTON(state->ann_draw_btn));
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_arrow_btn), GTK_TOGGLE_BUTTON(state->ann_draw_btn)); 
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_pixelate_btn), GTK_TOGGLE_BUTTON(state->ann_draw_btn)); // LINK NEW BUTTON
     gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_text_btn), GTK_TOGGLE_BUTTON(state->ann_draw_btn));
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->ann_draw_btn), TRUE);
     state->current_ann_mode = ANN_MODE_DRAW;
@@ -352,11 +370,15 @@ GtkWidget* create_annotation_toolbar(UIState *state) {
     g_signal_connect(state->ann_draw_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state);
     g_signal_connect(state->ann_rect_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state);
     g_signal_connect(state->ann_circle_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state);
+    g_signal_connect(state->ann_arrow_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state); 
+    g_signal_connect(state->ann_pixelate_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state); // LINK NEW BUTTON
     g_signal_connect(state->ann_text_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state);
 
     gtk_box_append(GTK_BOX(box), state->ann_draw_btn);
     gtk_box_append(GTK_BOX(box), state->ann_rect_btn);
     gtk_box_append(GTK_BOX(box), state->ann_circle_btn);
+    gtk_box_append(GTK_BOX(box), state->ann_arrow_btn); 
+    gtk_box_append(GTK_BOX(box), state->ann_pixelate_btn); // APPEND NEW BUTTON
     gtk_box_append(GTK_BOX(box), state->ann_text_btn);
 
     state->size_scale = gtk_spin_button_new_with_range(2.0, 40.0, 1.0);

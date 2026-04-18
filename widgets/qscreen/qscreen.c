@@ -169,7 +169,7 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
     double sel_w = state->current_w / state->scale_x;
     double sel_h = state->current_h / state->scale_y;
 
-    // Background Dimming - Only dim if NOT picking colors and NOT scanning text
+    // Background Dimming
     if (state->current_mode != MODE_TEXT && state->current_mode != MODE_COLOR) {
         cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.5);
         cairo_paint(cr);
@@ -197,7 +197,10 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
             create_rounded_rect_path(cr, sel_x, sel_y, sel_w, sel_h, 10.0);
             cairo_clip(cr);
         }
-        annotation_draw_all(cr, state->strokes, 0, 0, 1.0 / state->scale_x, 1.0 / state->scale_y);
+        
+        // NEW FOR PIXELATE: state->screenshot_pixbuf is passed
+        annotation_draw_all(cr, state->strokes, state->screenshot_pixbuf, 0, 0, 1.0 / state->scale_x, 1.0 / state->scale_y);
+        
         cairo_restore(cr);
     }
 
@@ -225,16 +228,13 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
         double cx = state->hover_x + 30;
         double cy = state->hover_y + 30;
 
-        // Keep it inside screen bounds
         if (cx + 100 > width) cx = state->hover_x - 100;
         if (cy + 40 > height) cy = state->hover_y - 40;
 
-        // Draw color circle ring
         cairo_arc(cr, cx, cy, 20.0, 0, 2 * G_PI);
         cairo_set_source_rgba(cr, state->hovered_color.red, state->hovered_color.green, state->hovered_color.blue, 1.0);
         cairo_fill_preserve(cr);
 
-        // Inner/Outer borders
         cairo_set_line_width(cr, 2.5);
         cairo_set_source_rgb(cr, 1, 1, 1);
         cairo_stroke_preserve(cr);
@@ -242,7 +242,6 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
         cairo_set_source_rgb(cr, 0, 0, 0);
         cairo_stroke(cr);
 
-        // Fetch Hex String for display
         g_autofree gchar *hex = NULL;
         eyedrop_get_color_at_pixel(state->screenshot_pixbuf, 
                                    (int)(state->hover_x * state->scale_x), 
@@ -250,19 +249,16 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
                                    NULL, &hex);
         
         if (hex) {
-            // Draw text with a bold outline for readability over any background
             cairo_select_font_face(cr, "monospace", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
             cairo_set_font_size(cr, 16.0);
             
             cairo_move_to(cr, cx + 28, cy + 6);
             cairo_text_path(cr, hex);
             
-            // Text Outline
             cairo_set_source_rgba(cr, 0, 0, 0, 0.8);
             cairo_set_line_width(cr, 3.0);
             cairo_stroke_preserve(cr);
             
-            // Text Fill
             cairo_set_source_rgb(cr, 1, 1, 1);
             cairo_fill(cr);
         }
@@ -336,7 +332,7 @@ static void on_drag_end(GtkGestureDrag *gesture, double offset_x, double offset_
             g_string_free(final_text, TRUE);
         } 
         if (state->window) gtk_window_destroy(state->window);
-    } else if (state->current_mode != MODE_COLOR) { // Don't trigger standard capture on Color Drag
+    } else if (state->current_mode != MODE_COLOR) { 
         if (state->current_w > 5 && state->current_h > 5) {
             if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(state->annotate_toggle_btn))) {
                 enter_annotation_phase(state);
@@ -356,7 +352,6 @@ static void on_mouse_motion(GtkEventControllerMotion *controller, double x, doub
     double scaled_x = x * state->scale_x;
     double scaled_y = y * state->scale_y;
 
-    // Handle Eyedropper Hover
     if (state->current_mode == MODE_COLOR) {
         state->hover_x = x; 
         state->hover_y = y;
@@ -377,12 +372,24 @@ static void on_mouse_motion(GtkEventControllerMotion *controller, double x, doub
         }
         if (!found_window) set_selection_target(state, scaled_x, scaled_y, 0, 0);
     }
+    
+    if (state->current_mode == MODE_TEXT) {
+        gboolean hovering_text = FALSE;
+        for (GList *l = state->text_boxes; l != NULL; l = l->next) {
+            QScreenTextBox *box = l->data;
+            if (scaled_x >= box->geometry.x && scaled_x <= (box->geometry.x + box->geometry.width) &&
+                scaled_y >= box->geometry.y && scaled_y <= (box->geometry.y + box->geometry.height)) {
+                hovering_text = TRUE;
+                break;
+            }
+        }
+        gtk_widget_set_cursor_from_name(state->drawing_area, hovering_text ? "text" : "default");
+    }
 }
 
 static void on_window_click(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
     (void)gesture; (void)n_press; UIState *state = data;
     
-    // Handle Eyedropper Click
     if (state->current_mode == MODE_COLOR) {
         double scaled_x = x * state->scale_x;
         double scaled_y = y * state->scale_y;
@@ -425,8 +432,7 @@ static gboolean on_key_pressed(GtkEventControllerKey* controller, guint keyval, 
 void qscreen_set_mode(UIState *state, SelectionMode mode) {
     state->current_mode = mode;
     
-    // Update Event Propagation for Color Mode
-    gboolean needs_motion_click = (mode == MODE_WINDOW || mode == MODE_COLOR);
+    gboolean needs_motion_click = (mode == MODE_WINDOW || mode == MODE_COLOR || mode == MODE_TEXT);
     gboolean needs_drag = (mode == MODE_REGION || mode == MODE_TEXT);
 
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(state->motion_controller), needs_motion_click ? GTK_PHASE_CAPTURE : GTK_PHASE_NONE);
@@ -438,7 +444,11 @@ void qscreen_set_mode(UIState *state, SelectionMode mode) {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->text_button), mode == MODE_TEXT);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->color_button), mode == MODE_COLOR);
 
-    state->has_hovered_color = FALSE; // Reset on switch
+    state->has_hovered_color = FALSE; 
+    
+    if (mode != MODE_TEXT) {
+        gtk_widget_set_cursor_from_name(state->drawing_area, "default");
+    }
 
     if(mode == MODE_TEXT && !state->ocr_has_run){
         state->ocr_has_run = TRUE;
@@ -497,7 +507,7 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     state->scale_x = 1.0; state->scale_y = 1.0;
     state->current_brush_size = 6.0;
     state->current_font_size = 32.0;
-    state->has_hovered_color = FALSE; // Init Eyedropper state
+    state->has_hovered_color = FALSE; 
 
     if (json_object_has_member(root_obj, "config")) {
         JsonObject *config = json_object_get_object_member(root_obj, "config");
@@ -564,8 +574,6 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     state->region_button = gtk_toggle_button_new(); gtk_button_set_child(GTK_BUTTON(state->region_button), gtk_image_new_from_icon_name("image-x-generic-symbolic"));
     state->window_button = gtk_toggle_button_new(); gtk_button_set_child(GTK_BUTTON(state->window_button), gtk_image_new_from_icon_name("window-new-symbolic"));
     state->text_button = gtk_toggle_button_new(); gtk_button_set_child(GTK_BUTTON(state->text_button), gtk_image_new_from_icon_name("edit-find-symbolic"));
-    
-    // Color Picker Button
     state->color_button = gtk_toggle_button_new(); gtk_button_set_child(GTK_BUTTON(state->color_button), gtk_image_new_from_icon_name("color-select-symbolic"));
 
     gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->window_button), GTK_TOGGLE_BUTTON(state->region_button));

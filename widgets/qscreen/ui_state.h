@@ -9,14 +9,16 @@ typedef enum {
     MODE_REGION,
     MODE_WINDOW,
     MODE_TEXT,
-    MODE_COLOR // <--- NEW
+    MODE_COLOR
 } SelectionMode;
 
 typedef enum {
     ANN_MODE_DRAW,
     ANN_MODE_TEXT,
     ANN_MODE_RECTANGLE,
-    ANN_MODE_CIRCLE
+    ANN_MODE_CIRCLE,
+    ANN_MODE_ARROW,
+    ANN_MODE_PIXELATE // NEW
 } AnnMode;
 
 typedef struct {
@@ -30,7 +32,6 @@ typedef struct {
     GtkRevealer *bottom_panel_revealer;
     GtkRevealer *top_panel_revealer;
     
-    // ---> Added color_button
     GtkWidget *region_button, *window_button, *text_button, *color_button, *screen_button, *save_button, *annotate_toggle_btn;
     
     guint animation_timer_id;
@@ -46,7 +47,6 @@ typedef struct {
     GtkWidget *ocr_notification_revealer, *ocr_notification_stack;
     gboolean ocr_has_run;
 
-    // ---> NEW: Eyedropper Hover State
     gboolean has_hovered_color;
     GdkRGBA hovered_color;
     double hover_x, hover_y;
@@ -54,7 +54,9 @@ typedef struct {
     // Annotation Data
     gboolean is_annotating;
     AnnMode current_ann_mode;
-    GtkWidget *ann_draw_btn, *ann_text_btn, *ann_rect_btn, *ann_circle_btn, *size_scale;
+    
+    // NEW: ann_pixelate_btn added below
+    GtkWidget *ann_draw_btn, *ann_text_btn, *ann_rect_btn, *ann_circle_btn, *ann_arrow_btn, *ann_pixelate_btn, *size_scale;
     
     GList *strokes;
     GList *redo_strokes; 

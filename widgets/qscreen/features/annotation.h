@@ -9,7 +9,9 @@ typedef enum {
     ANNOTATION_STROKE,
     ANNOTATION_TEXT,
     ANNOTATION_RECTANGLE,
-    ANNOTATION_CIRCLE
+    ANNOTATION_CIRCLE,
+    ANNOTATION_ARROW,
+    ANNOTATION_PIXELATE // NEW
 } AnnotationType;
 
 typedef struct {
@@ -44,7 +46,8 @@ void annotation_shape_update(AnnotationItem *item, double x2, double y2);
 void annotation_item_free(gpointer data);
 void annotation_items_free_list(GList *items);
 
-void annotation_draw_all(cairo_t *cr, GList *items, double offset_x, double offset_y, double zoom_x, double zoom_y);
+// UPDATE: Added GdkPixbuf *bg to the signature so we can sample the background for pixelation
+void annotation_draw_all(cairo_t *cr, GList *items, GdkPixbuf *bg, double offset_x, double offset_y, double zoom_x, double zoom_y);
 gboolean annotation_save_composite(GdkPixbuf *bg, GdkRectangle *crop, GList *items, const char *output_png_path);
 
 #endif // QSCREEN_ANNOTATION_H
