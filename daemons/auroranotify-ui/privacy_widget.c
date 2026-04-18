@@ -11,6 +11,12 @@ typedef struct {
     gboolean uses_cam;
 } PrivacyApp;
 
+typedef struct {
+    guint32 pid;
+    gchar *name;
+    int type;
+} RawApp;
+
 static GList *privacy_apps = NULL;      
 static GList *ignored_pids = NULL;      
 static GList *ignored_names = NULL; 
@@ -19,7 +25,6 @@ static guint privacy_cycle_id = 0;
 static gboolean privacy_showing_view_a = TRUE;
 static gboolean has_announced_privacy = FALSE; 
 
-static GtkWidget *pill_icons_box = NULL;
 static GtkWidget *pill_label_a = NULL;
 static GtkWidget *pill_label_b = NULL;
 static GtkWidget *pill_dot = NULL;
@@ -40,7 +45,7 @@ static void free_privacy_app(gpointer data) {
 }
 
 static void clear_ui_refs() {
-    pill_icons_box = NULL; pill_label_a = NULL; pill_label_b = NULL; pill_dot = NULL;
+    pill_label_a = NULL; pill_label_b = NULL; pill_dot = NULL;
     dash_list_box = NULL; dash_kill_all_btn = NULL; privacy_stack = NULL;
 }
 
@@ -58,26 +63,6 @@ void privacy_widget_cleanup(void) {
 
 gboolean privacy_widget_has_active_apps(void) { return g_list_length(privacy_apps) > 0; }
 gboolean privacy_widget_has_dashboard(void) { return dash_list_box != NULL; }
-
-static const char* get_icon_for_app(const char* app_name) {
-    if (!app_name) return "application-x-executable-symbolic";
-    g_autofree gchar *lower = g_ascii_strdown(app_name, -1);
-    
-    if (strstr(lower, "obs")) return "com.obsproject.Studio";
-    if (strstr(lower, "brave")) return "com.brave.Browser"; 
-    if (strstr(lower, "discord") || strstr(lower, "webcord")) return "discord";
-    if (strstr(lower, "zoom")) return "us.zoom.Zoom";
-    if (strstr(lower, "teams")) return "teams";
-    if (strstr(lower, "firefox")) return "firefox";
-    if (strstr(lower, "chrome")) return "google-chrome";
-    if (strstr(lower, "telegram")) return "org.telegram.desktop";
-    if (strstr(lower, "cava")) return "utilities-terminal-symbolic";
-    
-    GtkIconTheme *theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
-    if (gtk_icon_theme_has_icon(theme, app_name)) return app_name;
-    if (gtk_icon_theme_has_icon(theme, lower)) return lower;
-    return "application-x-executable-symbolic"; 
-}
 
 static void notify_state_changed() {
     if (on_state_changed) on_state_changed();
@@ -180,36 +165,86 @@ void privacy_widget_update_from_json(const gchar *json_payload) {
     if (!JSON_NODE_HOLDS_ARRAY(root)) return;
     
     JsonArray *array = json_node_get_array(root);
-    GList *new_apps = NULL;
+    GList *raw_apps = NULL;
     
+    // 1. Gather absolute source of truth from PipeWire
     for (guint i = 0; i < json_array_get_length(array); i++) {
         JsonObject *obj = json_array_get_object_element(array, i);
-        guint32 pid = json_object_get_int_member(obj, "pid");
-        const char *name = json_object_get_string_member(obj, "name");
-        int type = json_object_get_int_member(obj, "type");
+        RawApp *ra = g_new0(RawApp, 1);
+        ra->pid = json_object_get_int_member(obj, "pid");
+        ra->name = g_strdup(json_object_get_string_member(obj, "name"));
+        ra->type = json_object_get_int_member(obj, "type");
+        raw_apps = g_list_append(raw_apps, ra);
+    }
+    
+    // 2. TEMPORARY IGNORES: Clean up ignores for apps that closed their streams
+    GList *lp = ignored_pids;
+    while (lp != NULL) {
+        guint32 ig_pid = GPOINTER_TO_UINT(lp->data);
+        gboolean still_running = FALSE;
+        for (GList *r = raw_apps; r != NULL; r = r->next) {
+            if (((RawApp*)r->data)->pid == ig_pid) { still_running = TRUE; break; }
+        }
+        GList *next = lp->next;
+        if (!still_running) {
+            ignored_pids = g_list_delete_link(ignored_pids, lp);
+        }
+        lp = next;
+    }
+
+    GList *ln = ignored_names;
+    while (ln != NULL) {
+        const char *ig_name = (const char*)ln->data;
+        gboolean still_running = FALSE;
+        for (GList *r = raw_apps; r != NULL; r = r->next) {
+            RawApp *ra = (RawApp*)r->data;
+            if (ra->pid == 0 && g_strcmp0(ra->name, ig_name) == 0) { still_running = TRUE; break; }
+        }
+        GList *next = ln->next;
+        if (!still_running) {
+            g_free(ln->data);
+            ignored_names = g_list_delete_link(ignored_names, ln);
+        }
+        ln = next;
+    }
+
+    // 3. Build filtered visual list
+    GList *new_apps = NULL;
+    for (GList *r = raw_apps; r != NULL; r = r->next) {
+        RawApp *ra = (RawApp*)r->data;
         
-        if (pid > 0 && g_list_find(ignored_pids, GUINT_TO_POINTER(pid)) != NULL) continue;
-        if (pid == 0 && g_list_find_custom(ignored_names, name, (GCompareFunc)g_strcmp0) != NULL) continue;
+        if (ra->pid > 0 && g_list_find(ignored_pids, GUINT_TO_POINTER(ra->pid)) != NULL) continue;
+        if (ra->pid == 0 && g_list_find_custom(ignored_names, ra->name, (GCompareFunc)g_strcmp0) != NULL) continue;
         
         PrivacyApp *existing = NULL;
         for (GList *l = new_apps; l != NULL; l = l->next) {
             PrivacyApp *p = (PrivacyApp*)l->data;
-            if (pid > 0 && p->pid == pid) { existing = p; break; }
-            if (pid == 0 && p->pid == 0 && g_strcmp0(p->name, name) == 0) { existing = p; break; }
+            if (ra->pid > 0 && p->pid == ra->pid) { existing = p; break; }
+            if (ra->pid == 0 && p->pid == 0 && g_strcmp0(p->name, ra->name) == 0) { existing = p; break; }
         }
         
         if (existing) {
-            if (type == 0) existing->uses_mic = TRUE;
-            if (type == 1) existing->uses_cam = TRUE;
+            if (ra->type == 0) existing->uses_mic = TRUE;
+            if (ra->type == 1) existing->uses_cam = TRUE;
         } else {
             PrivacyApp *p = g_new0(PrivacyApp, 1);
-            p->pid = pid; p->name = g_strdup(name);
-            if (type == 0) p->uses_mic = TRUE;
-            if (type == 1) p->uses_cam = TRUE;
+            p->pid = ra->pid; 
+            p->name = g_strdup(ra->name);
+            if (ra->type == 0) p->uses_mic = TRUE;
+            if (ra->type == 1) p->uses_cam = TRUE;
             new_apps = g_list_append(new_apps, p);
         }
     }
+
+    // Free temporary raw list
+    for (GList *r = raw_apps; r != NULL; r = r->next) {
+        RawApp *ra = (RawApp*)r->data;
+        g_free(ra->name);
+        g_free(ra);
+    }
+    g_list_free(raw_apps);
     
+    // 4. Check for changes
     gboolean changed = FALSE;
     gboolean app_added = FALSE;
 
@@ -248,7 +283,6 @@ void privacy_widget_update_from_json(const gchar *json_payload) {
         if (privacy_apps == NULL) {
             has_announced_privacy = FALSE;
         } else if (app_added) {
-            // THE FIX: Jump back to View A to announce the new arrival
             if (privacy_stack) {
                 privacy_showing_view_a = TRUE;
                 gtk_stack_set_visible_child_name(GTK_STACK(privacy_stack), "view_a");
@@ -272,34 +306,13 @@ void privacy_widget_refresh_ui(void) {
         PrivacyApp *p = (PrivacyApp*)l->data;
         if (p->uses_mic) has_mic = TRUE;
         if (p->uses_cam) has_cam = TRUE;
-        killable_count++; // All are killable now thanks to Smart Kill
+        killable_count++;
     }
 
-    if (pill_icons_box && pill_label_a) {
-        GtkWidget *child;
-        while ((child = gtk_widget_get_first_child(pill_icons_box))) gtk_box_remove(GTK_BOX(pill_icons_box), child);
-        
-        int icons_added = 0;
-        for (GList *l = privacy_apps; l != NULL; l = l->next) {
-            PrivacyApp *p = (PrivacyApp*)l->data;
-            if (icons_added < 2) {
-                GtkWidget *icon = gtk_image_new_from_icon_name(get_icon_for_app(p->name));
-                gtk_image_set_pixel_size(GTK_IMAGE(icon), 14);
-                gtk_box_append(GTK_BOX(pill_icons_box), icon);
-                icons_added++;
-            }
-        }
-        
+    if (pill_label_a) {
         g_autofree gchar *title_a = NULL;
         if (app_count == 1) title_a = g_strdup_printf("%s is active", ((PrivacyApp*)privacy_apps->data)->name);
-        else {
-            if (app_count > 2) {
-                GtkWidget *plus = gtk_label_new(g_strdup_printf("+%d", app_count - 2));
-                gtk_widget_add_css_class(plus, "dim-label");
-                gtk_box_append(GTK_BOX(pill_icons_box), plus);
-            }
-            title_a = g_strdup_printf("%d Apps active", app_count);
-        }
+        else title_a = g_strdup_printf("%d Apps active", app_count);
         gtk_label_set_text(GTK_LABEL(pill_label_a), title_a);
     }
 
@@ -324,10 +337,6 @@ void privacy_widget_refresh_ui(void) {
             
             GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
             gtk_widget_add_css_class(row, "privacy-row");
-            
-            GtkWidget *app_icon = gtk_image_new_from_icon_name(get_icon_for_app(p->name));
-            gtk_image_set_pixel_size(GTK_IMAGE(app_icon), 16);
-            gtk_box_append(GTK_BOX(row), app_icon);
             
             GtkWidget *name = gtk_label_new(p->name);
             gtk_widget_set_hexpand(name, TRUE);
@@ -374,7 +383,6 @@ void privacy_widget_refresh_ui(void) {
 }
 
 GtkWidget* privacy_widget_create_pill(void) {
-    // --- THE FIX: Overlay Wrapper with 25-char Dummy Label ---
     GtkWidget *overlay = gtk_overlay_new();
     g_signal_connect(overlay, "destroy", G_CALLBACK(on_pill_destroyed), NULL);
 
@@ -383,22 +391,20 @@ GtkWidget* privacy_widget_create_pill(void) {
     gtk_label_set_width_chars(GTK_LABEL(dummy_label), 25);
     gtk_overlay_set_child(GTK_OVERLAY(overlay), dummy_label);
 
-    // Create the actual content stack
     privacy_stack = gtk_stack_new();
     gtk_stack_set_transition_type(GTK_STACK(privacy_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_UP_DOWN);
     gtk_stack_set_transition_duration(GTK_STACK(privacy_stack), 400);
 
+    // View A - Text Announcement only
     GtkWidget *view_a = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_set_halign(view_a, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(view_a, GTK_ALIGN_CENTER);
     
-    pill_icons_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
-    gtk_box_append(GTK_BOX(view_a), pill_icons_box);
-
     pill_label_a = gtk_label_new("");
     gtk_widget_add_css_class(pill_label_a, "summary");
     gtk_box_append(GTK_BOX(view_a), pill_label_a);
     
+    // View B - Permanent Indicator
     GtkWidget *view_b = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_set_halign(view_b, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(view_b, GTK_ALIGN_CENTER);
@@ -417,7 +423,6 @@ GtkWidget* privacy_widget_create_pill(void) {
     gtk_stack_add_named(GTK_STACK(privacy_stack), view_a, "view_a");
     gtk_stack_add_named(GTK_STACK(privacy_stack), view_b, "view_b");
     
-    // Add the stack on top of the dummy label
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), privacy_stack);
     
     privacy_widget_refresh_ui();
@@ -433,7 +438,6 @@ GtkWidget* privacy_widget_create_pill(void) {
         gtk_stack_set_visible_child_name(GTK_STACK(privacy_stack), "view_b");
     }
 
-    // Return the overlay wrapper instead of the raw stack
     return overlay;
 }
 

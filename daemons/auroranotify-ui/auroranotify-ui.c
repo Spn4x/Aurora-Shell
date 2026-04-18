@@ -479,21 +479,15 @@ void create_main_window() {
     main_window = GTK_WINDOW(gtk_application_window_new(app));
     g_signal_connect(main_window, "destroy", G_CALLBACK(on_window_destroyed), NULL);
     
-    // We keep the wrapper box to give the bounce animation room to breathe, 
-    // but the invisible frame bug is solved by the interpolate-size fix we did in island_widget.c
-    GtkWidget *wrapper_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_margin_start(wrapper_box, 50);
-    gtk_widget_set_margin_end(wrapper_box, 50);
-    gtk_widget_set_margin_bottom(wrapper_box, 50);
+    // THE FIX: Force the root GTK window to explicitly permit shrinking on Wayland.
+    // Setting 1x1 ensures GTK tightly wraps the island and releases the dead space completely.
+    gtk_window_set_default_size(main_window, 1, 1);
     
     island = ISLAND_WIDGET(island_widget_new());
     
-    gtk_box_append(GTK_BOX(wrapper_box), GTK_WIDGET(island));
-    gtk_window_set_child(main_window, wrapper_box);
+    // Attach directly to the window (no wrapper box padding)
+    gtk_window_set_child(main_window, GTK_WIDGET(island));
 
-    // --- THE FIX: Attach to the WHOLE ISLAND, but use "released" ---
-    // If you click a button inside, the button consumes the click.
-    // If you click the background, the island consumes it and de-expands!
     GtkGesture *click = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
     g_signal_connect(click, "released", G_CALLBACK(on_island_clicked), NULL);

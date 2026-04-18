@@ -21,20 +21,39 @@ static gboolean remove_widget_from_stack(gpointer user_data) {
     return G_SOURCE_REMOVE;
 }
 
+// THE FIX: Explicitly hide the expanded stack entirely to force GTK
+// to drop the layout request and shrink the Wayland surface.
+static gboolean hide_expanded_stack_cb(gpointer user_data) {
+    IslandWidget *self = ISLAND_WIDGET(user_data);
+    
+    // Only proceed if the user hasn't clicked expand again during the 450ms animation
+    if (!self->is_expanded) {
+        gtk_widget_set_visible(self->expanded_stack, FALSE);
+        
+        if (self->current_expanded_child) {
+            gtk_stack_remove(GTK_STACK(self->expanded_stack), self->current_expanded_child);
+            self->current_expanded_child = NULL;
+        }
+    }
+    return G_SOURCE_REMOVE;
+}
+
 void island_widget_set_expanded(IslandWidget *self, gboolean expanded) {
     g_return_if_fail(ISLAND_IS_WIDGET(self));
     if (self->is_expanded == expanded) return;
     self->is_expanded = expanded;
 
     if (self->is_expanded) {
+        // Unhide the stack before transitioning so it can animate smoothly
+        gtk_widget_set_visible(self->expanded_stack, TRUE);
         gtk_stack_set_visible_child_name(GTK_STACK(self->content_stack), "expanded");
         gtk_widget_add_css_class(GTK_WIDGET(self), "expanded");
     } else {
-        GtkWidget *placeholder = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-        island_widget_transition_to_expanded_child(self, placeholder);
-
         gtk_stack_set_visible_child_name(GTK_STACK(self->content_stack), "pill");
         gtk_widget_remove_css_class(GTK_WIDGET(self), "expanded");
+
+        // Wait for the crossfade (400ms) to finish, then obliterate the expanded state
+        g_timeout_add(450, hide_expanded_stack_cb, self);
     }
 }
 
@@ -50,19 +69,23 @@ void island_widget_transition_to_pill_child(IslandWidget *self, GtkWidget *child
     gtk_stack_set_visible_child(GTK_STACK(self->pill_stack), center_box);
     self->current_pill_child = center_box;
 
-    if (old_child) {
-        g_timeout_add(1000, remove_widget_from_stack, old_child);
+    if (old_child && old_child != center_box) {
+        g_timeout_add(450, remove_widget_from_stack, old_child);
     }
 }
 
 void island_widget_transition_to_expanded_child(IslandWidget *self, GtkWidget *child) {
     g_return_if_fail(ISLAND_IS_WIDGET(self));
     GtkWidget *old_child = self->current_expanded_child;
-    gtk_stack_add_child(GTK_STACK(self->expanded_stack), child);
-    gtk_stack_set_visible_child(GTK_STACK(self->expanded_stack), child);
-    self->current_expanded_child = child;
-    if (old_child) {
-        g_timeout_add(1000, remove_widget_from_stack, old_child);
+    
+    if (child) {
+        gtk_stack_add_child(GTK_STACK(self->expanded_stack), child);
+        gtk_stack_set_visible_child(GTK_STACK(self->expanded_stack), child);
+        self->current_expanded_child = child;
+    }
+
+    if (old_child && old_child != child) {
+        g_timeout_add(450, remove_widget_from_stack, old_child);
     }
 }
 
@@ -75,12 +98,17 @@ static void island_widget_init(IslandWidget *self) {
     gtk_widget_set_halign(GTK_WIDGET(self), GTK_ALIGN_CENTER);
     gtk_widget_set_valign(GTK_WIDGET(self), GTK_ALIGN_START);
 
+    // Provide padding around the island physically without a wrapper
+    gtk_widget_set_margin_top(GTK_WIDGET(self), 10);
+    gtk_widget_set_margin_bottom(GTK_WIDGET(self), 10);
+    gtk_widget_set_margin_start(GTK_WIDGET(self), 10);
+    gtk_widget_set_margin_end(GTK_WIDGET(self), 10);
+
     self->content_stack = gtk_stack_new();
     gtk_stack_set_vhomogeneous(GTK_STACK(self->content_stack), FALSE);
     gtk_stack_set_hhomogeneous(GTK_STACK(self->content_stack), FALSE);
     gtk_stack_set_transition_type(GTK_STACK(self->content_stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
     gtk_stack_set_transition_duration(GTK_STACK(self->content_stack), 400);
-    // Interpolate size shrinks the Wayland surface dynamically!
     gtk_stack_set_interpolate_size(GTK_STACK(self->content_stack), TRUE);
     gtk_box_append(GTK_BOX(self), self->content_stack);
 
@@ -100,15 +128,14 @@ static void island_widget_init(IslandWidget *self) {
     gtk_stack_set_interpolate_size(GTK_STACK(self->expanded_stack), TRUE);
     gtk_stack_add_named(GTK_STACK(self->content_stack), self->expanded_stack, "expanded");
 
+    // Hide it immediately at startup to prevent ghost sizing
+    gtk_widget_set_visible(self->expanded_stack, FALSE);
+
     GtkWidget *center_box = gtk_center_box_new();
     gtk_widget_set_hexpand(center_box, TRUE);
     gtk_center_box_set_center_widget(GTK_CENTER_BOX(center_box), gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));
     gtk_stack_add_child(GTK_STACK(self->pill_stack), center_box);
     self->current_pill_child = center_box;
-
-    GtkWidget *exp_child = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_stack_add_child(GTK_STACK(self->expanded_stack), exp_child);
-    self->current_expanded_child = exp_child;
 }
 
 static void island_widget_class_init(IslandWidgetClass *klass G_GNUC_UNUSED) {}

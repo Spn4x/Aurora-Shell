@@ -124,8 +124,6 @@ async fn handle_battery(last_cap: &mut f64, last_status: &mut String, allow_noti
         let is_discharging = status == "Discharging";
         let was_discharging = *last_status == "Discharging";
 
-        // THE FIX: Only trigger if we transition TO or FROM "Discharging".
-        // This ignores spam between "Charging", "Not charging", and "Full" at thresholds.
         let plugged_state_changed = is_discharging != was_discharging && !last_status.is_empty();
         let hit_50 = cap == 50.0 && *last_cap != 50.0 && is_discharging;
 
@@ -152,7 +150,6 @@ async fn handle_battery(last_cap: &mut f64, last_status: &mut String, allow_noti
                 format!("{}{}", icon_base, charging_suffix) 
             };
 
-            // Format title specifically for Pill interfaces
             if hit_50 {
                 let title = format!("Battery at 50%");
                 let _ = Command::new("notify-send")
@@ -174,7 +171,6 @@ async fn handle_battery(last_cap: &mut f64, last_status: &mut String, allow_noti
         }
     }
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -199,7 +195,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if let Some(stdout) = child.stdout.take() {
                     let mut reader = tokio::io::BufReader::new(stdout).lines();
                     while let Ok(Some(line)) = reader.next_line().await {
-                        if (line.contains("on sink ") || line.contains("on server")) && !line.contains("input") && !line.contains("source") {
+                        // THE FIX: Strictly listen *only* for changes to "sink" (speakers).
+                        // Ignore server events, sources (mics), and inputs (apps connecting).
+                        if line.contains("change") && line.contains("on sink") && !line.contains("input") {
                             let _ = tx_vol.send(OsdEvent::Volume);
                         }
                     }
@@ -269,6 +267,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     let mut last_bat_cap: f64 = -1.0;
     let mut last_bat_status = String::new();
+
+    // THE FIX 2: Pre-initialize volume and brightness so that IF an edge-case 
+    // event slips through the watcher upon startup, it compares against the 
+    // REAL baseline rather than triggering a popup against "-1.0".
+    if let Ok(vol_out) = std::process::Command::new("wpctl").args(&["get-volume", "@DEFAULT_AUDIO_SINK@"]).output() {
+        let vol_str = String::from_utf8_lossy(&vol_out.stdout);
+        if vol_str.contains("[MUTED]") { last_muted = true; }
+        if let Some(vol_part) = vol_str.split_whitespace().nth(1) {
+            if let Ok(vol) = vol_part.parse::<f64>() { last_volume = vol; }
+        }
+    }
+
+    if let (Ok(c_out), Ok(m_out)) = (
+        std::process::Command::new("brightnessctl").arg("get").output(),
+        std::process::Command::new("brightnessctl").arg("max").output()
+    ) {
+        let c: f64 = String::from_utf8_lossy(&c_out.stdout).trim().parse().unwrap_or(0.0);
+        let m: f64 = String::from_utf8_lossy(&m_out.stdout).trim().parse().unwrap_or(1.0);
+        if m > 0.0 { last_brightness = c / m; }
+    }
 
     handle_battery(&mut last_bat_cap, &mut last_bat_status, false).await;
 
