@@ -2,6 +2,13 @@
 #include "utils.h"
 #include <math.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#ifndef M_PI_2
+#define M_PI_2 1.57079632679489661923
+#endif
+
 static void resize_text_entry(UIState *state) {
     if (!state->active_text_entry) return;
     
@@ -51,13 +58,22 @@ void finalize_text_entry(UIState *state) {
     const char *text = gtk_editable_get_text(GTK_EDITABLE(state->active_text_entry));
     if (text && strlen(text) > 0) {
         AnnotationItem *item = annotation_text_new(&state->current_color, text, state->active_text_x, state->active_text_y, state->current_font_size);
+        item->rotation = state->active_text_rotation; 
+        
         state->strokes = g_list_append(state->strokes, item);
         
         if (state->redo_strokes) {
             annotation_items_free_list(state->redo_strokes);
             state->redo_strokes = NULL;
         }
+        
+        state->selected_item = item;
+        state->current_ann_mode = ANN_MODE_SELECT;
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->ann_select_btn), TRUE);
     }
+    
+    state->active_text_rotation = 0.0; 
+    
     gtk_fixed_remove(GTK_FIXED(state->annotation_fixed), state->active_text_entry);
     state->active_text_entry = NULL;
     gtk_widget_queue_draw(state->drawing_area);
@@ -76,6 +92,7 @@ void enter_annotation_phase(UIState *state) {
     state->is_annotating = TRUE;
     gtk_revealer_set_reveal_child(state->bottom_panel_revealer, FALSE);
     gtk_revealer_set_reveal_child(state->top_panel_revealer, TRUE);
+    gtk_revealer_set_reveal_child(state->ann_bottom_panel_revealer, TRUE); 
     
     gdk_rgba_parse(&state->current_color, "#ff3333");
     
@@ -94,9 +111,12 @@ void enter_annotation_phase(UIState *state) {
         state->redo_strokes = NULL;
     }
 
+    state->selected_item = NULL;
+    if (state->angle_scale) gtk_widget_set_sensitive(state->angle_scale, FALSE);
+
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(state->drag_gesture), GTK_PHASE_CAPTURE);
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(state->motion_controller), GTK_PHASE_NONE);
-    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(state->click_gesture), GTK_PHASE_NONE);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(state->click_gesture), GTK_PHASE_CAPTURE);
 
     gtk_widget_queue_draw(state->drawing_area);
     gtk_widget_grab_focus(state->drawing_area);
@@ -105,7 +125,10 @@ void enter_annotation_phase(UIState *state) {
 void cancel_annotation_phase(UIState *state) {
     finalize_text_entry(state); 
     state->is_annotating = FALSE;
+    state->selected_item = NULL;
+    
     gtk_revealer_set_reveal_child(state->top_panel_revealer, FALSE);
+    gtk_revealer_set_reveal_child(state->ann_bottom_panel_revealer, FALSE); 
     gtk_revealer_set_reveal_child(state->bottom_panel_revealer, TRUE);
     
     annotation_items_free_list(state->strokes); state->strokes = NULL;
@@ -118,6 +141,8 @@ void cancel_annotation_phase(UIState *state) {
 
 static void annotation_ui_undo(UIState *state) {
     finalize_text_entry(state);
+    state->selected_item = NULL;
+    if (state->angle_scale) gtk_widget_set_sensitive(state->angle_scale, FALSE);
     if (!state->strokes) return; 
 
     GList *last = g_list_last(state->strokes);
@@ -128,6 +153,8 @@ static void annotation_ui_undo(UIState *state) {
 
 static void annotation_ui_redo(UIState *state) {
     finalize_text_entry(state);
+    state->selected_item = NULL;
+    if (state->angle_scale) gtk_widget_set_sensitive(state->angle_scale, FALSE);
     if (!state->redo_strokes) return;
 
     GList *first = state->redo_strokes;
@@ -142,6 +169,7 @@ static void on_cancel_clicked(GtkButton *btn, gpointer user_data) { (void)btn; c
 
 void annotation_ui_confirm(UIState *state) {
     finalize_text_entry(state); 
+    state->selected_item = NULL;
     if (!state->window || !gtk_widget_get_visible(GTK_WIDGET(state->window))) return;
 
     GdkRectangle crop = { 
@@ -159,12 +187,90 @@ void annotation_ui_confirm(UIState *state) {
 }
 static void on_confirm_clicked(GtkButton *btn, gpointer user_data) { (void)btn; annotation_ui_confirm((UIState *)user_data); }
 
+static void on_angle_spin_changed(GtkSpinButton *spin, gpointer user_data);
+static void on_size_spin_changed(GtkSpinButton *spin, gpointer user_data);
+
 void annotation_ui_drag_begin(UIState *state, double scaled_x, double scaled_y, double raw_x, double raw_y) {
     finalize_text_entry(state);
+
+    if (state->current_ann_mode == ANN_MODE_SELECT) {
+        if (state->selected_item) {
+            double bx, by, bw, bh;
+            annotation_item_get_bounds(state->selected_item, &bx, &by, &bw, &bh);
+            double cx = bx + bw / 2.0;
+            double cy = by + bh / 2.0;
+
+            double lx = cx + (scaled_x - cx) * cos(-state->selected_item->rotation) - (scaled_y - cy) * sin(-state->selected_item->rotation);
+            double ly = cy + (scaled_x - cx) * sin(-state->selected_item->rotation) + (scaled_y - cy) * cos(-state->selected_item->rotation);
+
+            if (hypot(lx - cx, ly - (by - 25)) < 15.0) {
+                state->current_drag_action = DRAG_ROTATE;
+                state->drag_start_cx = cx;
+                state->drag_start_cy = cy;
+                return;
+            }
+
+            if (fabs(lx - (bx + bw)) < 15.0 && fabs(ly - (by + bh)) < 15.0) {
+                state->current_drag_action = DRAG_RESIZE;
+                state->last_drag_x = scaled_x;
+                state->last_drag_y = scaled_y;
+                return;
+            }
+        }
+
+        state->selected_item = NULL;
+        gtk_widget_set_sensitive(state->angle_scale, FALSE); 
+        
+        for (GList *l = g_list_last(state->strokes); l != NULL; l = l->prev) {
+            AnnotationItem *item = l->data;
+            double bx, by, bw, bh;
+            annotation_item_get_bounds(item, &bx, &by, &bw, &bh);
+            double cx = bx + bw / 2.0;
+            double cy = by + bh / 2.0;
+
+            double lx = cx + (scaled_x - cx) * cos(-item->rotation) - (scaled_y - cy) * sin(-item->rotation);
+            double ly = cy + (scaled_x - cx) * sin(-item->rotation) + (scaled_y - cy) * cos(-item->rotation);
+            
+            if (lx >= bx && lx <= bx + bw && ly >= by && ly <= by + bh) {
+                state->selected_item = item;
+                state->last_drag_x = scaled_x;
+                state->last_drag_y = scaled_y;
+                state->current_drag_action = DRAG_MOVE;
+                
+                state->strokes = g_list_remove_link(state->strokes, l);
+                state->strokes = g_list_append(state->strokes, item);
+                g_list_free(l);
+                
+                g_signal_handlers_block_by_func(state->angle_scale, on_angle_spin_changed, state);
+                double deg = state->selected_item->rotation * 180.0 / M_PI;
+                while (deg > 180.0) deg -= 360.0;
+                while (deg < -180.0) deg += 360.0;
+                gtk_spin_button_set_value(GTK_SPIN_BUTTON(state->angle_scale), deg);
+                gtk_widget_set_sensitive(state->angle_scale, TRUE);
+                g_signal_handlers_unblock_by_func(state->angle_scale, on_angle_spin_changed, state);
+
+                g_signal_handlers_block_by_func(state->size_scale, on_size_spin_changed, state);
+                if (state->selected_item->type == ANNOTATION_TEXT) {
+                    gtk_spin_button_set_value(GTK_SPIN_BUTTON(state->size_scale), state->selected_item->font_size);
+                } else {
+                    gtk_spin_button_set_value(GTK_SPIN_BUTTON(state->size_scale), state->selected_item->line_width);
+                }
+                g_signal_handlers_unblock_by_func(state->size_scale, on_size_spin_changed, state);
+
+                break;
+            }
+        }
+        gtk_widget_queue_draw(state->drawing_area);
+        return;
+    }
+    
+    state->selected_item = NULL; 
+    gtk_widget_set_sensitive(state->angle_scale, FALSE);
 
     if (state->current_ann_mode == ANN_MODE_TEXT) {
         state->active_text_x = scaled_x;
         state->active_text_y = scaled_y;
+        state->active_text_rotation = 0.0; 
         
         state->active_text_entry = gtk_entry_new();
         gtk_entry_set_has_frame(GTK_ENTRY(state->active_text_entry), FALSE);
@@ -194,7 +300,7 @@ void annotation_ui_drag_begin(UIState *state, double scaled_x, double scaled_y, 
             state->current_stroke = annotation_shape_new(ANNOTATION_CIRCLE, &state->current_color, state->current_brush_size, scaled_x, scaled_y);
         } else if (state->current_ann_mode == ANN_MODE_ARROW) {
             state->current_stroke = annotation_shape_new(ANNOTATION_ARROW, &state->current_color, state->current_brush_size, scaled_x, scaled_y);
-        } else if (state->current_ann_mode == ANN_MODE_PIXELATE) { // NEW
+        } else if (state->current_ann_mode == ANN_MODE_PIXELATE) { 
             state->current_stroke = annotation_shape_new(ANNOTATION_PIXELATE, &state->current_color, state->current_brush_size, scaled_x, scaled_y);
         }
         
@@ -203,20 +309,227 @@ void annotation_ui_drag_begin(UIState *state, double scaled_x, double scaled_y, 
 }
 
 void annotation_ui_drag_update(UIState *state, double scaled_x, double scaled_y) {
+    if (state->current_ann_mode == ANN_MODE_SELECT && state->selected_item) {
+        
+        if (state->current_drag_action == DRAG_MOVE) {
+            double dx = scaled_x - state->last_drag_x;
+            double dy = scaled_y - state->last_drag_y;
+            annotation_item_translate(state->selected_item, dx, dy);
+            state->last_drag_x = scaled_x;
+            state->last_drag_y = scaled_y;
+            
+        } else if (state->current_drag_action == DRAG_ROTATE) {
+            double angle = atan2(scaled_y - state->drag_start_cy, scaled_x - state->drag_start_cx);
+            state->selected_item->rotation = angle + M_PI_2;
+            
+            g_signal_handlers_block_by_func(state->angle_scale, on_angle_spin_changed, state);
+            double deg = state->selected_item->rotation * 180.0 / M_PI;
+            while (deg > 180.0) deg -= 360.0;
+            while (deg < -180.0) deg += 360.0;
+            gtk_spin_button_set_value(GTK_SPIN_BUTTON(state->angle_scale), deg);
+            g_signal_handlers_unblock_by_func(state->angle_scale, on_angle_spin_changed, state);
+
+        } else if (state->current_drag_action == DRAG_RESIZE) {
+            double bx, by, bw, bh;
+            annotation_item_get_bounds(state->selected_item, &bx, &by, &bw, &bh);
+            double cx = bx + bw / 2.0;
+            double cy = by + bh / 2.0;
+
+            double lx = cx + (scaled_x - cx) * cos(-state->selected_item->rotation) - (scaled_y - cy) * sin(-state->selected_item->rotation);
+            double ly = cy + (scaled_x - cx) * sin(-state->selected_item->rotation) + (scaled_y - cy) * cos(-state->selected_item->rotation);
+
+            double dx = lx - (bx + bw);
+            double dy = ly - (by + bh);
+
+            if (state->selected_item->type == ANNOTATION_TEXT) {
+                double scale = (bw + dx) / MAX(1.0, bw);
+                if (scale > 0.1) {
+                    state->selected_item->font_size *= scale;
+                    gtk_spin_button_set_value(GTK_SPIN_BUTTON(state->size_scale), state->selected_item->font_size);
+                }
+            } else if (state->selected_item->type == ANNOTATION_STROKE) {
+                double scale_x = (bw + dx) / MAX(1.0, bw);
+                double scale_y = (bh + dy) / MAX(1.0, bh);
+                
+                if (scale_x > 0.1 && scale_y > 0.1) {
+                    AnnotationPoint *pts = (AnnotationPoint *)state->selected_item->points->data;
+                    for (guint i = 0; i < state->selected_item->points->len; i++) {
+                        pts[i].x = cx + (pts[i].x - cx) * scale_x;
+                        pts[i].y = cy + (pts[i].y - cy) * scale_y;
+                    }
+                }
+            } else {
+                if (state->selected_item->x < state->selected_item->x2) state->selected_item->x2 += dx;
+                else state->selected_item->x += dx;
+                
+                if (state->selected_item->y < state->selected_item->y2) state->selected_item->y2 += dy;
+                else state->selected_item->y += dy;
+            }
+
+            state->last_drag_x = scaled_x;
+            state->last_drag_y = scaled_y;
+        }
+        
+        gtk_widget_queue_draw(state->drawing_area);
+        return;
+    }
+    
     if (!state->current_stroke) return;
     
     if (state->current_ann_mode == ANN_MODE_DRAW) {
         annotation_stroke_add_point(state->current_stroke, scaled_x, scaled_y);
     } 
-    // Trigger shape update for PIXELATE as well
     else if (state->current_ann_mode == ANN_MODE_RECTANGLE || state->current_ann_mode == ANN_MODE_CIRCLE || state->current_ann_mode == ANN_MODE_ARROW || state->current_ann_mode == ANN_MODE_PIXELATE) {
         annotation_shape_update(state->current_stroke, scaled_x, scaled_y);
     }
     gtk_widget_queue_draw(state->drawing_area);
 }
 
+void annotation_ui_double_click(UIState *state, double raw_x, double raw_y) {
+    if (!state->is_annotating) return;
+    if (state->current_ann_mode != ANN_MODE_SELECT) return;
+
+    double scaled_x = raw_x * state->scale_x;
+    double scaled_y = raw_y * state->scale_y;
+
+    for (GList *l = g_list_last(state->strokes); l != NULL; l = l->prev) {
+        AnnotationItem *item = l->data;
+        if (item->type == ANNOTATION_TEXT) {
+            double bx, by, bw, bh;
+            annotation_item_get_bounds(item, &bx, &by, &bw, &bh);
+            double cx = bx + bw / 2.0;
+            double cy = by + bh / 2.0;
+
+            double lx = cx + (scaled_x - cx) * cos(-item->rotation) - (scaled_y - cy) * sin(-item->rotation);
+            double ly = cy + (scaled_x - cx) * sin(-item->rotation) + (scaled_y - cy) * cos(-item->rotation);
+            
+            if (lx >= bx && lx <= bx + bw && ly >= by && ly <= by + bh) {
+                state->selected_item = NULL;
+                gtk_widget_set_sensitive(state->angle_scale, FALSE);
+                
+                state->active_text_x = item->x;
+                state->active_text_y = item->y;
+                state->current_color = item->color;
+                state->current_font_size = item->font_size;
+                
+                state->active_text_rotation = item->rotation;
+                
+                double place_raw_x = item->x / state->scale_x;
+                double place_raw_y = (item->y - item->font_size) / state->scale_y; 
+                
+                state->active_text_entry = gtk_entry_new();
+                gtk_entry_set_has_frame(GTK_ENTRY(state->active_text_entry), FALSE);
+                gtk_widget_add_css_class(state->active_text_entry, "annotation-text-entry"); 
+
+                update_active_text_appearance(state);
+                gtk_editable_set_text(GTK_EDITABLE(state->active_text_entry), item->text);
+                gtk_editable_select_region(GTK_EDITABLE(state->active_text_entry), 0, -1);
+                resize_text_entry(state);
+
+                gtk_fixed_put(GTK_FIXED(state->annotation_fixed), state->active_text_entry, place_raw_x, place_raw_y);
+                g_signal_connect(state->active_text_entry, "activate", G_CALLBACK(on_text_entry_activate), state);
+                g_signal_connect(state->active_text_entry, "changed", G_CALLBACK(on_text_entry_changed), state);
+                gtk_widget_grab_focus(state->active_text_entry);
+                
+                state->strokes = g_list_remove(state->strokes, item);
+                annotation_item_free(item);
+                
+                gtk_widget_queue_draw(state->drawing_area);
+                return;
+            }
+        }
+    }
+}
+
+
+static void paste_from_clipboard(UIState *state) {
+    gint exit_status = 0;
+    g_autofree gchar *tmp_img_path = g_build_filename(g_get_tmp_dir(), "qscreen_paste.png", NULL);
+    
+    g_autofree gchar *cmd = g_strdup_printf("sh -c \"wl-paste -t image/png > '%s'\"", tmp_img_path);
+    
+    gboolean success = g_spawn_command_line_sync(cmd, NULL, NULL, &exit_status, NULL);
+    
+    double cx = gdk_pixbuf_get_width(state->screenshot_pixbuf) / 2.0;
+    double cy = gdk_pixbuf_get_height(state->screenshot_pixbuf) / 2.0;
+
+    // 1. Try Image
+    if (success && exit_status == 0) {
+        GError *err = NULL;
+        GdkPixbuf *pasted_pixbuf = gdk_pixbuf_new_from_file(tmp_img_path, &err);
+        
+        if (pasted_pixbuf) {
+            double pw = gdk_pixbuf_get_width(pasted_pixbuf);
+            double ph = gdk_pixbuf_get_height(pasted_pixbuf);
+            
+            // --- FIX: Safely scale down massive images so they fit nicely on the screen! ---
+            double max_w = gdk_pixbuf_get_width(state->screenshot_pixbuf) * 0.7;
+            double max_h = gdk_pixbuf_get_height(state->screenshot_pixbuf) * 0.7;
+            
+            if (pw > max_w || ph > max_h) {
+                double scale = fmin(max_w / pw, max_h / ph);
+                int new_w = MAX(1, (int)(pw * scale));
+                int new_h = MAX(1, (int)(ph * scale));
+                
+                GdkPixbuf *scaled = gdk_pixbuf_scale_simple(pasted_pixbuf, new_w, new_h, GDK_INTERP_BILINEAR);
+                g_object_unref(pasted_pixbuf);
+                pasted_pixbuf = scaled;
+                pw = new_w;
+                ph = new_h;
+            }
+
+            AnnotationItem *item = annotation_image_new(pasted_pixbuf, cx - pw/2.0, cy - ph/2.0);
+            
+            state->strokes = g_list_append(state->strokes, item);
+            state->selected_item = item;
+            if (state->redo_strokes) { annotation_items_free_list(state->redo_strokes); state->redo_strokes = NULL; }
+            
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->ann_select_btn), TRUE);
+            gtk_widget_queue_draw(state->drawing_area);
+            return;
+        }
+        if (err) g_error_free(err);
+    }
+    
+    // 2. Fallback to Text
+    g_autofree gchar *paste_text = NULL;
+    success = g_spawn_command_line_sync("wl-paste -t text/plain", &paste_text, NULL, &exit_status, NULL);
+    
+    if (success && paste_text && strlen(paste_text) > 0) {
+        g_strchomp(paste_text); 
+        if (strlen(paste_text) == 0) return;
+        
+        AnnotationItem *item = annotation_text_new(&state->current_color, paste_text, cx, cy, state->current_font_size);
+        item->x = cx - (strlen(paste_text) * state->current_font_size * 0.3); 
+        
+        state->strokes = g_list_append(state->strokes, item);
+        state->selected_item = item;
+        if (state->redo_strokes) { annotation_items_free_list(state->redo_strokes); state->redo_strokes = NULL; }
+        
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->ann_select_btn), TRUE);
+        gtk_widget_queue_draw(state->drawing_area);
+    }
+}
+
 gboolean annotation_ui_handle_key(UIState *state, guint keyval, GdkModifierType mod_state) {
     if (!state->is_annotating) return FALSE;
+
+    // --- NEW: Intercept Ctrl+V to trigger paste ---
+    if ((keyval == GDK_KEY_v || keyval == GDK_KEY_V) && (mod_state & GDK_CONTROL_MASK) && state->active_text_entry == NULL) {
+        paste_from_clipboard(state);
+        return TRUE;
+    }
+
+    if (keyval == GDK_KEY_Delete || keyval == GDK_KEY_BackSpace) {
+        if (state->current_ann_mode == ANN_MODE_SELECT && state->selected_item && state->active_text_entry == NULL) {
+            state->strokes = g_list_remove(state->strokes, state->selected_item);
+            annotation_item_free(state->selected_item);
+            state->selected_item = NULL;
+            gtk_widget_set_sensitive(state->angle_scale, FALSE);
+            gtk_widget_queue_draw(state->drawing_area);
+            return TRUE;
+        }
+    }
 
     if (keyval == GDK_KEY_Escape) {
         cancel_annotation_phase(state);
@@ -236,15 +549,30 @@ gboolean annotation_ui_handle_key(UIState *state, guint keyval, GdkModifierType 
     return FALSE;
 }
 
-// UI Building
 static void on_size_spin_changed(GtkSpinButton *spin, gpointer user_data) {
     UIState *state = user_data;
     double val = gtk_spin_button_get_value(spin);
     if (state->current_ann_mode == ANN_MODE_TEXT) {
         state->current_font_size = val;
         update_active_text_appearance(state);
+    } else if (state->current_ann_mode == ANN_MODE_SELECT && state->selected_item) {
+        if (state->selected_item->type == ANNOTATION_TEXT) {
+            state->selected_item->font_size = val;
+        } else {
+            state->selected_item->line_width = val;
+        }
+        gtk_widget_queue_draw(state->drawing_area);
     } else {
         state->current_brush_size = val;
+    }
+}
+
+static void on_angle_spin_changed(GtkSpinButton *spin, gpointer user_data) {
+    UIState *state = user_data;
+    if (state->current_ann_mode == ANN_MODE_SELECT && state->selected_item) {
+        double deg = gtk_spin_button_get_value(spin);
+        state->selected_item->rotation = deg * M_PI / 180.0;
+        gtk_widget_queue_draw(state->drawing_area);
     }
 }
 
@@ -253,10 +581,20 @@ static void on_ann_mode_toggled(GtkToggleButton *btn, gpointer user_data) {
     UIState *state = user_data;
     finalize_text_entry(state);
     
+    if (GTK_WIDGET(btn) != state->ann_select_btn) {
+        state->selected_item = NULL;
+        gtk_widget_set_sensitive(state->angle_scale, FALSE); 
+        gtk_widget_queue_draw(state->drawing_area);
+    }
+    
     g_signal_handlers_block_by_func(state->size_scale, on_size_spin_changed, state);
     
-    if (GTK_WIDGET(btn) == state->ann_text_btn) {
+    if (GTK_WIDGET(btn) == state->ann_select_btn) {
+        state->current_ann_mode = ANN_MODE_SELECT;
+        gtk_widget_set_sensitive(state->size_scale, TRUE);
+    } else if (GTK_WIDGET(btn) == state->ann_text_btn) {
         state->current_ann_mode = ANN_MODE_TEXT;
+        gtk_widget_set_sensitive(state->size_scale, TRUE);
         gtk_spin_button_set_range(GTK_SPIN_BUTTON(state->size_scale), 12.0, 120.0);
         gtk_spin_button_set_increments(GTK_SPIN_BUTTON(state->size_scale), 2.0, 10.0);
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(state->size_scale), state->current_font_size);
@@ -265,8 +603,9 @@ static void on_ann_mode_toggled(GtkToggleButton *btn, gpointer user_data) {
         else if (GTK_WIDGET(btn) == state->ann_rect_btn) state->current_ann_mode = ANN_MODE_RECTANGLE;
         else if (GTK_WIDGET(btn) == state->ann_circle_btn) state->current_ann_mode = ANN_MODE_CIRCLE;
         else if (GTK_WIDGET(btn) == state->ann_arrow_btn) state->current_ann_mode = ANN_MODE_ARROW;
-        else if (GTK_WIDGET(btn) == state->ann_pixelate_btn) state->current_ann_mode = ANN_MODE_PIXELATE; // NEW
+        else if (GTK_WIDGET(btn) == state->ann_pixelate_btn) state->current_ann_mode = ANN_MODE_PIXELATE;
 
+        gtk_widget_set_sensitive(state->size_scale, TRUE);
         gtk_spin_button_set_range(GTK_SPIN_BUTTON(state->size_scale), 2.0, 40.0);
         gtk_spin_button_set_increments(GTK_SPIN_BUTTON(state->size_scale), 1.0, 5.0);
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(state->size_scale), state->current_brush_size);
@@ -280,6 +619,11 @@ static void on_color_button_clicked(GtkButton *clicked_btn, gpointer user_data) 
     GdkRGBA *color = g_object_get_data(G_OBJECT(clicked_btn), "color-rgba");
     if (color) {
         state->current_color = *color;
+        
+        if (state->current_ann_mode == ANN_MODE_SELECT && state->selected_item) {
+            state->selected_item->color = *color;
+            gtk_widget_queue_draw(state->drawing_area);
+        }
         
         for (GList *l = state->color_indicators; l != NULL; l = l->next) {
             GtkWidget *btn = GTK_WIDGET(l->data);
@@ -296,7 +640,9 @@ static void on_color_button_clicked(GtkButton *clicked_btn, gpointer user_data) 
 static GtkWidget* create_color_button(const char *color_hex, UIState *state) {
     GtkWidget *btn = gtk_button_new();
     gtk_widget_set_valign(btn, GTK_ALIGN_CENTER);
+    gtk_widget_set_halign(btn, GTK_ALIGN_CENTER);
     gtk_widget_set_focusable(btn, FALSE);
+    
     gtk_widget_add_css_class(btn, "color-btn");
     
     GdkRGBA *rgba = g_new(GdkRGBA, 1);
@@ -304,8 +650,10 @@ static GtkWidget* create_color_button(const char *color_hex, UIState *state) {
     g_object_set_data_full(G_OBJECT(btn), "color-rgba", rgba, g_free);
     
     GtkCssProvider *p = gtk_css_provider_new();
-    g_autofree char *css = g_strdup_printf("button.color-btn { background-color: rgb(%d,%d,%d); }", 
+    g_autofree char *css = g_strdup_printf(
+        "button.color-btn { background-color: rgb(%d,%d,%d); }", 
         (int)(rgba->red*255), (int)(rgba->green*255), (int)(rgba->blue*255));
+    
     gtk_css_provider_load_from_string(p, css);
     gtk_style_context_add_provider(gtk_widget_get_style_context(btn), GTK_STYLE_PROVIDER(p), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(p);
@@ -315,13 +663,11 @@ static GtkWidget* create_color_button(const char *color_hex, UIState *state) {
     return btn;
 }
 
-GtkWidget* create_annotation_toolbar(UIState *state) {
+GtkWidget* create_annotation_toolbar_top(UIState *state) {
     GtkWidget *frame = gtk_frame_new(NULL); 
     gtk_widget_add_css_class(frame, "panel"); 
     
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_widget_set_margin_start(box, 12); gtk_widget_set_margin_end(box, 12); 
-    gtk_widget_set_margin_top(box, 6); gtk_widget_set_margin_bottom(box, 6); 
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     gtk_frame_set_child(GTK_FRAME(frame), box);
 
     GtkWidget *cancel_btn = gtk_button_new_from_icon_name("window-close-symbolic");
@@ -333,7 +679,11 @@ GtkWidget* create_annotation_toolbar(UIState *state) {
     gtk_widget_add_css_class(sep1, "vertical-separator");
     gtk_box_append(GTK_BOX(box), sep1);
 
-    // Tools
+    state->ann_select_btn = gtk_toggle_button_new(); 
+    gtk_widget_set_focusable(state->ann_select_btn, FALSE); 
+    gtk_button_set_child(GTK_BUTTON(state->ann_select_btn), gtk_image_new_from_icon_name("edit-select-symbolic"));
+    gtk_widget_set_tooltip_text(state->ann_select_btn, "Select / Move / Edit (Ctrl+V to Paste)");
+    
     state->ann_draw_btn = gtk_toggle_button_new(); 
     gtk_widget_set_focusable(state->ann_draw_btn, FALSE); 
     gtk_button_set_child(GTK_BUTTON(state->ann_draw_btn), gtk_image_new_from_icon_name("document-edit-symbolic"));
@@ -350,7 +700,6 @@ GtkWidget* create_annotation_toolbar(UIState *state) {
     gtk_widget_set_focusable(state->ann_arrow_btn, FALSE); 
     gtk_button_set_child(GTK_BUTTON(state->ann_arrow_btn), gtk_image_new_from_icon_name("go-next-symbolic"));
 
-    // NEW: Pixelate Tool Button (view-conceal-symbolic is standard for hiding things)
     state->ann_pixelate_btn = gtk_toggle_button_new(); 
     gtk_widget_set_focusable(state->ann_pixelate_btn, FALSE); 
     gtk_button_set_child(GTK_BUTTON(state->ann_pixelate_btn), gtk_image_new_from_icon_name("view-conceal-symbolic"));
@@ -359,53 +708,36 @@ GtkWidget* create_annotation_toolbar(UIState *state) {
     gtk_widget_set_focusable(state->ann_text_btn, FALSE); 
     gtk_button_set_child(GTK_BUTTON(state->ann_text_btn), gtk_image_new_from_icon_name("insert-text-symbolic"));
     
-    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_rect_btn), GTK_TOGGLE_BUTTON(state->ann_draw_btn));
-    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_circle_btn), GTK_TOGGLE_BUTTON(state->ann_draw_btn));
-    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_arrow_btn), GTK_TOGGLE_BUTTON(state->ann_draw_btn)); 
-    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_pixelate_btn), GTK_TOGGLE_BUTTON(state->ann_draw_btn)); // LINK NEW BUTTON
-    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_text_btn), GTK_TOGGLE_BUTTON(state->ann_draw_btn));
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_draw_btn), GTK_TOGGLE_BUTTON(state->ann_select_btn));
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_rect_btn), GTK_TOGGLE_BUTTON(state->ann_select_btn));
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_circle_btn), GTK_TOGGLE_BUTTON(state->ann_select_btn));
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_arrow_btn), GTK_TOGGLE_BUTTON(state->ann_select_btn)); 
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_pixelate_btn), GTK_TOGGLE_BUTTON(state->ann_select_btn)); 
+    gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(state->ann_text_btn), GTK_TOGGLE_BUTTON(state->ann_select_btn));
+    
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->ann_draw_btn), TRUE);
     state->current_ann_mode = ANN_MODE_DRAW;
     
+    g_signal_connect(state->ann_select_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state);
     g_signal_connect(state->ann_draw_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state);
     g_signal_connect(state->ann_rect_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state);
     g_signal_connect(state->ann_circle_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state);
     g_signal_connect(state->ann_arrow_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state); 
-    g_signal_connect(state->ann_pixelate_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state); // LINK NEW BUTTON
+    g_signal_connect(state->ann_pixelate_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state); 
     g_signal_connect(state->ann_text_btn, "toggled", G_CALLBACK(on_ann_mode_toggled), state);
 
+    gtk_box_append(GTK_BOX(box), state->ann_select_btn);
     gtk_box_append(GTK_BOX(box), state->ann_draw_btn);
     gtk_box_append(GTK_BOX(box), state->ann_rect_btn);
     gtk_box_append(GTK_BOX(box), state->ann_circle_btn);
     gtk_box_append(GTK_BOX(box), state->ann_arrow_btn); 
-    gtk_box_append(GTK_BOX(box), state->ann_pixelate_btn); // APPEND NEW BUTTON
+    gtk_box_append(GTK_BOX(box), state->ann_pixelate_btn); 
     gtk_box_append(GTK_BOX(box), state->ann_text_btn);
-
-    state->size_scale = gtk_spin_button_new_with_range(2.0, 40.0, 1.0);
-    gtk_spin_button_set_numeric(GTK_SPIN_BUTTON(state->size_scale), TRUE);
-    gtk_widget_set_size_request(state->size_scale, 60, -1);
-    gtk_widget_set_valign(state->size_scale, GTK_ALIGN_CENTER);
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(state->size_scale), state->current_brush_size);
-    g_signal_connect(state->size_scale, "value-changed", G_CALLBACK(on_size_spin_changed), state);
-    gtk_box_append(GTK_BOX(box), state->size_scale);
-
-    GtkWidget *sep2 = gtk_separator_new(GTK_ORIENTATION_VERTICAL); 
-    gtk_widget_add_css_class(sep2, "vertical-separator");
-    gtk_box_append(GTK_BOX(box), sep2);
-
-    // Colors
-    gtk_box_append(GTK_BOX(box), create_color_button("#ffffff", state));
-    gtk_box_append(GTK_BOX(box), create_color_button("#000000", state));
-    gtk_box_append(GTK_BOX(box), create_color_button("#ff3333", state));
-    gtk_box_append(GTK_BOX(box), create_color_button("#33ff33", state));
-    gtk_box_append(GTK_BOX(box), create_color_button("#3333ff", state));
-    gtk_box_append(GTK_BOX(box), create_color_button("#ffff33", state));
 
     GtkWidget *sep3 = gtk_separator_new(GTK_ORIENTATION_VERTICAL); 
     gtk_widget_add_css_class(sep3, "vertical-separator");
     gtk_box_append(GTK_BOX(box), sep3);
 
-    // Undo / Redo
     GtkWidget *undo_btn = gtk_button_new_from_icon_name("edit-undo-symbolic");
     gtk_widget_set_focusable(undo_btn, FALSE);
     g_signal_connect(undo_btn, "clicked", G_CALLBACK(on_undo_clicked), state);
@@ -420,12 +752,49 @@ GtkWidget* create_annotation_toolbar(UIState *state) {
     gtk_widget_add_css_class(sep4, "vertical-separator");
     gtk_box_append(GTK_BOX(box), sep4);
 
-    // Confirm
     GtkWidget *confirm_btn = gtk_button_new_from_icon_name("object-select-symbolic");
     gtk_widget_set_focusable(confirm_btn, FALSE); 
     gtk_widget_add_css_class(confirm_btn, "suggested-action");
     g_signal_connect(confirm_btn, "clicked", G_CALLBACK(on_confirm_clicked), state);
     gtk_box_append(GTK_BOX(box), confirm_btn);
+
+    return frame;
+}
+
+GtkWidget* create_annotation_toolbar_bottom(UIState *state) {
+    GtkWidget *frame = gtk_frame_new(NULL); 
+    gtk_widget_add_css_class(frame, "panel"); 
+    
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_frame_set_child(GTK_FRAME(frame), box);
+
+    state->size_scale = gtk_spin_button_new_with_range(2.0, 40.0, 1.0);
+    gtk_spin_button_set_numeric(GTK_SPIN_BUTTON(state->size_scale), TRUE);
+    gtk_widget_set_tooltip_text(state->size_scale, "Thickness / Font Size");
+    gtk_orientable_set_orientation(GTK_ORIENTABLE(state->size_scale), GTK_ORIENTATION_HORIZONTAL);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(state->size_scale), state->current_brush_size);
+    g_signal_connect(state->size_scale, "value-changed", G_CALLBACK(on_size_spin_changed), state);
+    gtk_box_append(GTK_BOX(box), state->size_scale);
+
+    state->angle_scale = gtk_spin_button_new_with_range(-180.0, 180.0, 1.0);
+    gtk_spin_button_set_numeric(GTK_SPIN_BUTTON(state->angle_scale), TRUE);
+    gtk_widget_set_tooltip_text(state->angle_scale, "Rotation Angle");
+    gtk_orientable_set_orientation(GTK_ORIENTABLE(state->angle_scale), GTK_ORIENTATION_HORIZONTAL);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(state->angle_scale), 0.0);
+    gtk_widget_set_sensitive(state->angle_scale, FALSE); 
+    g_signal_connect(state->angle_scale, "value-changed", G_CALLBACK(on_angle_spin_changed), state);
+    gtk_box_append(GTK_BOX(box), state->angle_scale);
+
+    GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_VERTICAL); 
+    gtk_widget_add_css_class(sep, "vertical-separator");
+    gtk_box_append(GTK_BOX(box), sep);
+
+    gtk_box_append(GTK_BOX(box), create_color_button("#ffffff", state));
+    gtk_box_append(GTK_BOX(box), create_color_button("#000000", state));
+    gtk_box_append(GTK_BOX(box), create_color_button("#ff3333", state));
+    gtk_box_append(GTK_BOX(box), create_color_button("#33ff33", state));
+    gtk_box_append(GTK_BOX(box), create_color_button("#3333ff", state));
+    gtk_box_append(GTK_BOX(box), create_color_button("#ffff33", state));
 
     return frame;
 }

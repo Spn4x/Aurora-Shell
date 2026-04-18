@@ -9,7 +9,6 @@
 #include <json-glib/json-glib.h>
 #include <math.h>
 
-// --- Forward Declarations ---
 static void capture_selection_immediately(UIState *state);
 static void on_widget_realize(GtkWidget *widget, gpointer user_data);
 static void on_window_destroy(GtkWidget *widget, gpointer user_data);
@@ -33,10 +32,6 @@ static gboolean animation_tick(gpointer data);
 static void create_rounded_rect_path(cairo_t *cr, double x, double y, double w, double h, double r);
 static gboolean on_key_pressed(GtkEventControllerKey* controller, guint keyval, guint keycode, GdkModifierType mod_state, gpointer user_data);
 static void on_drawing_area_resize(GtkWidget *widget, int width, int height, gpointer user_data);
-
-// ===================================================================
-//  State Persistence Helpers
-// ===================================================================
 
 static char* get_state_file_path() {
     const char *cache_dir = g_get_user_cache_dir();
@@ -78,10 +73,6 @@ static void on_annotate_toggle_changed(GtkToggleButton *button, gpointer user_da
     (void)user_data;
     save_annotation_state(gtk_toggle_button_get_active(button));
 }
-
-// ===================================================================
-//  Lifecycle & Main Callbacks
-// ===================================================================
 
 static void capture_selection_immediately(UIState *state) {
     GdkRectangle g = { 
@@ -169,13 +160,11 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
     double sel_w = state->current_w / state->scale_x;
     double sel_h = state->current_h / state->scale_y;
 
-    // Background Dimming
     if (state->current_mode != MODE_TEXT && state->current_mode != MODE_COLOR) {
         cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.5);
         cairo_paint(cr);
     }
     
-    // Draw Window/Region selection box
     if (state->current_w > 1 && state->current_h > 1 && state->current_mode != MODE_TEXT && state->current_mode != MODE_COLOR) {
         cairo_save(cr);
         create_rounded_rect_path(cr, sel_x, sel_y, sel_w, sel_h, 10.0);
@@ -190,7 +179,6 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
         cairo_stroke(cr);
     }
 
-    // Draw existing annotations
     if (state->strokes) {
         cairo_save(cr);
         if (state->current_w > 1 && state->current_h > 1) {
@@ -198,13 +186,11 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
             cairo_clip(cr);
         }
         
-        // NEW FOR PIXELATE: state->screenshot_pixbuf is passed
-        annotation_draw_all(cr, state->strokes, state->screenshot_pixbuf, 0, 0, 1.0 / state->scale_x, 1.0 / state->scale_y);
+        annotation_draw_all(cr, state->strokes, state->screenshot_pixbuf, state->selected_item, 0, 0, 1.0 / state->scale_x, 1.0 / state->scale_y);
         
         cairo_restore(cr);
     }
 
-    // Draw OCR Boxes
     if (state->current_mode == MODE_TEXT && state->text_boxes) {
         cairo_set_source_rgba(cr, 0.2, 0.5, 1.0, 0.3);
         for (GList *l = state->text_boxes; l != NULL; l = l->next) {
@@ -223,7 +209,6 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
         cairo_fill(cr);
     }
 
-    // Draw Eyedropper indicator
     if (state->current_mode == MODE_COLOR && state->has_hovered_color) {
         double cx = state->hover_x + 30;
         double cy = state->hover_y + 30;
@@ -264,10 +249,6 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
         }
     }
 }
-
-// ===================================================================
-//  Gestures & Input
-// ===================================================================
 
 static void on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data) {
     (void)gesture; UIState *state = data;
@@ -388,7 +369,15 @@ static void on_mouse_motion(GtkEventControllerMotion *controller, double x, doub
 }
 
 static void on_window_click(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
-    (void)gesture; (void)n_press; UIState *state = data;
+    (void)gesture; UIState *state = data;
+    
+    // --- NEW: Intercept Double Clicks while Annotating ---
+    if (state->is_annotating) {
+        if (n_press == 2) {
+            annotation_ui_double_click(state, x, y);
+        }
+        return;
+    }
     
     if (state->current_mode == MODE_COLOR) {
         double scaled_x = x * state->scale_x;
@@ -424,10 +413,6 @@ static gboolean on_key_pressed(GtkEventControllerKey* controller, guint keyval, 
     }
     return FALSE;
 }
-
-// ===================================================================
-//  Phase 1 Tools & OCR
-// ===================================================================
 
 void qscreen_set_mode(UIState *state, SelectionMode mode) {
     state->current_mode = mode;
@@ -486,10 +471,6 @@ static void on_ocr_finished(GList *text_boxes, gpointer data) {
     state->text_boxes = text_boxes; gtk_stack_set_visible_child_name(GTK_STACK(state->ocr_notification_stack), "done"); g_timeout_add(750, hide_notification_and_redraw, state);
 }
 
-// ===================================================================
-//  Plugin Entry Point
-// ===================================================================
-
 G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     g_autoptr(JsonParser) parser = json_parser_new();
     if (!config_string || !json_parser_load_from_data(parser, config_string, -1, NULL)) {
@@ -547,7 +528,6 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), state);
     gtk_widget_add_controller(GTK_WIDGET(aspect_frame), key_controller);
     
-    // Notifications
     state->ocr_notification_revealer = gtk_revealer_new();
     gtk_revealer_set_transition_type(GTK_REVEALER(state->ocr_notification_revealer), GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
     gtk_revealer_set_transition_duration(GTK_REVEALER(state->ocr_notification_revealer), 250);
@@ -562,7 +542,7 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), state->ocr_notification_revealer);
     gtk_widget_set_valign(state->ocr_notification_revealer, GTK_ALIGN_START); gtk_widget_set_halign(state->ocr_notification_revealer, GTK_ALIGN_CENTER);
 
-    // Phase 1 Toolbar
+    // Initial Mode Toolbar
     state->bottom_panel_revealer = GTK_REVEALER(gtk_revealer_new());
     gtk_revealer_set_transition_type(state->bottom_panel_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
     GtkWidget *panel_frame = gtk_frame_new(NULL); gtk_widget_add_css_class(panel_frame, "panel");
@@ -618,15 +598,25 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     gtk_widget_set_margin_bottom(GTK_WIDGET(state->bottom_panel_revealer), 40);
     gtk_revealer_set_reveal_child(state->bottom_panel_revealer, TRUE);
 
-    // Phase 2 Toolbar 
+    // Phase 2 Toolbar - Top
     state->top_panel_revealer = GTK_REVEALER(gtk_revealer_new());
     gtk_revealer_set_transition_type(state->top_panel_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
-    GtkWidget *annotation_toolbar = create_annotation_toolbar(state);
-    gtk_revealer_set_child(state->top_panel_revealer, annotation_toolbar);
+    GtkWidget *annotation_toolbar_top = create_annotation_toolbar_top(state);
+    gtk_revealer_set_child(state->top_panel_revealer, annotation_toolbar_top);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(state->top_panel_revealer));
     gtk_widget_set_valign(GTK_WIDGET(state->top_panel_revealer), GTK_ALIGN_START);
     gtk_widget_set_halign(GTK_WIDGET(state->top_panel_revealer), GTK_ALIGN_CENTER);
     gtk_widget_set_margin_top(GTK_WIDGET(state->top_panel_revealer), 15);
+
+    // --- FIX: Phase 2 Toolbar - Now at the Bottom ---
+    state->ann_bottom_panel_revealer = GTK_REVEALER(gtk_revealer_new());
+    gtk_revealer_set_transition_type(state->ann_bottom_panel_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
+    GtkWidget *annotation_toolbar_bottom = create_annotation_toolbar_bottom(state);
+    gtk_revealer_set_child(state->ann_bottom_panel_revealer, annotation_toolbar_bottom);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(state->ann_bottom_panel_revealer));
+    gtk_widget_set_valign(GTK_WIDGET(state->ann_bottom_panel_revealer), GTK_ALIGN_END);
+    gtk_widget_set_halign(GTK_WIDGET(state->ann_bottom_panel_revealer), GTK_ALIGN_CENTER);
+    gtk_widget_set_margin_bottom(GTK_WIDGET(state->ann_bottom_panel_revealer), 40); // Matches the Phase 1 bar placement
 
     // Gestures
     g_signal_connect(state->region_button, "toggled", G_CALLBACK(on_region_button_toggled), state);

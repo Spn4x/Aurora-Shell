@@ -11,7 +11,8 @@ typedef enum {
     ANNOTATION_RECTANGLE,
     ANNOTATION_CIRCLE,
     ANNOTATION_ARROW,
-    ANNOTATION_PIXELATE // NEW
+    ANNOTATION_PIXELATE,
+    ANNOTATION_IMAGE 
 } AnnotationType;
 
 typedef struct {
@@ -22,15 +23,19 @@ typedef struct {
     AnnotationType type;
     GdkRGBA color;
     double line_width;
+    double rotation;
     
-    // For freehand strokes
     GArray *points;
-    
-    // For text
     char *text;
     double font_size;
     
-    // For Shapes & Text Origin
+    GdkPixbuf *pixbuf; 
+    
+    // --- NEW: Hardware/Memory Caching for 144fps dragging ---
+    cairo_surface_t *cached_surface;
+    int cached_x, cached_y, cached_w, cached_h;
+    double cached_line_width;
+    
     double x, y;
     double x2, y2;
 } AnnotationItem;
@@ -43,11 +48,15 @@ AnnotationItem* annotation_text_new(const GdkRGBA *color, const char *text, doub
 AnnotationItem* annotation_shape_new(AnnotationType type, const GdkRGBA *color, double line_width, double x, double y);
 void annotation_shape_update(AnnotationItem *item, double x2, double y2);
 
+AnnotationItem* annotation_image_new(GdkPixbuf *pixbuf, double x, double y);
+
 void annotation_item_free(gpointer data);
 void annotation_items_free_list(GList *items);
 
-// UPDATE: Added GdkPixbuf *bg to the signature so we can sample the background for pixelation
-void annotation_draw_all(cairo_t *cr, GList *items, GdkPixbuf *bg, double offset_x, double offset_y, double zoom_x, double zoom_y);
+void annotation_item_get_bounds(AnnotationItem *item, double *bx, double *by, double *bw, double *bh);
+void annotation_item_translate(AnnotationItem *item, double dx, double dy);
+
+void annotation_draw_all(cairo_t *cr, GList *items, GdkPixbuf *bg, AnnotationItem *selected_item, double offset_x, double offset_y, double zoom_x, double zoom_y);
 gboolean annotation_save_composite(GdkPixbuf *bg, GdkRectangle *crop, GList *items, const char *output_png_path);
 
 #endif // QSCREEN_ANNOTATION_H

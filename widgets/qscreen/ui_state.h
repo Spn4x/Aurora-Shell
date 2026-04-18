@@ -13,13 +13,21 @@ typedef enum {
 } SelectionMode;
 
 typedef enum {
+    ANN_MODE_SELECT, 
     ANN_MODE_DRAW,
     ANN_MODE_TEXT,
     ANN_MODE_RECTANGLE,
     ANN_MODE_CIRCLE,
     ANN_MODE_ARROW,
-    ANN_MODE_PIXELATE // NEW
+    ANN_MODE_PIXELATE 
 } AnnMode;
+
+typedef enum {
+    DRAG_NONE,
+    DRAG_MOVE,
+    DRAG_RESIZE,
+    DRAG_ROTATE
+} DragAction;
 
 typedef struct {
     QScreenState *app_state;
@@ -31,6 +39,7 @@ typedef struct {
     
     GtkRevealer *bottom_panel_revealer;
     GtkRevealer *top_panel_revealer;
+    GtkRevealer *ann_bottom_panel_revealer;
     
     GtkWidget *region_button, *window_button, *text_button, *color_button, *screen_button, *save_button, *annotate_toggle_btn;
     
@@ -51,12 +60,15 @@ typedef struct {
     GdkRGBA hovered_color;
     double hover_x, hover_y;
 
-    // Annotation Data
     gboolean is_annotating;
     AnnMode current_ann_mode;
     
-    // NEW: ann_pixelate_btn added below
-    GtkWidget *ann_draw_btn, *ann_text_btn, *ann_rect_btn, *ann_circle_btn, *ann_arrow_btn, *ann_pixelate_btn, *size_scale;
+    AnnotationItem *selected_item;
+    DragAction current_drag_action;
+    double drag_start_cx, drag_start_cy; 
+    double last_drag_x, last_drag_y;
+    
+    GtkWidget *ann_select_btn, *ann_draw_btn, *ann_text_btn, *ann_rect_btn, *ann_circle_btn, *ann_arrow_btn, *ann_pixelate_btn, *size_scale, *angle_scale;
     
     GList *strokes;
     GList *redo_strokes; 
@@ -69,6 +81,7 @@ typedef struct {
     GtkWidget *annotation_fixed;
     GtkWidget *active_text_entry;
     double active_text_x, active_text_y;
+    double active_text_rotation; // --- NEW: Preserves rotation during edit ---
 } UIState;
 
 void qscreen_set_mode(UIState *state, SelectionMode mode);
