@@ -72,8 +72,14 @@ static void free_notification_data(gpointer data) {
 static GtkWidget* create_osd_pill(const gchar *icon_name, double level) {
     GtkWidget *overlay = gtk_overlay_new();
 
+    // MATCH STANDARD PILL WIDTH using the dummy label trick
+    GtkWidget *dummy_label = gtk_label_new(" ");
+    gtk_widget_add_css_class(dummy_label, "summary");
+    gtk_label_set_width_chars(GTK_LABEL(dummy_label), 25);
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), dummy_label);
+
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
+    gtk_widget_set_halign(box, GTK_ALIGN_FILL);
     gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
     gtk_widget_set_margin_start(box, 14);
     gtk_widget_set_margin_end(box, 14);
@@ -85,6 +91,8 @@ static GtkWidget* create_osd_pill(const gchar *icon_name, double level) {
     gtk_level_bar_set_min_value(GTK_LEVEL_BAR(current_osd_level_bar), 0.0);
     gtk_level_bar_set_max_value(GTK_LEVEL_BAR(current_osd_level_bar), 1.0);
     gtk_widget_set_valign(current_osd_level_bar, GTK_ALIGN_CENTER);
+    gtk_widget_set_hexpand(current_osd_level_bar, TRUE); // Dynamically fill the remaining space
+    gtk_widget_set_size_request(current_osd_level_bar, -1, 6); // Lock height only
     gtk_widget_add_css_class(current_osd_level_bar, "osd-bar");
 
     current_osd_overvol_label = gtk_label_new("");
@@ -95,15 +103,9 @@ static GtkWidget* create_osd_pill(const gchar *icon_name, double level) {
         gtk_level_bar_set_value(GTK_LEVEL_BAR(current_osd_level_bar), 1.0);
         g_autofree gchar *text = g_strdup_printf("+%.0f%%", (level - 1.0) * 100.0);
         gtk_label_set_text(GTK_LABEL(current_osd_overvol_label), text);
-        
-        // Shrink bar to accommodate text
-        gtk_widget_set_size_request(current_osd_level_bar, 150, 6);
         gtk_widget_set_visible(current_osd_overvol_label, TRUE);
     } else {
         gtk_level_bar_set_value(GTK_LEVEL_BAR(current_osd_level_bar), level);
-        
-        // Full width bar, hide text
-        gtk_widget_set_size_request(current_osd_level_bar, 200, 6);
         gtk_widget_set_visible(current_osd_overvol_label, FALSE);
     }
 
@@ -112,9 +114,6 @@ static GtkWidget* create_osd_pill(const gchar *icon_name, double level) {
     gtk_box_append(GTK_BOX(box), current_osd_overvol_label);
 
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), box);
-
-    // Force strict dimensions so it matches normal notifications exactly
-    gtk_widget_set_size_request(overlay, 260, 42);
 
     return overlay;
 }
@@ -417,11 +416,9 @@ static void handle_show_osd(GDBusMethodInvocation *inv, const gchar *icon, doubl
             gtk_level_bar_set_value(GTK_LEVEL_BAR(current_osd_level_bar), 1.0);
             g_autofree gchar *text = g_strdup_printf("+%.0f%%", (level - 1.0) * 100.0);
             gtk_label_set_text(GTK_LABEL(current_osd_overvol_label), text);
-            gtk_widget_set_size_request(current_osd_level_bar, 150, 6);
             gtk_widget_set_visible(current_osd_overvol_label, TRUE);
         } else {
             gtk_level_bar_set_value(GTK_LEVEL_BAR(current_osd_level_bar), level);
-            gtk_widget_set_size_request(current_osd_level_bar, 200, 6);
             gtk_widget_set_visible(current_osd_overvol_label, FALSE);
         }
         

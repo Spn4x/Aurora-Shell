@@ -19,6 +19,7 @@ sources = [
   'qscreen.c',
   'utils.c',
   'features/ocr.c',
+  'features/eyedrop.c',
   'features/annotation.c',
   'features/annotation_ui.c'
 ]

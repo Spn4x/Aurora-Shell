@@ -8,7 +8,8 @@
 typedef enum {
     MODE_REGION,
     MODE_WINDOW,
-    MODE_TEXT
+    MODE_TEXT,
+    MODE_COLOR // <--- NEW
 } SelectionMode;
 
 typedef enum {
@@ -29,7 +30,8 @@ typedef struct {
     GtkRevealer *bottom_panel_revealer;
     GtkRevealer *top_panel_revealer;
     
-    GtkWidget *region_button, *window_button, *text_button, *screen_button, *save_button, *annotate_toggle_btn;
+    // ---> Added color_button
+    GtkWidget *region_button, *window_button, *text_button, *color_button, *screen_button, *save_button, *annotate_toggle_btn;
     
     guint animation_timer_id;
     gboolean is_animating;
@@ -43,6 +45,11 @@ typedef struct {
     GList *window_geometries, *text_boxes, *selected_text_boxes;
     GtkWidget *ocr_notification_revealer, *ocr_notification_stack;
     gboolean ocr_has_run;
+
+    // ---> NEW: Eyedropper Hover State
+    gboolean has_hovered_color;
+    GdkRGBA hovered_color;
+    double hover_x, hover_y;
 
     // Annotation Data
     gboolean is_annotating;
