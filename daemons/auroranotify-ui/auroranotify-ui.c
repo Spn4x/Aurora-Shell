@@ -3,6 +3,7 @@
 #include <gio/gio.h>
 #include "island_widget.h"
 #include "privacy_widget.h"
+#include "notification_widget.h"
 #include <glib/gstdio.h>
 
 const guint PILL_STATE_DURATION_MS = 4000;
@@ -12,12 +13,6 @@ const guint ANIMATION_FINISH_DELAY_MS = ANIMATION_DURATION + 100;
 
 const char* UI_BUS_NAME = "com.meismeric.auranotify.UI";
 const char* UI_OBJECT_PATH = "/com/meismeric/auranotify/UI";
-
-typedef struct {
-    gchar *icon;
-    gchar *summary;
-    gchar *body;
-} NotificationData;
 
 typedef struct {
     GtkCssProvider *provider;
@@ -58,15 +53,6 @@ static gboolean populate_expanded_content_cb(gpointer user_data);
 static void on_island_enter(GtkEventControllerMotion *controller, double x, double y, gpointer user_data);
 static void on_island_leave(GtkEventControllerMotion *controller, gpointer user_data);
 static gboolean outro_finished_callback(gpointer user_data);
-
-static void free_notification_data(gpointer data) {
-    if (!data) return;
-    NotificationData *notif = (NotificationData *)data;
-    g_free(notif->icon);
-    g_free(notif->summary);
-    g_free(notif->body);
-    g_free(notif);
-}
 
 static GtkWidget* create_osd_pill(const gchar *icon_name, double level) {
     GtkWidget *overlay = gtk_overlay_new();
@@ -113,36 +99,6 @@ static GtkWidget* create_osd_pill(const gchar *icon_name, double level) {
     return overlay;
 }
 
-static GtkWidget* create_expanded_content_widget(NotificationData *data) {
-    GtkWidget *content_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_widget_set_valign(content_box, GTK_ALIGN_START);
-    
-    GtkWidget *summary_label = gtk_label_new(data->summary);
-    gtk_widget_set_halign(summary_label, GTK_ALIGN_START);
-    gtk_widget_add_css_class(summary_label, "summary");
-    gtk_label_set_wrap(GTK_LABEL(summary_label), TRUE);
-    gtk_label_set_wrap_mode(GTK_LABEL(summary_label), PANGO_WRAP_WORD_CHAR);
-    gtk_label_set_max_width_chars(GTK_LABEL(summary_label), 45);
-
-    GtkWidget *body_label = gtk_label_new(data->body);
-    gtk_widget_set_halign(body_label, GTK_ALIGN_START);
-    gtk_widget_add_css_class(body_label, "body");
-    gtk_label_set_wrap(GTK_LABEL(body_label), TRUE);
-    gtk_label_set_wrap_mode(GTK_LABEL(body_label), PANGO_WRAP_WORD_CHAR);
-    gtk_label_set_max_width_chars(GTK_LABEL(body_label), 45);
-
-    gtk_box_append(GTK_BOX(content_box), summary_label);
-    gtk_box_append(GTK_BOX(content_box), body_label);
-
-    GtkWidget *scrolled_window = gtk_scrolled_window_new();
-    gtk_widget_add_css_class(scrolled_window, "expanded-scrolled-window");
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(scrolled_window), FALSE);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled_window), content_box);
-    
-    return scrolled_window;
-}
-
 static gboolean unlock_transition_callback(gpointer user_data G_GNUC_UNUSED) {
     is_transitioning = FALSE;
     return G_SOURCE_REMOVE;
@@ -171,7 +127,7 @@ static void show_next_notification() {
     island_widget_transition_to_pill_child(island, pill_summary);
     
     if (is_expanded) {
-        GtkWidget *expanded_widget = create_expanded_content_widget(current_notification_data);
+        GtkWidget *expanded_widget = notification_widget_create_expanded(current_notification_data, dismiss_or_transition);
         island_widget_transition_to_expanded_child(island, expanded_widget);
     } else {
         GtkWidget *placeholder = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -179,7 +135,12 @@ static void show_next_notification() {
     }
     
     g_timeout_add(ANIMATION_FINISH_DELAY_MS, unlock_transition_callback, NULL);
-    current_timeout_id = g_timeout_add(is_expanded ? (EXPANDED_STATE_DURATION_S * 1000) : PILL_STATE_DURATION_MS, dismiss_or_transition, NULL);
+
+    // --- NEW: Keep it open infinitely if expanded with actions ---
+    gboolean keep_open = is_expanded && notification_has_actions(current_notification_data);
+    if (!keep_open) {
+        current_timeout_id = g_timeout_add(is_expanded ? (EXPANDED_STATE_DURATION_S * 1000) : PILL_STATE_DURATION_MS, dismiss_or_transition, NULL);
+    }
 }
 
 static void update_privacy_ui_state() {
@@ -252,7 +213,6 @@ static gboolean outro_finished_callback(gpointer user_data G_GNUC_UNUSED) {
 }
 
 static gboolean dismiss_or_transition(gpointer user_data G_GNUC_UNUSED) {
-    // --- THE FIX 1: Safely reschedule if an animation is actively playing ---
     if (is_transitioning) {
         current_timeout_id = g_timeout_add(100, dismiss_or_transition, NULL);
         return G_SOURCE_REMOVE;
@@ -285,7 +245,6 @@ static gboolean dismiss_or_transition(gpointer user_data G_GNUC_UNUSED) {
         }
         
         if (privacy_widget_has_active_apps()) {
-            // Force the privacy pill to explicitly rebuild and claim the island back from the OSD
             is_privacy_currently_showing = FALSE; 
             update_privacy_ui_state();
             g_timeout_add(ANIMATION_FINISH_DELAY_MS, outro_finished_callback, NULL);
@@ -300,7 +259,7 @@ static gboolean dismiss_or_transition(gpointer user_data G_GNUC_UNUSED) {
 
 static gboolean populate_expanded_content_cb(gpointer user_data G_GNUC_UNUSED) {
     if (current_notification_data) {
-        GtkWidget *expanded_widget = create_expanded_content_widget(current_notification_data);
+        GtkWidget *expanded_widget = notification_widget_create_expanded(current_notification_data, dismiss_or_transition);
         island_widget_transition_to_expanded_child(island, expanded_widget);
     } else if (privacy_widget_has_active_apps()) {
         GtkWidget *expanded_widget = privacy_widget_create_dashboard();
@@ -322,11 +281,16 @@ static void on_island_clicked(GtkGestureClick *g G_GNUC_UNUSED, int n G_GNUC_UNU
         g_timeout_add(50, populate_expanded_content_cb, NULL);
         
         g_timeout_add(ANIMATION_FINISH_DELAY_MS, unlock_transition_callback, NULL);
+        
+        // --- NEW: Disable timeout if actions exist ---
         if (current_notification_data) {
-            current_timeout_id = g_timeout_add_seconds(EXPANDED_STATE_DURATION_S, dismiss_or_transition, NULL);
+            if (!notification_has_actions(current_notification_data)) {
+                current_timeout_id = g_timeout_add_seconds(EXPANDED_STATE_DURATION_S, dismiss_or_transition, NULL);
+            }
         }
     } 
     else {
+        // If already expanded, clicking it will dismiss it
         dismiss_or_transition(NULL);
     }
 }
@@ -347,7 +311,10 @@ static void on_island_enter(GtkEventControllerMotion *controller G_GNUC_UNUSED, 
 
 static void on_island_leave(GtkEventControllerMotion *controller G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
     if (is_expanded && current_timeout_id == 0 && current_notification_data) {
-        current_timeout_id = g_timeout_add_seconds(EXPANDED_STATE_DURATION_S, dismiss_or_transition, NULL);
+        // --- NEW: Don't restart the timeout if we have actions ---
+        if (!notification_has_actions(current_notification_data)) {
+            current_timeout_id = g_timeout_add_seconds(EXPANDED_STATE_DURATION_S, dismiss_or_transition, NULL);
+        }
     }
 }
 
@@ -407,7 +374,7 @@ static void handle_show_osd(GDBusMethodInvocation *inv, const gchar *icon, doubl
     } else {
         is_busy = TRUE;
         is_osd_active = TRUE;
-        is_privacy_currently_showing = FALSE; // THE FIX 2: Relinquish privacy claim so it re-renders after OSD
+        is_privacy_currently_showing = FALSE; 
         if (main_window == NULL) create_main_window();
 
         GtkWidget *pill = create_osd_pill(icon, level);
@@ -438,10 +405,13 @@ static void dbus_method_dispatcher(GDBusConnection *c, const gchar *s, const gch
     (void)c; (void)s; (void)o; (void)i; (void)ud;
     if (g_strcmp0(m, "ShowNotification") == 0) {
         NotificationData *data = g_new0(NotificationData, 1);
-        g_variant_get(p, "(&s&s&s)", &data->icon, &data->summary, &data->body);
+        g_variant_get(p, "(u&s&s&s^a&s)", &data->id, &data->icon, &data->summary, &data->body, &data->actions);
+        
         data->icon = g_strdup(data->icon);
         data->summary = g_strdup(data->summary);
         data->body = g_strdup(data->body);
+        data->actions = g_strdupv(data->actions);
+        
         handle_show_notification(inv, data);
     } else if (g_strcmp0(m, "SetPrivacyStatus") == 0) {
         const gchar *json_payload;
@@ -479,13 +449,9 @@ void create_main_window() {
     main_window = GTK_WINDOW(gtk_application_window_new(app));
     g_signal_connect(main_window, "destroy", G_CALLBACK(on_window_destroyed), NULL);
     
-    // THE FIX: Force the root GTK window to explicitly permit shrinking on Wayland.
-    // Setting 1x1 ensures GTK tightly wraps the island and releases the dead space completely.
     gtk_window_set_default_size(main_window, 1, 1);
     
     island = ISLAND_WIDGET(island_widget_new());
-    
-    // Attach directly to the window (no wrapper box padding)
     gtk_window_set_child(main_window, GTK_WIDGET(island));
 
     GtkGesture *click = gtk_gesture_click_new();
@@ -514,9 +480,11 @@ static void on_bus_acquired(GDBusConnection *c, const gchar *n G_GNUC_UNUSED, gp
         "<node>"
         "  <interface name='com.meismeric.auranotify.UI'>"
         "    <method name='ShowNotification'>"
+        "      <arg type='u' name='id' direction='in'/>"
         "      <arg type='s' name='icon' direction='in'/>"
         "      <arg type='s' name='summary' direction='in'/>"
         "      <arg type='s' name='body' direction='in'/>"
+        "      <arg type='as' name='actions' direction='in'/>"
         "    </method>"
         "    <method name='SetPrivacyStatus'>"
         "      <arg type='s' name='payload' direction='in'/>"
@@ -628,6 +596,7 @@ static void on_app_startup(GApplication *a, gpointer ud G_GNUC_UNUSED) {
         ".privacy-kill-btn { color: @destructive; font-weight: bold; }"
         ".privacy-icon-mic { color: #8ff0a4; }"
         ".privacy-icon-cam { color: #ff7b63; }";
+        
         
     GtkCssProvider *internal_p = gtk_css_provider_new();
     gtk_css_provider_load_from_string(internal_p, internal_css);

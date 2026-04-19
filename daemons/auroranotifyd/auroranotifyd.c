@@ -16,7 +16,6 @@ static gboolean is_center_visible = FALSE;
 
 #define DB_NAME "notifications_v2.db"
 
-// --- NEW: Persistence Logic for DND ---
 static void save_dnd_state() {
     g_autofree gchar *dir = g_build_filename(g_get_user_config_dir(), "aurora-shell", NULL);
     g_mkdir_with_parents(dir, 0755); 
@@ -39,7 +38,6 @@ static void load_dnd_state() {
     }
     g_key_file_free(kf);
 }
-// --------------------------------------
 
 static void log_notification_to_db(const char *app, const char *summary, const char *body, const char *icon) {
     sqlite3 *db;
@@ -80,7 +78,6 @@ static void log_notification_to_db(const char *app, const char *summary, const c
     g_free(path);
 }
 
-// --- DBUS LOGIC START ---
 static const gchar introspection_xml[] =
     "<node>"
     "  <interface name='org.freedesktop.Notifications'>"
@@ -95,6 +92,10 @@ static const gchar introspection_xml[] =
     "      <arg type='i' name='expire_timeout' direction='in'/>"
     "      <arg type='u' name='id' direction='out'/>"
     "    </method>"
+    "    <method name='InvokeAction'>"
+    "      <arg type='u' name='id' direction='in'/>"
+    "      <arg type='s' name='action_key' direction='in'/>"
+    "    </method>"
     "    <method name='SetCenterVisible'><arg type='b' name='visible' direction='in'/></method>"
     "    <method name='SetDND'><arg type='b' name='active' direction='in'/></method>"
     "    <method name='ToggleDND'></method>"
@@ -103,6 +104,10 @@ static const gchar introspection_xml[] =
     "    <method name='CloseNotification'><arg type='u' name='id' direction='in'/></method>"
     "    <method name='GetServerInformation'><arg type='s' name='name' direction='out'/><arg type='s' name='vendor' direction='out'/><arg type='s' name='version' direction='out'/><arg type='s' name='spec_version' direction='out'/></method>"
     "    <signal name='DNDStateChanged'><arg type='b' name='is_active'/></signal>"
+    "    <signal name='ActionInvoked'>"
+    "      <arg type='u' name='id'/>"
+    "      <arg type='s' name='action_key'/>"
+    "    </signal>"
     "  </interface>"
     "</node>";
 
@@ -117,18 +122,33 @@ static void handle_method_call(GDBusConnection *connection, const gchar *sender,
     
     if (g_strcmp0(method_name, "Notify") == 0) {
         gchar *app_name, *app_icon, *summary, *body;
-        g_variant_get(parameters, "(su&s&s&sas@a{sv}i)", &app_name, NULL, &app_icon, &summary, &body, NULL, NULL, NULL);
+        gchar **actions = NULL;
+        guint32 replaces_id;
+        
+        g_variant_get(parameters, "(su&s&s&s^a&s@a{sv}i)", &app_name, &replaces_id, &app_icon, &summary, &body, &actions, NULL, NULL);
+        guint32 id = replaces_id ? replaces_id : g_random_int();
 
         log_notification_to_db(app_name, summary, body, app_icon);
 
         if (!is_center_visible && !is_dnd_active) {
-            g_dbus_connection_call(connection, UI_BUS_NAME, UI_OBJECT_PATH, UI_INTERFACE_NAME, "ShowNotification", g_variant_new("(sss)", app_icon, summary, body), NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+            g_dbus_connection_call(connection, UI_BUS_NAME, UI_OBJECT_PATH, UI_INTERFACE_NAME, "ShowNotification", 
+                g_variant_new("(usss^as)", id, app_icon, summary, body, actions), 
+                NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
         }
         
         g_dbus_connection_call(connection, CENTER_BUS_NAME, CENTER_OBJECT_PATH, CENTER_INTERFACE_NAME, "AddNotification", g_variant_new("(ssss)", app_icon, app_name, summary, body), NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
         
-        g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", g_random_int()));
+        g_free(actions);
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", id));
     } 
+    else if (g_strcmp0(method_name, "InvokeAction") == 0) {
+        guint32 id;
+        gchar *action_key;
+        g_variant_get(parameters, "(us)", &id, &action_key);
+        g_dbus_connection_emit_signal(connection, NULL, "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "ActionInvoked", g_variant_new("(us)", id, action_key), NULL);
+        g_free(action_key);
+        g_dbus_method_invocation_return_value(invocation, NULL);
+    }
     else if (g_strcmp0(method_name, "SetDND") == 0) {
         gboolean active;
         g_variant_get(parameters, "(b)", &active);
@@ -153,7 +173,7 @@ static void handle_method_call(GDBusConnection *connection, const gchar *sender,
         g_dbus_method_invocation_return_value(invocation, NULL);
     } 
     else if (g_strcmp0(method_name, "GetCapabilities") == 0) {
-        const char *capabilities[] = { "body", NULL };
+        const char *capabilities[] = { "body", "actions", NULL };
         g_dbus_method_invocation_return_value(invocation, g_variant_new("(^as)", capabilities));
     }
     else if (g_strcmp0(method_name, "GetServerInformation") == 0) {
@@ -170,7 +190,7 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name, gpoi
     GDBusNodeInfo *node_info = g_dbus_node_info_new_for_xml(introspection_xml, NULL);
     g_dbus_connection_register_object(connection, "/org/freedesktop/Notifications", node_info->interfaces[0], &interface_vtable, NULL, NULL, NULL);
     g_dbus_node_info_unref(node_info);
-    g_print("Daemon: Service running with V2 Schema (notifications_v2.db).\n");
+    g_print("Daemon: Service running with Action Support.\n");
 }
 
 int main(void) {

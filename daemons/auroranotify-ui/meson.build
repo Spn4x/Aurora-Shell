@@ -10,6 +10,7 @@ executable('auroranotify-ui',
   'auroranotify-ui.c',
   'island_widget.c',
   'privacy_widget.c',
+  'notification_widget.c',
   c_args: [datadir_c_arg],
   dependencies: [
     gtk_dep,

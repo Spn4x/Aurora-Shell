@@ -28,8 +28,8 @@ static gboolean has_announced_privacy = FALSE;
 static GtkWidget *pill_label_a = NULL;
 static GtkWidget *pill_label_b = NULL;
 static GtkWidget *pill_dot = NULL;
-static GtkWidget *dash_list_box = NULL;
-static GtkWidget *dash_kill_all_btn = NULL;
+
+static GtkWidget *dash_root_box = NULL;
 
 static PrivacyStateChangedCb on_state_changed = NULL;
 
@@ -46,11 +46,11 @@ static void free_privacy_app(gpointer data) {
 
 static void clear_ui_refs() {
     pill_label_a = NULL; pill_label_b = NULL; pill_dot = NULL;
-    dash_list_box = NULL; dash_kill_all_btn = NULL; privacy_stack = NULL;
+    dash_root_box = NULL; privacy_stack = NULL;
 }
 
 static void on_pill_destroyed(GtkWidget *w, gpointer d) { (void)w; (void)d; clear_ui_refs(); }
-static void on_dash_destroyed(GtkWidget *w, gpointer d) { (void)w; (void)d; dash_list_box = NULL; dash_kill_all_btn = NULL; }
+static void on_dash_destroyed(GtkWidget *w, gpointer d) { (void)w; (void)d; dash_root_box = NULL; }
 
 void privacy_widget_cleanup(void) {
     g_list_free_full(privacy_apps, free_privacy_app);
@@ -62,7 +62,7 @@ void privacy_widget_cleanup(void) {
 }
 
 gboolean privacy_widget_has_active_apps(void) { return g_list_length(privacy_apps) > 0; }
-gboolean privacy_widget_has_dashboard(void) { return dash_list_box != NULL; }
+gboolean privacy_widget_has_dashboard(void) { return dash_root_box != NULL; }
 
 static void notify_state_changed() {
     if (on_state_changed) on_state_changed();
@@ -106,9 +106,7 @@ static void execute_smart_kill(guint32 pid, const char *name) {
             if (parts && parts[0]) cmd = g_strdup_printf("pkill -i '%s'", parts[0]);
             g_strfreev(parts);
         }
-        if (cmd) {
-            system(cmd);
-        }
+        if (cmd) system(cmd);
     }
 }
 
@@ -148,10 +146,7 @@ static void on_privacy_kill_all_clicked(GtkButton *btn, gpointer user_data) {
 
 static gboolean on_privacy_cycle_tick(gpointer data) {
     (void)data;
-    if (!privacy_stack) {
-        privacy_cycle_id = 0;
-        return G_SOURCE_REMOVE;
-    }
+    if (!privacy_stack) { privacy_cycle_id = 0; return G_SOURCE_REMOVE; }
     privacy_showing_view_a = FALSE;
     gtk_stack_set_visible_child_name(GTK_STACK(privacy_stack), "view_b");
     privacy_cycle_id = 0; 
@@ -167,7 +162,6 @@ void privacy_widget_update_from_json(const gchar *json_payload) {
     JsonArray *array = json_node_get_array(root);
     GList *raw_apps = NULL;
     
-    // 1. Gather absolute source of truth from PipeWire
     for (guint i = 0; i < json_array_get_length(array); i++) {
         JsonObject *obj = json_array_get_object_element(array, i);
         RawApp *ra = g_new0(RawApp, 1);
@@ -177,18 +171,13 @@ void privacy_widget_update_from_json(const gchar *json_payload) {
         raw_apps = g_list_append(raw_apps, ra);
     }
     
-    // 2. TEMPORARY IGNORES: Clean up ignores for apps that closed their streams
     GList *lp = ignored_pids;
     while (lp != NULL) {
         guint32 ig_pid = GPOINTER_TO_UINT(lp->data);
         gboolean still_running = FALSE;
-        for (GList *r = raw_apps; r != NULL; r = r->next) {
-            if (((RawApp*)r->data)->pid == ig_pid) { still_running = TRUE; break; }
-        }
+        for (GList *r = raw_apps; r != NULL; r = r->next) { if (((RawApp*)r->data)->pid == ig_pid) { still_running = TRUE; break; } }
         GList *next = lp->next;
-        if (!still_running) {
-            ignored_pids = g_list_delete_link(ignored_pids, lp);
-        }
+        if (!still_running) ignored_pids = g_list_delete_link(ignored_pids, lp);
         lp = next;
     }
 
@@ -201,18 +190,13 @@ void privacy_widget_update_from_json(const gchar *json_payload) {
             if (ra->pid == 0 && g_strcmp0(ra->name, ig_name) == 0) { still_running = TRUE; break; }
         }
         GList *next = ln->next;
-        if (!still_running) {
-            g_free(ln->data);
-            ignored_names = g_list_delete_link(ignored_names, ln);
-        }
+        if (!still_running) { g_free(ln->data); ignored_names = g_list_delete_link(ignored_names, ln); }
         ln = next;
     }
 
-    // 3. Build filtered visual list
     GList *new_apps = NULL;
     for (GList *r = raw_apps; r != NULL; r = r->next) {
         RawApp *ra = (RawApp*)r->data;
-        
         if (ra->pid > 0 && g_list_find(ignored_pids, GUINT_TO_POINTER(ra->pid)) != NULL) continue;
         if (ra->pid == 0 && g_list_find_custom(ignored_names, ra->name, (GCompareFunc)g_strcmp0) != NULL) continue;
         
@@ -228,37 +212,30 @@ void privacy_widget_update_from_json(const gchar *json_payload) {
             if (ra->type == 1) existing->uses_cam = TRUE;
         } else {
             PrivacyApp *p = g_new0(PrivacyApp, 1);
-            p->pid = ra->pid; 
-            p->name = g_strdup(ra->name);
+            p->pid = ra->pid; p->name = g_strdup(ra->name);
             if (ra->type == 0) p->uses_mic = TRUE;
             if (ra->type == 1) p->uses_cam = TRUE;
             new_apps = g_list_append(new_apps, p);
         }
     }
 
-    // Free temporary raw list
     for (GList *r = raw_apps; r != NULL; r = r->next) {
         RawApp *ra = (RawApp*)r->data;
-        g_free(ra->name);
-        g_free(ra);
+        g_free(ra->name); g_free(ra);
     }
     g_list_free(raw_apps);
     
-    // 4. Check for changes
     gboolean changed = FALSE;
     gboolean app_added = FALSE;
 
-    if (g_list_length(new_apps) != g_list_length(privacy_apps)) {
-        changed = TRUE;
-    } else {
+    if (g_list_length(new_apps) != g_list_length(privacy_apps)) { changed = TRUE; } 
+    else {
         for (GList *l = new_apps; l != NULL; l = l->next) {
             PrivacyApp *n = (PrivacyApp*)l->data;
             gboolean found_match = FALSE;
             for (GList *o = privacy_apps; o != NULL; o = o->next) {
                 PrivacyApp *old = (PrivacyApp*)o->data;
-                if (n->pid == old->pid && g_strcmp0(n->name, old->name) == 0 && n->uses_mic == old->uses_mic && n->uses_cam == old->uses_cam) {
-                    found_match = TRUE; break;
-                }
+                if (n->pid == old->pid && g_strcmp0(n->name, old->name) == 0 && n->uses_mic == old->uses_mic && n->uses_cam == old->uses_cam) { found_match = TRUE; break; }
             }
             if (!found_match) { changed = TRUE; break; }
         }
@@ -270,9 +247,7 @@ void privacy_widget_update_from_json(const gchar *json_payload) {
             gboolean found = FALSE;
             for (GList *o = privacy_apps; o != NULL; o = o->next) {
                 PrivacyApp *old = o->data;
-                if ((n->pid > 0 && n->pid == old->pid) || (n->pid == 0 && g_strcmp0(n->name, old->name) == 0)) { 
-                    found = TRUE; break; 
-                }
+                if ((n->pid > 0 && n->pid == old->pid) || (n->pid == 0 && g_strcmp0(n->name, old->name) == 0)) { found = TRUE; break; }
             }
             if (!found) { app_added = TRUE; break; }
         }
@@ -280,9 +255,8 @@ void privacy_widget_update_from_json(const gchar *json_payload) {
         g_list_free_full(privacy_apps, free_privacy_app);
         privacy_apps = new_apps; 
         
-        if (privacy_apps == NULL) {
-            has_announced_privacy = FALSE;
-        } else if (app_added) {
+        if (privacy_apps == NULL) { has_announced_privacy = FALSE; } 
+        else if (app_added) {
             if (privacy_stack) {
                 privacy_showing_view_a = TRUE;
                 gtk_stack_set_visible_child_name(GTK_STACK(privacy_stack), "view_a");
@@ -292,21 +266,34 @@ void privacy_widget_update_from_json(const gchar *json_payload) {
             has_announced_privacy = TRUE;
         }
         notify_state_changed();
-    } else {
-        g_list_free_full(new_apps, free_privacy_app); 
+    } else { g_list_free_full(new_apps, free_privacy_app); }
+}
+
+static gboolean reveal_pill_cb(gpointer user_data) {
+    GtkWidget **weak_ptr = (GtkWidget **)user_data;
+    if (*weak_ptr) {
+        gtk_widget_remove_css_class(*weak_ptr, "pill-hidden");
+        g_object_remove_weak_pointer(G_OBJECT(*weak_ptr), (gpointer *)weak_ptr);
     }
+    g_free(weak_ptr);
+    return G_SOURCE_REMOVE;
+}
+
+static void schedule_pill_reveal(GtkWidget *btn, guint delay_ms) {
+    GtkWidget **weak_ptr = g_new(GtkWidget *, 1);
+    *weak_ptr = btn;
+    g_object_add_weak_pointer(G_OBJECT(btn), (gpointer *)weak_ptr);
+    g_timeout_add(delay_ms, reveal_pill_cb, weak_ptr);
 }
 
 void privacy_widget_refresh_ui(void) {
     gint app_count = g_list_length(privacy_apps);
     gboolean has_mic = FALSE, has_cam = FALSE;
-    int killable_count = 0;
 
     for (GList *l = privacy_apps; l != NULL; l = l->next) {
         PrivacyApp *p = (PrivacyApp*)l->data;
         if (p->uses_mic) has_mic = TRUE;
         if (p->uses_cam) has_cam = TRUE;
-        killable_count++;
     }
 
     if (pill_label_a) {
@@ -328,57 +315,143 @@ void privacy_widget_refresh_ui(void) {
         gtk_label_set_text(GTK_LABEL(pill_label_b), text_b);
     }
 
-    if (dash_list_box) {
+    if (dash_root_box) {
         GtkWidget *child;
-        while ((child = gtk_widget_get_first_child(dash_list_box))) gtk_box_remove(GTK_BOX(dash_list_box), child);
+        while ((child = gtk_widget_get_first_child(dash_root_box))) {
+            gtk_box_remove(GTK_BOX(dash_root_box), child);
+        }
 
-        for (GList *l = privacy_apps; l != NULL; l = l->next) {
-            PrivacyApp *p = (PrivacyApp*)l->data;
-            
-            GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-            gtk_widget_add_css_class(row, "privacy-row");
-            
-            GtkWidget *name = gtk_label_new(p->name);
-            gtk_widget_set_hexpand(name, TRUE);
-            gtk_widget_set_halign(name, GTK_ALIGN_START);
-            gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
-            gtk_box_append(GTK_BOX(row), name);
-            
-            if (p->uses_mic) {
-                GtkWidget *mic = gtk_image_new_from_icon_name("audio-input-microphone-symbolic");
-                gtk_widget_add_css_class(mic, "privacy-icon-mic");
-                gtk_box_append(GTK_BOX(row), mic);
-            }
-            if (p->uses_cam) {
-                GtkWidget *cam = gtk_image_new_from_icon_name("camera-web-symbolic");
-                gtk_widget_add_css_class(cam, "privacy-icon-cam");
-                gtk_box_append(GTK_BOX(row), cam);
-            }
+        if (app_count == 1) {
+            PrivacyApp *p = (PrivacyApp*)privacy_apps->data;
 
-            GtkWidget *btn_ignore = gtk_button_new_with_label("Ignore");
-            gtk_widget_add_css_class(btn_ignore, "flat");
-            gtk_widget_add_css_class(btn_ignore, "privacy-action-btn");
-            g_object_set_data(G_OBJECT(btn_ignore), "app-pid", GUINT_TO_POINTER(p->pid));
-            g_object_set_data_full(G_OBJECT(btn_ignore), "app-name", g_strdup(p->name), g_free);
-            g_signal_connect(btn_ignore, "clicked", G_CALLBACK(on_privacy_ignore_clicked), NULL);
-            gtk_box_append(GTK_BOX(row), btn_ignore);
+            // --- 1. THE BIG ICON ---
+            const char *icon_name = "video-display-symbolic";
+            if (p->uses_mic && p->uses_cam) icon_name = "camera-web-symbolic";
+            else if (p->uses_mic) icon_name = "audio-input-microphone-symbolic";
+            else if (p->uses_cam) icon_name = "camera-web-symbolic";
 
-            GtkWidget *btn_kill = gtk_button_new_with_label("Kill");
-            gtk_widget_add_css_class(btn_kill, "flat");
-            gtk_widget_add_css_class(btn_kill, "privacy-action-btn");
-            gtk_widget_add_css_class(btn_kill, "privacy-kill-btn");
+            GtkWidget *icon = gtk_image_new_from_icon_name(icon_name);
+            gtk_image_set_pixel_size(GTK_IMAGE(icon), 24); // Shrunk to look cleaner
+            gtk_widget_set_margin_bottom(icon, 6);
+            gtk_widget_set_halign(icon, GTK_ALIGN_CENTER);
+
+            if (p->uses_mic && p->uses_cam) gtk_widget_add_css_class(icon, "privacy-icon-cam");
+            else if (p->uses_mic) gtk_widget_add_css_class(icon, "privacy-icon-mic");
+            else if (p->uses_cam) gtk_widget_add_css_class(icon, "privacy-icon-cam");
+
+            gtk_box_append(GTK_BOX(dash_root_box), icon);
+
+            // --- 2. THE TEXT ---
+            g_autofree gchar *title_text = NULL;
+            if (p->uses_mic && p->uses_cam) title_text = g_strdup_printf("%s is using your mic & camera", p->name);
+            else if (p->uses_mic) title_text = g_strdup_printf("%s is using your microphone", p->name);
+            else title_text = g_strdup_printf("%s is watching your screen", p->name);
+
+            GtkWidget *title = gtk_label_new(title_text);
+            gtk_widget_add_css_class(title, "summary");
+            gtk_widget_set_halign(title, GTK_ALIGN_CENTER);
+            gtk_label_set_wrap(GTK_LABEL(title), TRUE);
+            gtk_box_append(GTK_BOX(dash_root_box), title);
+
+            GtkWidget *actions_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+            gtk_widget_set_margin_top(actions_box, 10);
+
+            // --- 3. THE PILLS ---
+            g_autofree gchar *kill_label = g_strdup_printf("Kill %s", p->name);
+            GtkWidget *btn_kill = gtk_button_new_with_label(kill_label);
+            gtk_widget_add_css_class(btn_kill, "action-pill");
+            gtk_widget_add_css_class(btn_kill, "privacy-kill-pill");
+            gtk_widget_add_css_class(btn_kill, "pill-hidden");
             g_object_set_data(G_OBJECT(btn_kill), "app-pid", GUINT_TO_POINTER(p->pid));
             g_object_set_data_full(G_OBJECT(btn_kill), "app-name", g_strdup(p->name), g_free);
             g_signal_connect(btn_kill, "clicked", G_CALLBACK(on_privacy_kill_clicked), NULL);
-            gtk_box_append(GTK_BOX(row), btn_kill);
+            gtk_box_append(GTK_BOX(actions_box), btn_kill);
             
-            gtk_box_append(GTK_BOX(dash_list_box), row);
-        }
-    }
+            schedule_pill_reveal(btn_kill, 450);
 
-    if (dash_kill_all_btn) {
-        gtk_widget_set_visible(dash_kill_all_btn, killable_count > 1);
-        gtk_widget_set_sensitive(dash_kill_all_btn, killable_count > 0);
+            GtkWidget *btn_ignore = gtk_button_new_with_label("Ignore");
+            gtk_widget_add_css_class(btn_ignore, "action-pill");
+            gtk_widget_add_css_class(btn_ignore, "pill-hidden");
+            g_object_set_data(G_OBJECT(btn_ignore), "app-pid", GUINT_TO_POINTER(p->pid));
+            g_object_set_data_full(G_OBJECT(btn_ignore), "app-name", g_strdup(p->name), g_free);
+            g_signal_connect(btn_ignore, "clicked", G_CALLBACK(on_privacy_ignore_clicked), NULL);
+            gtk_box_append(GTK_BOX(actions_box), btn_ignore);
+            
+            schedule_pill_reveal(btn_ignore, 525);
+
+            gtk_box_append(GTK_BOX(dash_root_box), actions_box);
+
+        } else if (app_count > 1) {
+            // --- 1. THE BIG ICON (SHIELD) ---
+            GtkWidget *icon = gtk_image_new_from_icon_name("security-high-symbolic");
+            gtk_image_set_pixel_size(GTK_IMAGE(icon), 24); // Shrunk
+            gtk_widget_set_margin_bottom(icon, 6);
+            gtk_widget_set_halign(icon, GTK_ALIGN_CENTER);
+            gtk_box_append(GTK_BOX(dash_root_box), icon);
+
+            // --- 2. THE TEXT ---
+            g_autofree gchar *title_text = g_strdup_printf("%d Apps Active", app_count);
+            GtkWidget *title = gtk_label_new(title_text);
+            gtk_widget_add_css_class(title, "summary");
+            gtk_widget_set_halign(title, GTK_ALIGN_CENTER);
+            gtk_box_append(GTK_BOX(dash_root_box), title);
+
+            GtkWidget *list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+            gtk_widget_set_margin_top(list_box, 10);
+
+            for (GList *l = privacy_apps; l != NULL; l = l->next) {
+                PrivacyApp *p = (PrivacyApp*)l->data;
+                GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+                gtk_widget_add_css_class(row, "privacy-row");
+                
+                GtkWidget *name = gtk_label_new(p->name);
+                gtk_widget_set_hexpand(name, TRUE);
+                gtk_widget_set_halign(name, GTK_ALIGN_START);
+                gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
+                gtk_box_append(GTK_BOX(row), name);
+                
+                if (p->uses_mic) {
+                    GtkWidget *mic = gtk_image_new_from_icon_name("audio-input-microphone-symbolic");
+                    gtk_widget_add_css_class(mic, "privacy-icon-mic");
+                    gtk_box_append(GTK_BOX(row), mic);
+                }
+                if (p->uses_cam) {
+                    GtkWidget *cam = gtk_image_new_from_icon_name("camera-web-symbolic");
+                    gtk_widget_add_css_class(cam, "privacy-icon-cam");
+                    gtk_box_append(GTK_BOX(row), cam);
+                }
+
+                GtkWidget *btn_ignore = gtk_button_new_with_label("Ignore");
+                gtk_widget_add_css_class(btn_ignore, "flat");
+                gtk_widget_add_css_class(btn_ignore, "privacy-action-btn");
+                g_object_set_data(G_OBJECT(btn_ignore), "app-pid", GUINT_TO_POINTER(p->pid));
+                g_object_set_data_full(G_OBJECT(btn_ignore), "app-name", g_strdup(p->name), g_free);
+                g_signal_connect(btn_ignore, "clicked", G_CALLBACK(on_privacy_ignore_clicked), NULL);
+                gtk_box_append(GTK_BOX(row), btn_ignore);
+
+                GtkWidget *btn_kill = gtk_button_new_with_label("Kill");
+                gtk_widget_add_css_class(btn_kill, "flat");
+                gtk_widget_add_css_class(btn_kill, "privacy-action-btn");
+                gtk_widget_add_css_class(btn_kill, "privacy-kill-btn");
+                g_object_set_data(G_OBJECT(btn_kill), "app-pid", GUINT_TO_POINTER(p->pid));
+                g_object_set_data_full(G_OBJECT(btn_kill), "app-name", g_strdup(p->name), g_free);
+                g_signal_connect(btn_kill, "clicked", G_CALLBACK(on_privacy_kill_clicked), NULL);
+                gtk_box_append(GTK_BOX(row), btn_kill);
+
+                gtk_box_append(GTK_BOX(list_box), row);
+            }
+            gtk_box_append(GTK_BOX(dash_root_box), list_box);
+
+            GtkWidget *btn_kill_all = gtk_button_new_with_label("Kill All");
+            gtk_widget_add_css_class(btn_kill_all, "action-pill");
+            gtk_widget_add_css_class(btn_kill_all, "privacy-kill-pill");
+            gtk_widget_add_css_class(btn_kill_all, "pill-hidden");
+            gtk_widget_set_margin_top(btn_kill_all, 6);
+            g_signal_connect(btn_kill_all, "clicked", G_CALLBACK(on_privacy_kill_all_clicked), NULL);
+            gtk_box_append(GTK_BOX(dash_root_box), btn_kill_all);
+            
+            schedule_pill_reveal(btn_kill_all, 450);
+        }
     }
 }
 
@@ -395,7 +468,6 @@ GtkWidget* privacy_widget_create_pill(void) {
     gtk_stack_set_transition_type(GTK_STACK(privacy_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_UP_DOWN);
     gtk_stack_set_transition_duration(GTK_STACK(privacy_stack), 400);
 
-    // View A - Text Announcement only
     GtkWidget *view_a = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_set_halign(view_a, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(view_a, GTK_ALIGN_CENTER);
@@ -404,7 +476,6 @@ GtkWidget* privacy_widget_create_pill(void) {
     gtk_widget_add_css_class(pill_label_a, "summary");
     gtk_box_append(GTK_BOX(view_a), pill_label_a);
     
-    // View B - Permanent Indicator
     GtkWidget *view_b = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_set_halign(view_b, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(view_b, GTK_ALIGN_CENTER);
@@ -447,34 +518,15 @@ GtkWidget* privacy_widget_create_dashboard(void) {
         privacy_cycle_id = 0;
     }
 
-    GtkWidget *container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    g_signal_connect(container, "destroy", G_CALLBACK(on_dash_destroyed), NULL);
+    dash_root_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     
-    GtkWidget *header_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    GtkWidget *title = gtk_label_new("Privacy Activity");
-    gtk_widget_add_css_class(title, "dim-label");
-    gtk_widget_set_halign(title, GTK_ALIGN_START);
-    gtk_widget_set_hexpand(title, TRUE);
-    gtk_box_append(GTK_BOX(header_box), title);
-
-    dash_kill_all_btn = gtk_button_new_with_label("Kill All");
-    gtk_widget_add_css_class(dash_kill_all_btn, "flat");
-    gtk_widget_add_css_class(dash_kill_all_btn, "privacy-kill-btn");
-    g_signal_connect(dash_kill_all_btn, "clicked", G_CALLBACK(on_privacy_kill_all_clicked), NULL);
-    gtk_box_append(GTK_BOX(header_box), dash_kill_all_btn);
+    // --- THE REAL WOBBLE FIX FOR PRIVACY ---
+    // Forces a consistent width. GTK will perfectly expand to this without wobbling.
+    gtk_widget_set_size_request(dash_root_box, 340, -1);
     
-    gtk_box_append(GTK_BOX(container), header_box);
-
-    GtkWidget *scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(scroll), TRUE);
-    gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(scroll), 220);
-    
-    dash_list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), dash_list_box);
-    gtk_box_append(GTK_BOX(container), scroll);
+    g_signal_connect(dash_root_box, "destroy", G_CALLBACK(on_dash_destroyed), NULL);
     
     privacy_widget_refresh_ui();
 
-    return container;
+    return dash_root_box;
 }
