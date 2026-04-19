@@ -54,26 +54,25 @@ static void on_action_clicked(GtkButton *btn, gpointer user_data) {
 
 GtkWidget* notification_widget_create_expanded(NotificationData *data, DismissFunc dismiss_cb) {
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    
-    // --- THE REAL WOBBLE FIX ---
-    // Instead of centering (which squishes content), we force a consistent width (340px).
-    // The GtkStack will smoothly animate to this exact width without wobbling.
-    gtk_widget_set_size_request(main_box, 340, -1);
     gtk_widget_set_valign(main_box, GTK_ALIGN_START);
-    // halign defaults to GTK_ALIGN_FILL, which is what we want!
 
     // 1. Text Section
     GtkWidget *summary = gtk_label_new(data->summary);
-    gtk_widget_set_halign(summary, GTK_ALIGN_START); // Back to left-aligned!
+    gtk_widget_set_halign(summary, GTK_ALIGN_START); 
     gtk_widget_add_css_class(summary, "summary");
     gtk_label_set_wrap(GTK_LABEL(summary), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(summary), PANGO_WRAP_WORD_CHAR);
     gtk_label_set_max_width_chars(GTK_LABEL(summary), 40);
 
     GtkWidget *body = gtk_label_new(data->body);
-    gtk_widget_set_halign(body, GTK_ALIGN_START); // Back to left-aligned!
+    gtk_widget_set_halign(body, GTK_ALIGN_START); 
+    gtk_label_set_justify(GTK_LABEL(body), GTK_JUSTIFY_LEFT);
     gtk_widget_add_css_class(body, "body");
     gtk_label_set_wrap(GTK_LABEL(body), TRUE);
-    gtk_label_set_max_width_chars(GTK_LABEL(body), 40);
+    gtk_label_set_wrap_mode(GTK_LABEL(body), PANGO_WRAP_WORD_CHAR); 
+    gtk_label_set_max_width_chars(GTK_LABEL(body), 40); 
+    gtk_label_set_lines(GTK_LABEL(body), 6); 
+    gtk_label_set_ellipsize(GTK_LABEL(body), PANGO_ELLIPSIZE_END);
 
     gtk_box_append(GTK_BOX(main_box), summary);
     gtk_box_append(GTK_BOX(main_box), body);
@@ -97,7 +96,8 @@ GtkWidget* notification_widget_create_expanded(NotificationData *data, DismissFu
             g_signal_connect(btn, "clicked", G_CALLBACK(on_action_clicked), NULL);
 
             gtk_box_append(GTK_BOX(actions_box), btn);
-            schedule_pill_reveal(btn, 450 + (count * 75));
+            // --- FIX: Adjusted for faster animation ---
+            schedule_pill_reveal(btn, 300 + (count * 50)); 
             count++;
         }
         gtk_box_append(GTK_BOX(main_box), actions_box);

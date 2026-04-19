@@ -21,12 +21,9 @@ static gboolean remove_widget_from_stack(gpointer user_data) {
     return G_SOURCE_REMOVE;
 }
 
-// THE FIX: Explicitly hide the expanded stack entirely to force GTK
-// to drop the layout request and shrink the Wayland surface.
 static gboolean hide_expanded_stack_cb(gpointer user_data) {
     IslandWidget *self = ISLAND_WIDGET(user_data);
     
-    // Only proceed if the user hasn't clicked expand again during the 450ms animation
     if (!self->is_expanded) {
         gtk_widget_set_visible(self->expanded_stack, FALSE);
         
@@ -44,7 +41,6 @@ void island_widget_set_expanded(IslandWidget *self, gboolean expanded) {
     self->is_expanded = expanded;
 
     if (self->is_expanded) {
-        // Unhide the stack before transitioning so it can animate smoothly
         gtk_widget_set_visible(self->expanded_stack, TRUE);
         gtk_stack_set_visible_child_name(GTK_STACK(self->content_stack), "expanded");
         gtk_widget_add_css_class(GTK_WIDGET(self), "expanded");
@@ -52,8 +48,8 @@ void island_widget_set_expanded(IslandWidget *self, gboolean expanded) {
         gtk_stack_set_visible_child_name(GTK_STACK(self->content_stack), "pill");
         gtk_widget_remove_css_class(GTK_WIDGET(self), "expanded");
 
-        // Wait for the crossfade (400ms) to finish, then obliterate the expanded state
-        g_timeout_add(450, hide_expanded_stack_cb, self);
+        // Adjusted timeout for the faster animation
+        g_timeout_add(300, hide_expanded_stack_cb, self);
     }
 }
 
@@ -70,7 +66,8 @@ void island_widget_transition_to_pill_child(IslandWidget *self, GtkWidget *child
     self->current_pill_child = center_box;
 
     if (old_child && old_child != center_box) {
-        g_timeout_add(450, remove_widget_from_stack, old_child);
+        // Adjusted timeout for the faster animation
+        g_timeout_add(300, remove_widget_from_stack, old_child);
     }
 }
 
@@ -85,7 +82,8 @@ void island_widget_transition_to_expanded_child(IslandWidget *self, GtkWidget *c
     }
 
     if (old_child && old_child != child) {
-        g_timeout_add(450, remove_widget_from_stack, old_child);
+        // Adjusted timeout for the faster animation
+        g_timeout_add(300, remove_widget_from_stack, old_child);
     }
 }
 
@@ -98,7 +96,6 @@ static void island_widget_init(IslandWidget *self) {
     gtk_widget_set_halign(GTK_WIDGET(self), GTK_ALIGN_CENTER);
     gtk_widget_set_valign(GTK_WIDGET(self), GTK_ALIGN_START);
 
-    // Provide padding around the island physically without a wrapper
     gtk_widget_set_margin_top(GTK_WIDGET(self), 10);
     gtk_widget_set_margin_bottom(GTK_WIDGET(self), 10);
     gtk_widget_set_margin_start(GTK_WIDGET(self), 10);
@@ -116,7 +113,8 @@ static void island_widget_init(IslandWidget *self) {
     gtk_stack_set_vhomogeneous(GTK_STACK(self->pill_stack), FALSE);
     gtk_stack_set_hhomogeneous(GTK_STACK(self->pill_stack), FALSE);
     gtk_stack_set_transition_type(GTK_STACK(self->pill_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_UP_DOWN);
-    gtk_stack_set_transition_duration(GTK_STACK(self->pill_stack), 400);
+    // --- FIX: Faster Animations ---
+    gtk_stack_set_transition_duration(GTK_STACK(self->pill_stack), 250);
     gtk_stack_set_interpolate_size(GTK_STACK(self->pill_stack), TRUE);
     gtk_stack_add_named(GTK_STACK(self->content_stack), self->pill_stack, "pill");
 
@@ -124,11 +122,11 @@ static void island_widget_init(IslandWidget *self) {
     gtk_stack_set_vhomogeneous(GTK_STACK(self->expanded_stack), FALSE);
     gtk_stack_set_hhomogeneous(GTK_STACK(self->expanded_stack), FALSE);
     gtk_stack_set_transition_type(GTK_STACK(self->expanded_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_UP_DOWN);
-    gtk_stack_set_transition_duration(GTK_STACK(self->expanded_stack), 400);
+    // --- FIX: Faster Animations ---
+    gtk_stack_set_transition_duration(GTK_STACK(self->expanded_stack), 250);
     gtk_stack_set_interpolate_size(GTK_STACK(self->expanded_stack), TRUE);
     gtk_stack_add_named(GTK_STACK(self->content_stack), self->expanded_stack, "expanded");
 
-    // Hide it immediately at startup to prevent ghost sizing
     gtk_widget_set_visible(self->expanded_stack, FALSE);
 
     GtkWidget *center_box = gtk_center_box_new();

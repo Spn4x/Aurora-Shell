@@ -25,6 +25,7 @@ static guint privacy_cycle_id = 0;
 static gboolean privacy_showing_view_a = TRUE;
 static gboolean has_announced_privacy = FALSE; 
 
+static GtkWidget *current_pill_overlay = NULL; // Tracks the active pill
 static GtkWidget *pill_label_a = NULL;
 static GtkWidget *pill_label_b = NULL;
 static GtkWidget *pill_dot = NULL;
@@ -44,13 +45,27 @@ static void free_privacy_app(gpointer data) {
     g_free(app);
 }
 
-static void clear_ui_refs() {
-    pill_label_a = NULL; pill_label_b = NULL; pill_dot = NULL;
-    dash_root_box = NULL; privacy_stack = NULL;
+// --- THE FIX: Safe Memory Cleanup ---
+// Only nullify the global pointers if the widget being destroyed 
+// is the currently active one. This prevents dangling pointers while 
+// also surviving GTK crossfade animations.
+static void on_pill_destroyed(GtkWidget *w, gpointer d) { 
+    (void)d; 
+    if (w == current_pill_overlay) {
+        pill_label_a = NULL; 
+        pill_label_b = NULL; 
+        pill_dot = NULL;
+        privacy_stack = NULL;
+        current_pill_overlay = NULL;
+    }
 }
 
-static void on_pill_destroyed(GtkWidget *w, gpointer d) { (void)w; (void)d; clear_ui_refs(); }
-static void on_dash_destroyed(GtkWidget *w, gpointer d) { (void)w; (void)d; dash_root_box = NULL; }
+static void on_dash_destroyed(GtkWidget *w, gpointer d) { 
+    (void)d; 
+    if (w == dash_root_box) {
+        dash_root_box = NULL; 
+    }
+}
 
 void privacy_widget_cleanup(void) {
     g_list_free_full(privacy_apps, free_privacy_app);
@@ -58,7 +73,9 @@ void privacy_widget_cleanup(void) {
     g_list_free_full(ignored_names, g_free);
     privacy_apps = NULL; ignored_pids = NULL; ignored_names = NULL;
     if (privacy_cycle_id > 0) { g_source_remove(privacy_cycle_id); privacy_cycle_id = 0; }
-    clear_ui_refs();
+    
+    pill_label_a = NULL; pill_label_b = NULL; pill_dot = NULL;
+    dash_root_box = NULL; privacy_stack = NULL; current_pill_overlay = NULL;
 }
 
 gboolean privacy_widget_has_active_apps(void) { return g_list_length(privacy_apps) > 0; }
@@ -324,14 +341,13 @@ void privacy_widget_refresh_ui(void) {
         if (app_count == 1) {
             PrivacyApp *p = (PrivacyApp*)privacy_apps->data;
 
-            // --- 1. THE BIG ICON ---
             const char *icon_name = "video-display-symbolic";
             if (p->uses_mic && p->uses_cam) icon_name = "camera-web-symbolic";
             else if (p->uses_mic) icon_name = "audio-input-microphone-symbolic";
             else if (p->uses_cam) icon_name = "camera-web-symbolic";
 
             GtkWidget *icon = gtk_image_new_from_icon_name(icon_name);
-            gtk_image_set_pixel_size(GTK_IMAGE(icon), 24); // Shrunk to look cleaner
+            gtk_image_set_pixel_size(GTK_IMAGE(icon), 24); 
             gtk_widget_set_margin_bottom(icon, 6);
             gtk_widget_set_halign(icon, GTK_ALIGN_CENTER);
 
@@ -341,7 +357,6 @@ void privacy_widget_refresh_ui(void) {
 
             gtk_box_append(GTK_BOX(dash_root_box), icon);
 
-            // --- 2. THE TEXT ---
             g_autofree gchar *title_text = NULL;
             if (p->uses_mic && p->uses_cam) title_text = g_strdup_printf("%s is using your mic & camera", p->name);
             else if (p->uses_mic) title_text = g_strdup_printf("%s is using your microphone", p->name);
@@ -356,7 +371,6 @@ void privacy_widget_refresh_ui(void) {
             GtkWidget *actions_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
             gtk_widget_set_margin_top(actions_box, 10);
 
-            // --- 3. THE PILLS ---
             g_autofree gchar *kill_label = g_strdup_printf("Kill %s", p->name);
             GtkWidget *btn_kill = gtk_button_new_with_label(kill_label);
             gtk_widget_add_css_class(btn_kill, "action-pill");
@@ -367,7 +381,7 @@ void privacy_widget_refresh_ui(void) {
             g_signal_connect(btn_kill, "clicked", G_CALLBACK(on_privacy_kill_clicked), NULL);
             gtk_box_append(GTK_BOX(actions_box), btn_kill);
             
-            schedule_pill_reveal(btn_kill, 450);
+            schedule_pill_reveal(btn_kill, 300);
 
             GtkWidget *btn_ignore = gtk_button_new_with_label("Ignore");
             gtk_widget_add_css_class(btn_ignore, "action-pill");
@@ -377,19 +391,17 @@ void privacy_widget_refresh_ui(void) {
             g_signal_connect(btn_ignore, "clicked", G_CALLBACK(on_privacy_ignore_clicked), NULL);
             gtk_box_append(GTK_BOX(actions_box), btn_ignore);
             
-            schedule_pill_reveal(btn_ignore, 525);
+            schedule_pill_reveal(btn_ignore, 375);
 
             gtk_box_append(GTK_BOX(dash_root_box), actions_box);
 
         } else if (app_count > 1) {
-            // --- 1. THE BIG ICON (SHIELD) ---
             GtkWidget *icon = gtk_image_new_from_icon_name("security-high-symbolic");
-            gtk_image_set_pixel_size(GTK_IMAGE(icon), 24); // Shrunk
+            gtk_image_set_pixel_size(GTK_IMAGE(icon), 24); 
             gtk_widget_set_margin_bottom(icon, 6);
             gtk_widget_set_halign(icon, GTK_ALIGN_CENTER);
             gtk_box_append(GTK_BOX(dash_root_box), icon);
 
-            // --- 2. THE TEXT ---
             g_autofree gchar *title_text = g_strdup_printf("%d Apps Active", app_count);
             GtkWidget *title = gtk_label_new(title_text);
             gtk_widget_add_css_class(title, "summary");
@@ -450,13 +462,14 @@ void privacy_widget_refresh_ui(void) {
             g_signal_connect(btn_kill_all, "clicked", G_CALLBACK(on_privacy_kill_all_clicked), NULL);
             gtk_box_append(GTK_BOX(dash_root_box), btn_kill_all);
             
-            schedule_pill_reveal(btn_kill_all, 450);
+            schedule_pill_reveal(btn_kill_all, 300);
         }
     }
 }
 
 GtkWidget* privacy_widget_create_pill(void) {
     GtkWidget *overlay = gtk_overlay_new();
+    current_pill_overlay = overlay;
     g_signal_connect(overlay, "destroy", G_CALLBACK(on_pill_destroyed), NULL);
 
     GtkWidget *dummy_label = gtk_label_new(" ");
@@ -519,11 +532,6 @@ GtkWidget* privacy_widget_create_dashboard(void) {
     }
 
     dash_root_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    
-    // --- THE REAL WOBBLE FIX FOR PRIVACY ---
-    // Forces a consistent width. GTK will perfectly expand to this without wobbling.
-    gtk_widget_set_size_request(dash_root_box, 340, -1);
-    
     g_signal_connect(dash_root_box, "destroy", G_CALLBACK(on_dash_destroyed), NULL);
     
     privacy_widget_refresh_ui();

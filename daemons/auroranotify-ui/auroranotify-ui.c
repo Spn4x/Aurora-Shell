@@ -8,8 +8,8 @@
 
 const guint PILL_STATE_DURATION_MS = 4000;
 const guint EXPANDED_STATE_DURATION_S = 8;
-const guint ANIMATION_DURATION = 400;
-const guint ANIMATION_FINISH_DELAY_MS = ANIMATION_DURATION + 100;
+const guint ANIMATION_DURATION = 400; 
+const guint ANIMATION_FINISH_DELAY_MS = ANIMATION_DURATION + 50;
 
 const char* UI_BUS_NAME = "com.meismeric.auranotify.UI";
 const char* UI_OBJECT_PATH = "/com/meismeric/auranotify/UI";
@@ -120,11 +120,25 @@ static void show_next_notification() {
         return;
     }
 
+    // --- THE FIX: Copied the OSD/Privacy GtkOverlay trick ---
+    GtkWidget *overlay = gtk_overlay_new();
+    
+    // 1. The invisible "dummy" label that perfectly locks the size to 25 chars
+    GtkWidget *dummy_label = gtk_label_new(" ");
+    gtk_widget_add_css_class(dummy_label, "summary");
+    gtk_label_set_width_chars(GTK_LABEL(dummy_label), 25);
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), dummy_label);
+
+    // 2. The real text floating perfectly centered on top
     GtkWidget *pill_summary = gtk_label_new(current_notification_data->summary);
     gtk_widget_add_css_class(pill_summary, "summary");
     gtk_label_set_ellipsize(GTK_LABEL(pill_summary), PANGO_ELLIPSIZE_END);
-    gtk_label_set_width_chars(GTK_LABEL(pill_summary), 25);
-    island_widget_transition_to_pill_child(island, pill_summary);
+    gtk_widget_set_halign(pill_summary, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(pill_summary, GTK_ALIGN_CENTER);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), pill_summary);
+    // --------------------------------------------------------
+
+    island_widget_transition_to_pill_child(island, overlay);
     
     if (is_expanded) {
         GtkWidget *expanded_widget = notification_widget_create_expanded(current_notification_data, dismiss_or_transition);
@@ -136,7 +150,6 @@ static void show_next_notification() {
     
     g_timeout_add(ANIMATION_FINISH_DELAY_MS, unlock_transition_callback, NULL);
 
-    // --- NEW: Keep it open infinitely if expanded with actions ---
     gboolean keep_open = is_expanded && notification_has_actions(current_notification_data);
     if (!keep_open) {
         current_timeout_id = g_timeout_add(is_expanded ? (EXPANDED_STATE_DURATION_S * 1000) : PILL_STATE_DURATION_MS, dismiss_or_transition, NULL);
@@ -282,7 +295,6 @@ static void on_island_clicked(GtkGestureClick *g G_GNUC_UNUSED, int n G_GNUC_UNU
         
         g_timeout_add(ANIMATION_FINISH_DELAY_MS, unlock_transition_callback, NULL);
         
-        // --- NEW: Disable timeout if actions exist ---
         if (current_notification_data) {
             if (!notification_has_actions(current_notification_data)) {
                 current_timeout_id = g_timeout_add_seconds(EXPANDED_STATE_DURATION_S, dismiss_or_transition, NULL);
@@ -290,7 +302,6 @@ static void on_island_clicked(GtkGestureClick *g G_GNUC_UNUSED, int n G_GNUC_UNU
         }
     } 
     else {
-        // If already expanded, clicking it will dismiss it
         dismiss_or_transition(NULL);
     }
 }
@@ -311,7 +322,6 @@ static void on_island_enter(GtkEventControllerMotion *controller G_GNUC_UNUSED, 
 
 static void on_island_leave(GtkEventControllerMotion *controller G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
     if (is_expanded && current_timeout_id == 0 && current_notification_data) {
-        // --- NEW: Don't restart the timeout if we have actions ---
         if (!notification_has_actions(current_notification_data)) {
             current_timeout_id = g_timeout_add_seconds(EXPANDED_STATE_DURATION_S, dismiss_or_transition, NULL);
         }
@@ -471,7 +481,11 @@ void create_main_window() {
     
     gtk_layer_init_for_window(main_window);
     gtk_layer_set_layer(main_window, GTK_LAYER_SHELL_LAYER_TOP);
+
     gtk_layer_set_anchor(main_window, GTK_LAYER_SHELL_EDGE_TOP, TRUE);
+    gtk_layer_set_anchor(main_window, GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
+    gtk_layer_set_anchor(main_window, GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
+    
     gtk_layer_set_margin(main_window, GTK_LAYER_SHELL_EDGE_TOP, 10);
 }
 
