@@ -15,7 +15,8 @@ sources = [
 dependencies = [
   dependency('gtk4'),
   dependency('gtk4-layer-shell-0'),
-  dependency('json-glib-1.0')
+  dependency('json-glib-1.0'),
+  dependency('libadwaita-1')
 ]
 
 # Build a 'shared_library' for the topbar plugin.
