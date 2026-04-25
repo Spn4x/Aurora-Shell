@@ -14,13 +14,19 @@ Rectangle {
     property int pendingPrivacyPid: 0
     property string pendingPrivacyName: ""
 
-    property int expandedHeight: {
+    // 1. DYNAMIC HEIGHT ANIMATION: We separate the target height from the animated height
+    property int targetExpandedHeight: {
         if (Backend.displayMode === "notification") return notifColumn.implicitHeight + 32
         if (Backend.displayMode === "privacy") {
             if (Backend.privacyApps.length === 1) return privacySingleColumn.implicitHeight + 32
-            return privacyMultiColumn.implicitHeight + 32
+            if (Backend.privacyApps.length > 1) return privacyMultiColumn.implicitHeight + 32
         }
         return AppTheme.expandedMinHeight
+    }
+
+    property int animatedExpandedHeight: targetExpandedHeight
+    Behavior on animatedExpandedHeight { 
+        NumberAnimation { duration: 250; easing.type: Easing.OutCubic } 
     }
 
     width: AppTheme.pillWidth
@@ -108,7 +114,6 @@ Rectangle {
         id: pillView
         anchors.fill: parent
         
-        // THE FIX: Disables the view fully when faded out so it doesn't trap clicks
         visible: opacity > 0
         opacity: (island.state === "pill") ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
@@ -256,9 +261,10 @@ Rectangle {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: expandedHeight 
         
-        // THE FIX: Disables the view fully when faded out so invisible buttons don't trap clicks
+        // Use the dynamically smoothed height property!
+        height: animatedExpandedHeight 
+        
         visible: opacity > 0
         opacity: (island.state === "expanded") ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 150 } }
@@ -269,7 +275,10 @@ Rectangle {
             anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
             anchors.margins: 16
             spacing: 6
-            visible: Backend.displayMode === "notification"
+            
+            opacity: Backend.displayMode === "notification" ? 1 : 0
+            visible: opacity > 0
+            Behavior on opacity { NumberAnimation { duration: 200 } }
 
             Text {
                 text: Backend.summary
@@ -327,7 +336,11 @@ Rectangle {
             id: privacySingleColumn
             anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
             anchors.margins: 16; spacing: 16
-            visible: Backend.displayMode === "privacy" && Backend.privacyApps.length === 1
+            
+            // CROSSFADE LOGIC
+            opacity: (Backend.displayMode === "privacy" && Backend.privacyApps.length === 1) ? 1 : 0
+            visible: opacity > 0
+            Behavior on opacity { NumberAnimation { duration: 200 } }
 
             Item {
                 width: parent.width; height: childrenRect.height
@@ -381,7 +394,14 @@ Rectangle {
             id: privacyMultiColumn
             anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
             anchors.margins: 16; spacing: 16
-            visible: Backend.displayMode === "privacy" && Backend.privacyApps.length > 1
+            
+            // CROSSFADE LOGIC
+            opacity: (Backend.displayMode === "privacy" && Backend.privacyApps.length > 1) ? 1 : 0
+            visible: opacity > 0
+            Behavior on opacity { NumberAnimation { duration: 200 } }
+
+            // Slide everything below the list when an item is removed
+            move: Transition { NumberAnimation { properties: "y"; duration: 250; easing.type: Easing.OutCubic } }
 
             SystemIcon { anchors.horizontalCenter: parent.horizontalCenter; iconName: "security-high-symbolic"; iconColor: AppTheme.fg; size: 32 }
             Text { anchors.horizontalCenter: parent.horizontalCenter; text: Backend.privacySummary; color: AppTheme.fg; font.pixelSize: AppTheme.summarySize; font.bold: AppTheme.summaryBold }
@@ -389,11 +409,35 @@ Rectangle {
             Column {
                 width: parent.width; spacing: 4
 
+                // Slide sibling items up when an item above them is removed
+                move: Transition { NumberAnimation { properties: "y"; duration: 250; easing.type: Easing.OutCubic } }
+
                 Repeater {
                     model: Backend.privacyApps
                     delegate: Rectangle {
+                        id: delegateRow
                         width: parent.width; height: 42; radius: 8 
                         color: rowHover.containsMouse ? AppTheme.pillActionBg : "transparent"
+                        
+                        opacity: 1
+                        Behavior on opacity { NumberAnimation { duration: 150 } }
+
+                        // Timer ensures we fade out visually before telling C++ to destroy the data
+                        Timer {
+                            id: fadeTimer
+                            interval: 150
+                            property string actionType
+                            onTriggered: {
+                                if (actionType === "kill") Backend.killPrivacyApp(modelData.pid, modelData.name)
+                                else Backend.ignorePrivacyApp(modelData.pid, modelData.name)
+                            }
+                        }
+
+                        function dismissItem(type) {
+                            delegateRow.opacity = 0
+                            fadeTimer.actionType = type
+                            fadeTimer.start()
+                        }
                         
                         MouseArea { id: rowHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
                         RowLayout {
@@ -401,8 +445,8 @@ Rectangle {
                             Text { Layout.fillWidth: true; text: modelData.name; color: AppTheme.fg; font.pixelSize: AppTheme.bodySize; elide: Text.ElideRight }
                             SystemIcon { visible: modelData.hasMic; iconName: "audio-input-microphone-symbolic"; iconColor: AppTheme.colorMic; size: 20 }
                             SystemIcon { visible: modelData.hasCam; iconName: "camera-web-symbolic"; iconColor: AppTheme.colorCam; size: 20 }
-                            Text { text: "Ignore"; color: ignoreMultiMouse.pressed ? AppTheme.accent : AppTheme.fg; font.pixelSize: 13; font.bold: true; MouseArea { id: ignoreMultiMouse; anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: island.requestPrivacyAction("ignore", modelData.pid, modelData.name) } }
-                            Text { text: "Kill"; color: killMultiMouse.pressed ? Qt.darker(AppTheme.colorKill, 1.2) : AppTheme.colorKill; font.pixelSize: 13; font.bold: true; Layout.leftMargin: 8; MouseArea { id: killMultiMouse; anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: island.requestPrivacyAction("kill", modelData.pid, modelData.name) } }
+                            Text { text: "Ignore"; color: ignoreMultiMouse.pressed ? AppTheme.accent : AppTheme.fg; font.pixelSize: 13; font.bold: true; MouseArea { id: ignoreMultiMouse; anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: delegateRow.dismissItem("ignore") } }
+                            Text { text: "Kill"; color: killMultiMouse.pressed ? Qt.darker(AppTheme.colorKill, 1.2) : AppTheme.colorKill; font.pixelSize: 13; font.bold: true; Layout.leftMargin: 8; MouseArea { id: killMultiMouse; anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: delegateRow.dismissItem("kill") } }
                         }
                     }
                 }
@@ -447,14 +491,21 @@ Rectangle {
         State { 
             name: "hidden"
             PropertyChanges { target: island; width: AppTheme.pillWidth; height: AppTheme.pillHeight; radius: AppTheme.pillRadius; opacity: 0; scale: 0.8 } 
+            PropertyChanges { target: pillView; opacity: 1 }
+            PropertyChanges { target: expandedView; opacity: 0 }
         },
         State { 
             name: "pill"
             PropertyChanges { target: island; width: AppTheme.pillWidth; height: AppTheme.pillHeight; radius: AppTheme.pillRadius; opacity: 1; scale: 1.0 } 
+            PropertyChanges { target: pillView; opacity: 1 }
+            PropertyChanges { target: expandedView; opacity: 0 }
         },
         State { 
             name: "expanded"
-            PropertyChanges { target: island; width: AppTheme.expandedMinWidth; height: expandedHeight; radius: AppTheme.expandedRadius; opacity: 1; scale: 1.0 } 
+            // We bind to the dynamically smoothed animatedExpandedHeight instead of snapping
+            PropertyChanges { target: island; width: AppTheme.expandedMinWidth; height: animatedExpandedHeight; radius: AppTheme.expandedRadius; opacity: 1; scale: 1.0 } 
+            PropertyChanges { target: pillView; opacity: 0 }
+            PropertyChanges { target: expandedView; opacity: 1 }
         }
     ]
 
