@@ -21,11 +21,7 @@ int main(int argc, char *argv[])
     qmlRegisterSingletonInstance("Aurora.Shell", 1, 0, "Backend", &backend);
 
     QQmlApplicationEngine engine;
-    
-    // Tell QML to look in our resources folder for the qmldir singleton definition
     engine.addImportPath("qrc:/ui");
-    
-    // Load directly from the compiled QRC resources
     engine.load(QUrl(QStringLiteral("qrc:/ui/Main.qml")));
     
     if (engine.rootObjects().isEmpty()) return -1;
@@ -38,7 +34,15 @@ int main(int argc, char *argv[])
 
     if (window && pill) {
         auto updateInputMask = [window, pill]() {
+            // THE FIX: If the pill is invisible, drop the mask to a 1x1 pixel so clicks pass to the desktop
+            if (pill->opacity() <= 0.01) {
+                window->setMask(QRegion(0, 0, 1, 1));
+                return;
+            }
+
+            // mapRectToScene automatically calculates the true size including the 'scale' property!
             QRectF rect = pill->mapRectToScene(QRectF(0, 0, pill->width(), pill->height()));
+            
             if (rect.width() <= 0 || rect.height() <= 0) {
                 window->setMask(QRegion(0, 0, 1, 1));
             } else {
@@ -46,10 +50,13 @@ int main(int argc, char *argv[])
             }
         };
 
+        // THE FIX: Connect opacity and scale to ensure the Wayland mask shrinks dynamically with the animations
         QObject::connect(pill, &QQuickItem::xChanged, pill, updateInputMask);
         QObject::connect(pill, &QQuickItem::yChanged, pill, updateInputMask);
         QObject::connect(pill, &QQuickItem::widthChanged, pill, updateInputMask);
         QObject::connect(pill, &QQuickItem::heightChanged, pill, updateInputMask);
+        QObject::connect(pill, &QQuickItem::scaleChanged, pill, updateInputMask);
+        QObject::connect(pill, &QQuickItem::opacityChanged, pill, updateInputMask);
         
         updateInputMask();
 

@@ -7,8 +7,13 @@ Rectangle {
     id: island
     state: "hidden" 
     
+    // Flags to delay backend data destruction until animations finish
     property bool pendingReadyForNext: false
-    
+    property bool pendingPrivacyAction: false
+    property string pendingPrivacyType: ""
+    property int pendingPrivacyPid: 0
+    property string pendingPrivacyName: ""
+
     property int expandedHeight: {
         if (Backend.displayMode === "notification") return notifColumn.implicitHeight + 32
         if (Backend.displayMode === "privacy") {
@@ -28,7 +33,6 @@ Rectangle {
     border.width: 2 
     clip: true
 
-    // THE FIX: Bulletproof timer function to prevent binding evaluation deadlocks
     function startTimer() {
         autoDismissTimer.stop()
         if (Backend.displayMode === "osd") {
@@ -39,6 +43,19 @@ Rectangle {
             autoDismissTimer.interval = 4000
         }
         autoDismissTimer.restart()
+    }
+
+    function requestPrivacyAction(type, pid, name) {
+        if (Backend.privacyApps.length === 1 || type === "killAll") {
+            island.pendingPrivacyAction = true
+            island.pendingPrivacyType = type
+            island.pendingPrivacyPid = pid
+            island.pendingPrivacyName = name
+            island.state = "hidden" 
+        } else {
+            if (type === "kill") Backend.killPrivacyApp(pid, name)
+            else if (type === "ignore") Backend.ignorePrivacyApp(pid, name)
+        }
     }
 
     onStateChanged: {
@@ -90,6 +107,9 @@ Rectangle {
     Item {
         id: pillView
         anchors.fill: parent
+        
+        // THE FIX: Disables the view fully when faded out so it doesn't trap clicks
+        visible: opacity > 0
         opacity: (island.state === "pill") ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
 
@@ -101,22 +121,20 @@ Rectangle {
             visible: opacity > 0
             Behavior on opacity { NumberAnimation { duration: 150 } }
 
-            RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: 16
-                anchors.rightMargin: 16
+            Row {
+                anchors.centerIn: parent
                 spacing: 12
 
                 SystemIcon {
-                    Layout.alignment: Qt.AlignVCenter
+                    anchors.verticalCenter: parent.verticalCenter
                     iconName: Backend.osdIcon
                     iconColor: AppTheme.fg
                     size: 20
                 }
 
                 Rectangle {
-                    Layout.fillWidth: true
-                    Layout.alignment: Qt.AlignVCenter
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 160
                     height: 6
                     radius: 3
                     color: Qt.rgba(1, 1, 1, 0.2)
@@ -131,7 +149,7 @@ Rectangle {
                 }
 
                 Text {
-                    Layout.alignment: Qt.AlignVCenter
+                    anchors.verticalCenter: parent.verticalCenter
                     visible: Backend.osdLevel > 1.0
                     text: "+" + Math.round((Backend.osdLevel - 1.0) * 100) + "%"
                     color: AppTheme.fg
@@ -149,6 +167,7 @@ Rectangle {
             visible: opacity > 0
             Behavior on opacity { NumberAnimation { duration: 150 } }
 
+            property string lastMode: ""
             property string currentText: {
                 if (Backend.displayMode === "notification") return Backend.summary;
                 if (Backend.displayMode === "privacy") return Backend.privacySummary;
@@ -157,11 +176,11 @@ Rectangle {
 
             Row {
                 anchors.centerIn: parent
-                spacing: Backend.displayMode === "privacy" ? 8 : 0
+                spacing: privacyIndicator.visible ? 8 : 0
 
                 Rectangle {
                     id: privacyIndicator
-                    visible: Backend.displayMode === "privacy"
+                    visible: Backend.displayMode === "privacy" || (island.state === "hidden" && textContainer.lastMode === "privacy")
                     anchors.verticalCenter: parent.verticalCenter
                     width: 12; height: 12; radius: 6
                     color: Backend.privacyHasCam ? AppTheme.colorCam : AppTheme.colorMic
@@ -170,7 +189,6 @@ Rectangle {
                 Item {
                     id: textClipBox
                     anchors.verticalCenter: parent.verticalCenter
-                    
                     property int maxAvailableWidth: AppTheme.pillWidth - 48 - (privacyIndicator.visible ? 20 : 0)
                     width: Math.min(Math.max(oldTextLabel.implicitWidth, newTextLabel.implicitWidth), maxAvailableWidth)
                     height: AppTheme.pillHeight
@@ -197,7 +215,11 @@ Rectangle {
             }
 
             onCurrentTextChanged: {
-                if (island.state === "hidden" || currentText === "") {
+                if (currentText === "") return; 
+
+                lastMode = Backend.displayMode;
+
+                if (island.state === "hidden") {
                     newTextLabel.text = currentText
                     oldTextLabel.text = currentText
                     newTextLabel.y = 0
@@ -236,6 +258,8 @@ Rectangle {
         anchors.right: parent.right
         height: expandedHeight 
         
+        // THE FIX: Disables the view fully when faded out so invisible buttons don't trap clicks
+        visible: opacity > 0
         opacity: (island.state === "expanded") ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 150 } }
 
@@ -288,9 +312,7 @@ Rectangle {
                         MouseArea {
                             id: actionMouse; anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                             onClicked: { 
-                                let actionId = modelData.id
-                                Backend.invokeAction(actionId) 
-                                
+                                Backend.invokeAction(modelData.id) 
                                 island.pendingReadyForNext = true
                                 island.state = "pill"
                             }
@@ -338,7 +360,7 @@ Rectangle {
                             border.color: AppTheme.pillActionBorder; border.width: 1
 
                             Text { anchors.centerIn: parent; text: parent.parent.parent.parent.appData ? "Kill " + parent.parent.parent.parent.appData.name : "Kill"; color: AppTheme.colorKill; font.pixelSize: AppTheme.bodySize; font.bold: true }
-                            MouseArea { id: killSingleMouse; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Backend.killPrivacyApp(parent.parent.parent.parent.appData.pid, parent.parent.parent.parent.appData.name) }
+                            MouseArea { id: killSingleMouse; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: island.requestPrivacyAction("kill", parent.parent.parent.parent.appData.pid, parent.parent.parent.parent.appData.name) }
                         }
 
                         Rectangle {
@@ -347,7 +369,7 @@ Rectangle {
                             border.color: AppTheme.pillActionBorder; border.width: 1
 
                             Text { anchors.centerIn: parent; text: "Ignore"; color: "white"; font.pixelSize: AppTheme.bodySize; font.bold: true }
-                            MouseArea { id: ignoreSingleMouse; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Backend.ignorePrivacyApp(parent.parent.parent.parent.appData.pid, parent.parent.parent.parent.appData.name) }
+                            MouseArea { id: ignoreSingleMouse; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: island.requestPrivacyAction("ignore", parent.parent.parent.parent.appData.pid, parent.parent.parent.parent.appData.name) }
                         }
                     }
                 }
@@ -379,8 +401,8 @@ Rectangle {
                             Text { Layout.fillWidth: true; text: modelData.name; color: AppTheme.fg; font.pixelSize: AppTheme.bodySize; elide: Text.ElideRight }
                             SystemIcon { visible: modelData.hasMic; iconName: "audio-input-microphone-symbolic"; iconColor: AppTheme.colorMic; size: 20 }
                             SystemIcon { visible: modelData.hasCam; iconName: "camera-web-symbolic"; iconColor: AppTheme.colorCam; size: 20 }
-                            Text { text: "Ignore"; color: ignoreMultiMouse.pressed ? AppTheme.accent : AppTheme.fg; font.pixelSize: 13; font.bold: true; MouseArea { id: ignoreMultiMouse; anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: Backend.ignorePrivacyApp(modelData.pid, modelData.name) } }
-                            Text { text: "Kill"; color: killMultiMouse.pressed ? Qt.darker(AppTheme.colorKill, 1.2) : AppTheme.colorKill; font.pixelSize: 13; font.bold: true; Layout.leftMargin: 8; MouseArea { id: killMultiMouse; anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: Backend.killPrivacyApp(modelData.pid, modelData.name) } }
+                            Text { text: "Ignore"; color: ignoreMultiMouse.pressed ? AppTheme.accent : AppTheme.fg; font.pixelSize: 13; font.bold: true; MouseArea { id: ignoreMultiMouse; anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: island.requestPrivacyAction("ignore", modelData.pid, modelData.name) } }
+                            Text { text: "Kill"; color: killMultiMouse.pressed ? Qt.darker(AppTheme.colorKill, 1.2) : AppTheme.colorKill; font.pixelSize: 13; font.bold: true; Layout.leftMargin: 8; MouseArea { id: killMultiMouse; anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor; onClicked: island.requestPrivacyAction("kill", modelData.pid, modelData.name) } }
                         }
                     }
                 }
@@ -392,7 +414,7 @@ Rectangle {
                 border.color: AppTheme.pillActionBorder; border.width: 1
 
                 Text { anchors.centerIn: parent; text: "Kill All"; color: AppTheme.colorKill; font.pixelSize: AppTheme.bodySize; font.bold: true }
-                MouseArea { id: killAllMouse; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Backend.killAllPrivacyApps() }
+                MouseArea { id: killAllMouse; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: island.requestPrivacyAction("killAll", 0, "") }
             }
         }
     }
@@ -422,9 +444,18 @@ Rectangle {
     }
 
     states: [
-        State { name: "hidden"; PropertyChanges { target: island; width: AppTheme.pillWidth; height: AppTheme.pillHeight; radius: AppTheme.pillRadius; opacity: 0; scale: 0.8 } },
-        State { name: "pill"; PropertyChanges { target: island; width: AppTheme.pillWidth; height: AppTheme.pillHeight; radius: AppTheme.pillRadius; opacity: 1; scale: 1.0 } },
-        State { name: "expanded"; PropertyChanges { target: island; width: AppTheme.expandedMinWidth; height: expandedHeight; radius: AppTheme.expandedRadius; opacity: 1; scale: 1.0 } }
+        State { 
+            name: "hidden"
+            PropertyChanges { target: island; width: AppTheme.pillWidth; height: AppTheme.pillHeight; radius: AppTheme.pillRadius; opacity: 0; scale: 0.8 } 
+        },
+        State { 
+            name: "pill"
+            PropertyChanges { target: island; width: AppTheme.pillWidth; height: AppTheme.pillHeight; radius: AppTheme.pillRadius; opacity: 1; scale: 1.0 } 
+        },
+        State { 
+            name: "expanded"
+            PropertyChanges { target: island; width: AppTheme.expandedMinWidth; height: expandedHeight; radius: AppTheme.expandedRadius; opacity: 1; scale: 1.0 } 
+        }
     ]
 
     transitions: [
@@ -432,7 +463,10 @@ Rectangle {
             to: "pill"
             SequentialAnimation {
                 ScriptAction { script: { if (island.state !== "hidden") island.startTimer() } }
-                NumberAnimation { properties: "width,height,radius,opacity,scale"; duration: 400; easing.type: Easing.OutBack; easing.overshoot: 1.2 }
+                ParallelAnimation {
+                    NumberAnimation { target: island; properties: "width,height,radius,opacity,scale"; duration: 400; easing.type: Easing.OutBack; easing.overshoot: 1.2 }
+                    NumberAnimation { targets: [pillView, expandedView]; property: "opacity"; duration: 300; easing.type: Easing.InOutQuad }
+                }
                 ScriptAction { 
                     script: { 
                         if (island.pendingReadyForNext) {
@@ -445,7 +479,10 @@ Rectangle {
         },
         Transition {
             to: "expanded"
-            NumberAnimation { properties: "width,height,radius"; duration: 450; easing.type: Easing.OutBack; easing.overshoot: 1.1 }
+            ParallelAnimation {
+                NumberAnimation { target: island; properties: "width,height,radius"; duration: 450; easing.type: Easing.OutBack; easing.overshoot: 1.1 }
+                NumberAnimation { targets: [pillView, expandedView]; property: "opacity"; duration: 300; easing.type: Easing.InOutQuad }
+            }
         },
         Transition {
             from: "expanded"
@@ -455,17 +492,26 @@ Rectangle {
                     NumberAnimation { target: island; properties: "width"; to: AppTheme.pillWidth; duration: 300; easing.type: Easing.OutExpo }
                     NumberAnimation { target: island; properties: "height"; to: AppTheme.pillHeight; duration: 300; easing.type: Easing.OutExpo }
                     NumberAnimation { target: island; properties: "radius"; to: AppTheme.pillRadius; duration: 300; easing.type: Easing.OutExpo }
-                }
-                ParallelAnimation {
                     NumberAnimation { target: island; properties: "opacity"; to: 0; duration: 250; easing.type: Easing.InCubic }
                     NumberAnimation { target: island; properties: "scale"; to: 0.8; duration: 250; easing.type: Easing.InCubic }
+                    NumberAnimation { targets: [pillView, expandedView]; property: "opacity"; duration: 250; easing.type: Easing.InCubic }
+                }
+                ScriptAction {
+                    script: {
+                        if (island.pendingPrivacyAction) {
+                            island.pendingPrivacyAction = false;
+                            if (island.pendingPrivacyType === "kill") Backend.killPrivacyApp(island.pendingPrivacyPid, island.pendingPrivacyName);
+                            else if (island.pendingPrivacyType === "ignore") Backend.ignorePrivacyApp(island.pendingPrivacyPid, island.pendingPrivacyName);
+                            else if (island.pendingPrivacyType === "killAll") Backend.killAllPrivacyApps();
+                        }
+                    }
                 }
             }
         },
         Transition {
             from: "pill"
             to: "hidden"
-            NumberAnimation { properties: "opacity,scale"; duration: 250; easing.type: Easing.InCubic }
+            NumberAnimation { target: island; properties: "opacity,scale"; duration: 250; easing.type: Easing.InCubic }
         }
     ]
 }

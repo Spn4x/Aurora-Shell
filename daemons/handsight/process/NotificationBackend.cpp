@@ -95,15 +95,45 @@ void NotificationBackend::SetPrivacyStatus(const QString &payload) {
     if (!doc.isArray()) return;
     
     QJsonArray arr = doc.array();
+
+    // 1. Prune ignored PIDs that have stopped streaming
+    for (int i = m_ignoredPids.size() - 1; i >= 0; --i) {
+        uint igPid = m_ignoredPids[i];
+        bool stillRunning = false;
+        for (int j = 0; j < arr.size(); ++j) {
+            // FIXED: Used .toInt() instead of .toUInt() for QJsonValueRef
+            if (arr[j].toObject()["pid"].toInt() == (int)igPid) {
+                stillRunning = true; break;
+            }
+        }
+        if (!stillRunning) m_ignoredPids.removeAt(i);
+    }
+
+    // 2. Prune ignored Names that have stopped streaming
+    for (int i = m_ignoredNames.size() - 1; i >= 0; --i) {
+        QString igName = m_ignoredNames[i];
+        bool stillRunning = false;
+        for (int j = 0; j < arr.size(); ++j) {
+            QJsonObject obj = arr[j].toObject();
+            // FIXED: Used .toInt() instead of .toUInt() for QJsonValueRef
+            if (obj["pid"].toInt() == 0 && obj["name"].toString() == igName) {
+                stillRunning = true; break;
+            }
+        }
+        if (!stillRunning) m_ignoredNames.removeAt(i);
+    }
+    
     QVariantList apps;
     bool globalHasMic = false, globalHasCam = false;
 
+    // 3. Process incoming apps
     for (int i = 0; i < arr.size(); ++i) {
         QJsonObject obj = arr[i].toObject();
         uint pid = obj["pid"].toInt();
         QString name = obj["name"].toString();
         int type = obj["type"].toInt();
         
+        // Skip apps that are currently in our active ignore lists
         if (pid > 0 && m_ignoredPids.contains(pid)) continue;
         if (pid == 0 && m_ignoredNames.contains(name)) continue;
 
@@ -154,7 +184,6 @@ void NotificationBackend::ShowOSD(const QString &icon, double level) {
 }
 
 void NotificationBackend::processNext() {
-    // Only dequeue if we aren't currently rendering a notification
     if (!m_queue.isEmpty() && !m_isShowingNotif) {
         m_current = m_queue.dequeue();
         m_isShowingNotif = true;
@@ -165,7 +194,6 @@ void NotificationBackend::processNext() {
 }
 
 void NotificationBackend::readyForNext() {
-    // Determine what just finished based on current display mode
     if (m_displayMode == "osd") {
         m_isShowingOsd = false;
     } else if (m_displayMode == "notification") {
@@ -178,7 +206,6 @@ void NotificationBackend::readyForNext() {
 void NotificationBackend::updateDisplayMode() {
     QString oldMode = m_displayMode;
 
-    // Strict Priority Hierarchy
     if (m_isShowingOsd) {
         m_displayMode = "osd";
     } else if (m_isShowingNotif) {
@@ -194,12 +221,9 @@ void NotificationBackend::updateDisplayMode() {
         if (m_displayMode == "idle") {
             emit requestHide();
         } else {
-            // Restart UI timer / force reveal
             emit requestShow(); 
         }
     } else if (m_displayMode == "notification" || m_displayMode == "osd") {
-        // THE FIX: If we swap to a new notification while already in notification mode,
-        // we MUST tell the QML UI to restart its timer!
         emit requestShow(); 
     }
 }
