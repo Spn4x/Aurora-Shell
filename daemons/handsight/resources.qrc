@@ -1,0 +1,9 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>ui/Main.qml</file>
+        <file>ui/DynamicIsland.qml</file>
+        <file>ui/AppTheme.qml</file>
+        <file>ui/qmldir</file>
+    </qresource>
+</RCC>
