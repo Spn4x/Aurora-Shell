@@ -15,7 +15,12 @@ typedef struct {
     GtkWidget *widget;
     gboolean is_interactive;
     JsonObject *config_obj;
-    gboolean was_visible; // NEW: Tracks if the widget was visible before being hidden
+    gboolean was_visible;
+    
+    // NEW: Support for external standalone apps (Qt/QML, etc.)
+    gboolean is_external;
+    gchar *command;
+    gchar *process_name;
 } WidgetState;
 
 typedef struct {
@@ -157,7 +162,10 @@ static void on_widget_window_destroyed(GtkWidget *widget, gpointer user_data) {
 
 static void free_widget_state(gpointer data) {
     WidgetState *state = (WidgetState *)data;
-    if (state->window) {
+    if (state->is_external) {
+        g_free(state->command);
+        g_free(state->process_name);
+    } else if (state->window) {
         g_signal_handlers_disconnect_by_func(state->window, on_widget_window_destroyed, state);
         gtk_widget_set_visible(GTK_WIDGET(state->window), FALSE); 
         gtk_window_destroy(state->window);
@@ -311,7 +319,8 @@ static WidgetState* create_single_widget(AuroraShell *shell, JsonObject *item_ob
     state->widget = widget; 
     state->is_interactive = is_interactive; 
     state->config_obj = item_obj;
-    state->was_visible = FALSE; // Init
+    state->was_visible = FALSE;
+    state->is_external = FALSE;
 
     g_signal_connect(window, "destroy", G_CALLBACK(on_widget_window_destroyed), state);
 
@@ -346,21 +355,30 @@ static void load_all_widgets(AuroraShell *shell) {
         if (!item_obj) continue;
 
         const char *type = json_object_get_string_member_with_default(item_obj, "type", "widget");
+        const char *name = json_object_get_string_member_with_default(item_obj, "name", "unknown");
+
         if (g_strcmp0(type, "daemon") == 0) {
             if (json_object_has_member(item_obj, "command")) launch_daemon_if_needed(json_object_get_string_member(item_obj, "command"));
             continue;
-        }
-        
-        if (g_strcmp0(type, "widget") != 0) continue;
-        if (!json_object_has_member(item_obj, "name")) continue;
-        const char *name = json_object_get_string_member(item_obj, "name");
-        
-        if (g_strcmp0(name, "qscreen") == 0) continue;
-        
-        WidgetState *state = create_single_widget(shell, item_obj);
-        if (state) {
-            if (json_object_get_boolean_member_with_default(item_obj, "visible_on_start", TRUE)) gtk_window_present(state->window);
+        } 
+        else if (g_strcmp0(type, "external") == 0) {
+            // NEW: Parse standalone executables
+            WidgetState *state = g_new0(WidgetState, 1);
+            state->is_external = TRUE;
+            state->config_obj = item_obj;
+            state->command = g_strdup(json_object_get_string_member(item_obj, "command"));
+            state->process_name = g_strdup(json_object_get_string_member_with_default(item_obj, "process_name", name));
             g_hash_table_insert(shell->widgets, g_strdup(name), state);
+        }
+        else if (g_strcmp0(type, "widget") == 0) {
+            if (!json_object_has_member(item_obj, "name")) continue;
+            if (g_strcmp0(name, "qscreen") == 0) continue; // Spawned specially
+            
+            WidgetState *state = create_single_widget(shell, item_obj);
+            if (state) {
+                if (json_object_get_boolean_member_with_default(item_obj, "visible_on_start", TRUE)) gtk_window_present(state->window);
+                g_hash_table_insert(shell->widgets, g_strdup(name), state);
+            }
         }
     }
 }
@@ -380,7 +398,7 @@ static void on_qscreen_pre_capture_finished(GPid pid, gint status, gpointer user
     g_free(data->temp_path); g_free(data);
 }
 
-// --- NEW: D-Bus Command Receiver to Hide/Restore Widgets for the Editor ---
+// --- D-Bus Command Receiver to Hide/Restore Widgets for the Editor ---
 static void handle_shell_method_call(GDBusConnection *c, const gchar *s, const gchar *o, const gchar *i, const gchar *method, GVariant *p, GDBusMethodInvocation *inv, gpointer ud) {
     (void)c; (void)s; (void)o; (void)i; (void)p;
     AuroraShell *shell = (AuroraShell *)ud;
@@ -392,10 +410,19 @@ static void handle_shell_method_call(GDBusConnection *c, const gchar *s, const g
         while (g_hash_table_iter_next(&iter, &key, &value)) {
             const char *name = (const char *)key;
             WidgetState *ws = (WidgetState *)value;
-            if (g_strcmp0(name, "surfacedesk") != 0 && ws->window) {
-                ws->was_visible = gtk_widget_get_visible(GTK_WIDGET(ws->window));
-                if (ws->was_visible) {
-                    gtk_widget_set_visible(GTK_WIDGET(ws->window), FALSE);
+            if (g_strcmp0(name, "surfacedesk") != 0) {
+                if (ws->is_external) {
+                    g_autofree gchar *pgrep_cmd = g_strdup_printf("pgrep -x '%s' > /dev/null", ws->process_name);
+                    ws->was_visible = (system(pgrep_cmd) == 0);
+                    if (ws->was_visible) {
+                        g_autofree gchar *pkill_cmd = g_strdup_printf("pkill -x '%s'", ws->process_name);
+                        system(pkill_cmd);
+                    }
+                } else if (ws->window) {
+                    ws->was_visible = gtk_widget_get_visible(GTK_WIDGET(ws->window));
+                    if (ws->was_visible) {
+                        gtk_widget_set_visible(GTK_WIDGET(ws->window), FALSE);
+                    }
                 }
             }
         }
@@ -407,7 +434,10 @@ static void handle_shell_method_call(GDBusConnection *c, const gchar *s, const g
         g_hash_table_iter_init(&iter, shell->widgets);
         while (g_hash_table_iter_next(&iter, &key, &value)) {
             WidgetState *ws = (WidgetState *)value;
-            if (ws->window && ws->was_visible) {
+            if (ws->is_external && ws->was_visible) {
+                g_spawn_command_line_async(ws->command, NULL);
+                ws->was_visible = FALSE;
+            } else if (ws->window && ws->was_visible) {
                 gtk_widget_set_visible(GTK_WIDGET(ws->window), TRUE);
                 ws->was_visible = FALSE;
             }
@@ -452,6 +482,7 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
             const char *name = json_object_get_string_member(current_obj, "name");
             if (name && g_strcmp0(name, widget_name) == 0) { item_obj = current_obj; break; }
         }
+        
         if (!item_obj) { g_warning("Command line: No config for '%s' found.", widget_name); }
         else if (g_strcmp0(widget_name, "qscreen") == 0) {
             g_autofree gchar *temp_template = g_build_filename(g_get_tmp_dir(), "aurora-qscreen-XXXXXX.png", NULL);
@@ -467,28 +498,57 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
             else { g_child_watch_add(child_pid, on_qscreen_pre_capture_finished, launch_data); }
         }
         else {
-            const char *type = json_object_get_string_member_with_default(item_obj, "type", "widget");
-            if (g_strcmp0(type, "command") == 0 && json_object_has_member(item_obj, "command")) {
-                const char *command_to_run = json_object_get_string_member(item_obj, "command");
-                g_spawn_command_line_async(command_to_run, NULL);
-            } else {
-                WidgetState *state = g_hash_table_lookup(shell->widgets, widget_name);
-                if (state && state->window) {
+            WidgetState *state = g_hash_table_lookup(shell->widgets, widget_name);
+            if (state) {
+                gboolean will_open = FALSE;
+
+                // --- NEW: External App Toggle Logic ---
+                if (state->is_external) {
+                    g_autofree gchar *pgrep_cmd = g_strdup_printf("pgrep -x '%s' > /dev/null", state->process_name);
+                    if (system(pgrep_cmd) == 0) {
+                        // It is running, kill it cleanly
+                        g_autofree gchar *pkill_cmd = g_strdup_printf("pkill -x '%s'", state->process_name);
+                        system(pkill_cmd);
+                    } else {
+                        // Not running, launch it
+                        g_spawn_command_line_async(state->command, NULL);
+                        will_open = TRUE;
+                    }
+                } 
+                // --- OLD: Native GTK Widget Toggle Logic ---
+                else if (state->window) {
                     if (g_strcmp0(widget_name, "surfacedesk") != 0) {
                         gboolean is_visible = gtk_widget_get_visible(GTK_WIDGET(state->window));
                         gtk_widget_set_visible(GTK_WIDGET(state->window), !is_visible);
                         if (!is_visible) {
                             if (state->is_interactive) { gtk_widget_grab_focus(GTK_WIDGET(state->window)); }
-                            if (json_object_has_member(item_obj, "close")) {
-                                JsonArray *widgets_to_close = json_object_get_array_member(item_obj, "close");
-                                for (guint j = 0; j < json_array_get_length(widgets_to_close); j++) {
-                                    const char *name_to_close = json_array_get_string_element(widgets_to_close, j);
-                                    WidgetState *other_state = g_hash_table_lookup(shell->widgets, name_to_close);
-                                    if (other_state) hide_widget(other_state);
-                                }
+                            will_open = TRUE;
+                        }
+                    }
+                }
+
+                // Handle automatic closing of other widgets if configured
+                if (will_open && json_object_has_member(item_obj, "close")) {
+                    JsonArray *widgets_to_close = json_object_get_array_member(item_obj, "close");
+                    for (guint j = 0; j < json_array_get_length(widgets_to_close); j++) {
+                        const char *name_to_close = json_array_get_string_element(widgets_to_close, j);
+                        WidgetState *other_state = g_hash_table_lookup(shell->widgets, name_to_close);
+                        if (other_state) {
+                            if (other_state->is_external) {
+                                g_autofree gchar *pk = g_strdup_printf("pkill -x '%s'", other_state->process_name);
+                                system(pk);
+                            } else {
+                                hide_widget(other_state);
                             }
                         }
                     }
+                }
+            } else {
+                // Generic command-only fallback
+                const char *type = json_object_get_string_member_with_default(item_obj, "type", "widget");
+                if (g_strcmp0(type, "command") == 0 && json_object_has_member(item_obj, "command")) {
+                    const char *command_to_run = json_object_get_string_member(item_obj, "command");
+                    g_spawn_command_line_async(command_to_run, NULL);
                 }
             }
         }
@@ -500,7 +560,6 @@ static int command_line_handler(GApplication *app, GApplicationCommandLine *cmdl
 static void activate_handler(GApplication *app, gpointer user_data) {
     (void)app; AuroraShell *shell = (AuroraShell *)user_data;
 
-    // Register our D-Bus interface so plugins like surfacedesk can communicate back to us
     GDBusConnection *conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
     if (conn) {
         const gchar* xml = "<node><interface name='com.meismeric.aurora.shell'>"
