@@ -35,13 +35,14 @@ inline const QDBusArgument &operator>>(const QDBusArgument &argument, SearchResu
 
 class LauncherBackend : public QObject, protected QDBusContext {
     Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "com.meismeric.aurora.widget") 
 
     Q_PROPERTY(QVariantMap themeData READ themeData NOTIFY themeChanged)
     Q_PROPERTY(QVariantList results READ results NOTIFY resultsChanged)
     Q_PROPERTY(int currentMode READ currentMode NOTIFY modeChanged)
 
 public:
-    explicit LauncherBackend(QObject *parent = nullptr);
+    explicit LauncherBackend(const QString& widgetName, QObject *parent = nullptr);
 
     QVariantMap themeData() const { return m_themeData; }
     QVariantList results() const { return m_results; }
@@ -54,13 +55,28 @@ public:
 
 public slots:
     void clearState();
+    
+    // Aurora Shell Standard Widget Interface Slots
+    bool GetIsVisible() { return m_isVisible; }
+    void Toggle() { if (m_isVisible) Hide(); else Show(); }
+    void Show();
+    void Hide();
+    
+    // QML calls this when the hide animation is fully completed
+    void notifyHidden();
 
 signals:
     void themeChanged();
     void resultsChanged();
     void modeChanged();
+    
+    // QML Animation Triggers
     void requestShow();
     void requestHide();
+
+    // Native Window Map/Unmap Triggers (THE FIX)
+    void windowNeedsShow();
+    void windowNeedsHide();
 
 private slots:
     void reloadTheme();
@@ -73,4 +89,5 @@ private:
     QVariantList m_results;
     int m_currentMode = 0; 
     QFileSystemWatcher *m_watcher;
+    bool m_isVisible = false;
 };

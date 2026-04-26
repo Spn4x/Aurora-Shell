@@ -4,20 +4,29 @@ import Aurora.Foresight
 
 Window {
     id: root
-    visible: false // THE FIX: Must be false! C++ will show it after LayerShell is ready.
+    // THE FIX: Provide fallback dimensions so Wayland never kills the client
+    // for having a 0x0 size if it's not anchored to the screen edges.
+    width: 1920
+    height: 1080
+    
+    visible: false
     color: "transparent"
     flags: Qt.FramelessWindowHint
 
     Connections {
         target: Backend
+        function onRequestShow() {
+            foresight.show()
+        }
         function onRequestHide() { 
             foresight.hide() 
         }
     }
 
+    // Catch clicks on the transparent background to close the launcher
     MouseArea {
         anchors.fill: parent
-        onClicked: foresight.hide()
+        onClicked: Backend.Hide()
     }
 
     Foresight {
@@ -26,12 +35,8 @@ Window {
 
         onOpacityChanged: {
             if (opacity === 0.0 && scale < 1.0) {
-                Qt.quit()
+                Backend.notifyHidden()
             }
         }
-    }
-
-    Component.onCompleted: {
-        foresight.show()
     }
 }

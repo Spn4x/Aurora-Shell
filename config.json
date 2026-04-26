@@ -172,16 +172,13 @@
       "width" : 275,
       "height" : 450
     },
-    "exclusive" : false
+    "exclusive" : true
   },
   {
-    "name" : "launcher",
-    "plugin" : "/usr/local/lib/aurora-shell/widgets/launcher.so",
-    "stylesheet" : "launcher.css",
-    "layer" : "overlay",
-    "anchor" : "center",
-    "visible_on_start" : false,
-    "interactive" : true
+    "name": "foresight",
+    "type": "external",
+    "command": "aurora-foresight",
+    "process_name": "aurora-foresight"
   },
   {
     "type" : "themer-config",
@@ -228,10 +225,10 @@
     "name" : "aurora-notification-daemon",
     "command" : "/usr/local/bin/auroranotifyd"
   },
-  {
+ {
     "type" : "daemon",
-    "name" : "aurora-notification-ui",
-    "command" : "/usr/local/bin/auroranotify-ui"
+    "name" : "aurora-handsight",
+    "command" : "/usr/local/bin/aurora-handsight"
   },
   {
     "type" : "daemon",

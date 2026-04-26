@@ -15,20 +15,43 @@
 #include <QTextStream>
 #include <QRegularExpression>
 
-LauncherBackend::LauncherBackend(QObject *parent) : QObject(parent) {
+LauncherBackend::LauncherBackend(const QString& widgetName, QObject *parent) : QObject(parent) {
     qDBusRegisterMetaType<SearchResult>();
     qDBusRegisterMetaType<QList<SearchResult>>();
+
+    // Register our D-Bus interface so Aurora Shell can command us
+    QString busName = "com.meismeric.aurora.widgets." + widgetName;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    bus.registerService(busName);
+    bus.registerObject("/com/meismeric/aurora/widget", this, QDBusConnection::ExportAllSlots);
 
     setupThemeWatcher();
     reloadTheme();
 }
 
+// --- THE FIX: Proper Window Lifecycle Management ---
+
+void LauncherBackend::Show() { 
+    m_isVisible = true; 
+    emit windowNeedsShow(); // Map the window immediately to grab keyboard focus
+    emit requestShow();     // Tell QML to fade in
+}
+
+void LauncherBackend::Hide() { 
+    m_isVisible = false; 
+    emit requestHide();     // Tell QML to fade out
+}
+
+void LauncherBackend::notifyHidden() { 
+    m_isVisible = false; 
+    emit windowNeedsHide(); // Unmap the window so it drops the keyboard/mouse lock!
+}
+
+// ---------------------------------------------------
+
 void LauncherBackend::clearState() {
-    // Only clear the UI search results!
     m_results.clear();
     emit resultsChanged();
-    
-    // REMOVED THE D-BUS CALL TO "ClearClipboard" THAT WIPED THE RUST CACHE!
 }
 
 void LauncherBackend::setMode(int mode) {
@@ -119,7 +142,7 @@ void LauncherBackend::activateResult(int index) {
         QDBusConnection::sessionBus().call(msg, QDBus::NoBlock);
     }
 
-    emit requestHide();
+    Hide();
 }
 
 void LauncherBackend::deleteClipboardItem(int index) {
