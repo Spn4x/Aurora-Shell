@@ -42,7 +42,6 @@ Rectangle {
 
     Component.onCompleted: syncPrivacyModel()
 
-    // THE FIX: Dynamic sizing logic unbound from state limitations
     property int animatedExpandedHeight: {
         if (Backend.displayMode === "notification") return notifColumn.implicitHeight + 32
         if (Backend.displayMode === "media") return mediaComponent.expandedImplicitHeight + 32
@@ -66,9 +65,10 @@ Rectangle {
     height: state === "expanded" ? animatedExpandedHeight : AppTheme.pillHeight
     radius: state === "expanded" ? AppTheme.expandedRadius : AppTheme.pillRadius
     
-    Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
-    Behavior on height { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
-    Behavior on radius { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
+    // THE FIX: Using OutCubic to perfectly sync container resizing with text sliding
+    Behavior on width { NumberAnimation { duration: 350; easing.type: Easing.OutCubic } }
+    Behavior on height { NumberAnimation { duration: 350; easing.type: Easing.OutCubic } }
+    Behavior on radius { NumberAnimation { duration: 350; easing.type: Easing.OutCubic } }
     
     opacity: 0
     scale: 0.8

@@ -69,18 +69,18 @@ Item {
             
             Row {
                 anchors.centerIn: parent
-                spacing: 12 // Slightly more space for bigger icon
+                spacing: 12 
                 
                 SystemIcon { 
                     iconName: "audio-headphones-symbolic"
-                    size: 28 // THE FIX: Big Headphones
+                    size: 28 
                     iconColor: AppTheme.accent 
                     anchors.verticalCenter: parent.verticalCenter
                 }
                 Text {
                     text: "Now Playing"
                     color: AppTheme.accent
-                    font.pixelSize: 17 // Bumped to match icon weight
+                    font.pixelSize: 17 
                     font.bold: true
                     anchors.verticalCenter: parent.verticalCenter
                 }
@@ -102,12 +102,10 @@ Item {
 
             spacing: 12
 
-            // THE FIX: Bulletproof Album Art using OpacityMask
             Item {
                 Layout.preferredWidth: 34
                 Layout.preferredHeight: 34
 
-                // Base container holding the fallback icon
                 Rectangle {
                     anchors.fill: parent
                     radius: 8 
@@ -122,7 +120,6 @@ Item {
                     }
                 }
 
-                // The hidden source image
                 Image {
                     id: pillImg
                     anchors.fill: parent
@@ -131,7 +128,6 @@ Item {
                     visible: false 
                 }
 
-                // The hidden mask shape
                 Rectangle {
                     id: pillMaskShape
                     anchors.fill: parent
@@ -139,7 +135,6 @@ Item {
                     visible: false
                 }
 
-                // The actual rounded cutout
                 OpacityMask {
                     anchors.fill: parent
                     source: pillImg
@@ -147,7 +142,6 @@ Item {
                     visible: pillImg.status === Image.Ready
                 }
 
-                // Hollow overlay border so it stays crisp
                 Rectangle {
                     anchors.fill: parent
                     radius: 8
@@ -189,7 +183,7 @@ Item {
             }
         }
         
-        // STATE C: PINNED LYRICS WITH SLIDING ANIMATION
+        // STATE C: THE FIX - STABLE WIGGLE-FREE LYRICS
         Item {
             id: pinnedLyricContainer
             anchors.fill: parent
@@ -215,17 +209,18 @@ Item {
 
             ParallelAnimation {
                 id: slideAnim
-                NumberAnimation { target: oldLyricText; property: "y"; to: -parent.height; duration: 350; easing.type: Easing.InOutQuad }
-                NumberAnimation { target: oldLyricText; property: "opacity"; to: 0; duration: 350; easing.type: Easing.InOutQuad }
-                NumberAnimation { target: pinnedLyricText; property: "y"; to: 0; duration: 350; easing.type: Easing.InOutQuad }
-                NumberAnimation { target: pinnedLyricText; property: "opacity"; to: 1; duration: 350; easing.type: Easing.InOutQuad }
+                // Easing curve perfectly matches the container width resize
+                NumberAnimation { target: oldLyricText; property: "y"; to: -parent.height; duration: 350; easing.type: Easing.OutCubic }
+                NumberAnimation { target: oldLyricText; property: "opacity"; to: 0; duration: 300; easing.type: Easing.OutCubic }
+                NumberAnimation { target: pinnedLyricText; property: "y"; to: 0; duration: 350; easing.type: Easing.OutCubic }
+                NumberAnimation { target: pinnedLyricText; property: "opacity"; to: 1; duration: 300; easing.type: Easing.OutCubic }
             }
             
             Text {
                 id: oldLyricText
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: parent.width - 24
-                height: parent.height
+                anchors.centerIn: parent
+                // THE FIX: Do not bind to parent width! Bind to static max width!
+                width: Math.min(implicitWidth, 800 - 64)
                 color: AppTheme.fg; font.pixelSize: 16; font.bold: true
                 horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                 elide: Text.ElideRight; maximumLineCount: 1; opacity: 0
@@ -233,9 +228,9 @@ Item {
             
             Text {
                 id: pinnedLyricText
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: parent.width - 24
-                height: parent.height
+                anchors.centerIn: parent
+                // THE FIX: Do not bind to parent width! Bind to static max width!
+                width: Math.min(implicitWidth, 800 - 64)
                 text: pinnedLyricContainer.currentText
                 color: AppTheme.fg; font.pixelSize: 16; font.bold: true
                 horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
@@ -262,7 +257,6 @@ Item {
             Layout.fillWidth: true
             spacing: 16
 
-            // THE FIX: Bulletproof Album Art 64x64
             Item {
                 Layout.preferredWidth: 64
                 Layout.preferredHeight: 64
