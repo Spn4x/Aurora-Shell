@@ -26,7 +26,7 @@ QtObject {
     property int pillActionRadius: 12
 
     // Sizing (Increased to match GTK visual weight)
-    property int pillWidth: 280
+    property int pillWidth: 320
     property int pillHeight: 46
     property int expandedMinWidth: 400
     property int expandedMinHeight: 120

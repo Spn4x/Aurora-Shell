@@ -7,14 +7,12 @@ Rectangle {
     id: island
     state: "hidden" 
     
-    // Flags to delay backend data destruction until animations finish
     property bool pendingReadyForNext: false
     property bool pendingPrivacyAction: false
     property string pendingPrivacyType: ""
     property int pendingPrivacyPid: 0
     property string pendingPrivacyName: ""
 
-    // Smart ListModel to prevent the Repeater from tearing down when C++ updates the array
     ListModel { id: privacyAppModel }
 
     function syncPrivacyModel() {
@@ -44,34 +42,54 @@ Rectangle {
 
     Component.onCompleted: syncPrivacyModel()
 
-    // DYNAMIC HEIGHT
-    // Because the inner components (like the sliding Kill All button) animate their own layout changes,
-    // this property will naturally glide. No explicit Behavior is needed here!
+    // THE FIX: Dynamic sizing logic unbound from state limitations
     property int animatedExpandedHeight: {
         if (Backend.displayMode === "notification") return notifColumn.implicitHeight + 32
+        if (Backend.displayMode === "media") return mediaComponent.expandedImplicitHeight + 32
         if (Backend.displayMode === "privacy") {
             if (Backend.privacyApps.length === 1) return privacySingleColumn.implicitHeight + 32
             if (Backend.privacyApps.length > 1) return privacyMultiColumn.implicitHeight + 32
         }
         return AppTheme.expandedMinHeight
     }
+    
+    property int dynamicWidth: {
+        if (state === "hidden") return AppTheme.pillWidth;
+        if (state === "expanded") return AppTheme.expandedMinWidth;
+        if (Backend.displayMode === "media" && Backend.mediaPinned) {
+            return Math.min(Math.max(AppTheme.pillWidth, mediaPillComponent.pinnedContentWidth + 64), 800);
+        }
+        return AppTheme.pillWidth;
+    }
 
-    width: AppTheme.pillWidth
-    height: AppTheme.pillHeight
-    radius: AppTheme.pillRadius
+    width: dynamicWidth
+    height: state === "expanded" ? animatedExpandedHeight : AppTheme.pillHeight
+    radius: state === "expanded" ? AppTheme.expandedRadius : AppTheme.pillRadius
+    
+    Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
+    Behavior on height { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
+    Behavior on radius { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
+    
     opacity: 0
     scale: 0.8
     color: AppTheme.bg
-    border.color: AppTheme.borderAlpha
+    border.color: Backend.mediaPinned && Backend.displayMode === "media" ? AppTheme.accent : AppTheme.borderAlpha
     border.width: 2 
     clip: true
 
     function startTimer() {
         autoDismissTimer.stop()
+        
+        if (Backend.mediaPinned && Backend.displayMode === "media" && Backend.mediaStatus === "Playing") {
+            return;
+        }
+
         if (Backend.displayMode === "osd") {
             autoDismissTimer.interval = 1500
         } else if (island.state === "expanded") {
             autoDismissTimer.interval = Backend.hasActions ? 12000 : 8000
+        } else if (Backend.displayMode === "media") {
+            autoDismissTimer.interval = 6000 
         } else {
             autoDismissTimer.interval = 4000
         }
@@ -92,6 +110,8 @@ Rectangle {
     }
 
     onStateChanged: {
+        Backend.isExpanded = (state === "expanded"); 
+        
         if (state === "pill" || state === "expanded") {
             island.startTimer()
         }
@@ -104,7 +124,7 @@ Rectangle {
                 island.pendingReadyForNext = true;
                 island.state = "pill";
             } else if (island.state === "pill") {
-                if (Backend.displayMode === "notification" || Backend.displayMode === "osd") {
+                if (Backend.displayMode === "notification" || Backend.displayMode === "osd" || Backend.displayMode === "media") {
                     Backend.readyForNext();
                 }
             }
@@ -114,7 +134,9 @@ Rectangle {
     Connections {
         target: Backend
         function onRequestShow() { 
-            if (island.state === "hidden") island.state = "pill"
+            if (island.state === "hidden") {
+                island.state = "pill";
+            }
             island.startTimer() 
         }
         function onRequestHide() { 
@@ -123,6 +145,23 @@ Rectangle {
         }
         function onPrivacyChanged() {
             island.syncPrivacyModel()
+        }
+        function onMediaChanged() {
+            if (Backend.mediaStatus !== "Playing" && Backend.mediaPinned && island.state === "expanded") {
+                island.startTimer()
+            } else if (Backend.mediaStatus === "Playing" && Backend.mediaPinned) {
+                autoDismissTimer.stop()
+            }
+        }
+        function onDisplayModeChanged() {
+            if (Backend.displayMode === "notification") {
+                island.state = "pill"; 
+                island.startTimer();
+            } else if (Backend.displayMode === "media" && Backend.mediaPinned) {
+                if (island.state === "hidden") {
+                    island.state = "pill";
+                }
+            }
         }
     }
 
@@ -164,7 +203,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     iconName: Backend.osdIcon
                     iconColor: AppTheme.fg
-                    size: 26 // Optimized visual weight
+                    size: 26 
                 }
 
                 Rectangle {
@@ -198,7 +237,7 @@ Rectangle {
         Item {
             id: textContainer
             anchors.fill: parent
-            opacity: Backend.displayMode !== "osd" ? 1 : 0
+            opacity: (Backend.displayMode === "notification" || Backend.displayMode === "privacy") ? 1 : 0
             visible: opacity > 0
             Behavior on opacity { NumberAnimation { duration: 150 } }
 
@@ -280,6 +319,16 @@ Rectangle {
                 NumberAnimation { target: newTextLabel; property: "y"; to: 0; duration: 250; easing.type: Easing.OutCubic }
                 NumberAnimation { target: newTextLabel; property: "opacity"; to: 1; duration: 250 }
             }
+        }
+        
+        // MEDIA CONTAINER
+        Player {
+            id: mediaPillComponent
+            anchors.fill: parent
+            isExpanded: false
+            opacity: Backend.displayMode === "media" ? 1 : 0
+            visible: opacity > 0
+            Behavior on opacity { NumberAnimation { duration: 150 } }
         }
     }
 
@@ -516,6 +565,18 @@ Rectangle {
                 MouseArea { id: killAllMouse; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: island.requestPrivacyAction("killAll", 0, "") }
             }
         }
+        
+        // MEDIA CONTAINER (EXPANDED)
+        Player {
+            id: mediaComponent
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            isExpanded: true
+            opacity: Backend.displayMode === "media" ? 1 : 0
+            visible: opacity > 0
+            Behavior on opacity { NumberAnimation { duration: 150 } }
+        }
     }
 
     // ==========================================
@@ -544,24 +605,9 @@ Rectangle {
     }
 
     states: [
-        State { 
-            name: "hidden"
-            PropertyChanges { target: island; width: AppTheme.pillWidth; height: AppTheme.pillHeight; radius: AppTheme.pillRadius; opacity: 0; scale: 0.8 } 
-            PropertyChanges { target: pillView; opacity: 1 }
-            PropertyChanges { target: expandedView; opacity: 0 }
-        },
-        State { 
-            name: "pill"
-            PropertyChanges { target: island; width: AppTheme.pillWidth; height: AppTheme.pillHeight; radius: AppTheme.pillRadius; opacity: 1; scale: 1.0 } 
-            PropertyChanges { target: pillView; opacity: 1 }
-            PropertyChanges { target: expandedView; opacity: 0 }
-        },
-        State { 
-            name: "expanded"
-            PropertyChanges { target: island; width: AppTheme.expandedMinWidth; height: animatedExpandedHeight; radius: AppTheme.expandedRadius; opacity: 1; scale: 1.0 } 
-            PropertyChanges { target: pillView; opacity: 0 }
-            PropertyChanges { target: expandedView; opacity: 1 }
-        }
+        State { name: "hidden"; PropertyChanges { target: island; opacity: 0; scale: 0.8 } },
+        State { name: "pill"; PropertyChanges { target: island; opacity: 1; scale: 1.0 } },
+        State { name: "expanded"; PropertyChanges { target: island; opacity: 1; scale: 1.0 } }
     ]
 
     transitions: [
@@ -570,7 +616,7 @@ Rectangle {
             SequentialAnimation {
                 ScriptAction { script: { if (island.state !== "hidden") island.startTimer() } }
                 ParallelAnimation {
-                    NumberAnimation { target: island; properties: "width,height,radius,opacity,scale"; duration: 400; easing.type: Easing.OutBack; easing.overshoot: 1.2 }
+                    NumberAnimation { target: island; properties: "opacity,scale"; duration: 400; easing.type: Easing.OutBack; easing.overshoot: 1.2 }
                     NumberAnimation { targets: [pillView, expandedView]; property: "opacity"; duration: 300; easing.type: Easing.InOutQuad }
                 }
                 ScriptAction { 
@@ -586,8 +632,7 @@ Rectangle {
         Transition {
             to: "expanded"
             ParallelAnimation {
-                // To keep the initial jump open smooth, we override the removed behavior here
-                NumberAnimation { target: island; properties: "width,height,radius"; duration: 450; easing.type: Easing.OutBack; easing.overshoot: 1.1 }
+                NumberAnimation { target: island; properties: "opacity,scale"; duration: 450; easing.type: Easing.OutBack; easing.overshoot: 1.1 }
                 NumberAnimation { targets: [pillView, expandedView]; property: "opacity"; duration: 300; easing.type: Easing.InOutQuad }
             }
         },
@@ -596,9 +641,6 @@ Rectangle {
             to: "hidden"
             SequentialAnimation {
                 ParallelAnimation {
-                    NumberAnimation { target: island; properties: "width"; to: AppTheme.pillWidth; duration: 300; easing.type: Easing.OutExpo }
-                    NumberAnimation { target: island; properties: "height"; to: AppTheme.pillHeight; duration: 300; easing.type: Easing.OutExpo }
-                    NumberAnimation { target: island; properties: "radius"; to: AppTheme.pillRadius; duration: 300; easing.type: Easing.OutExpo }
                     NumberAnimation { target: island; properties: "opacity"; to: 0; duration: 250; easing.type: Easing.InCubic }
                     NumberAnimation { target: island; properties: "scale"; to: 0.8; duration: 250; easing.type: Easing.InCubic }
                     NumberAnimation { targets: [pillView, expandedView]; property: "opacity"; duration: 250; easing.type: Easing.InCubic }

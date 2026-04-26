@@ -25,27 +25,31 @@ static GtkWidget* create_default_view() {
 }
 
 static void on_media_manager_changed(GDBusProxy *proxy, GVariant *changed_properties, const gchar *const *invalidated_properties, gpointer user_data) {
-    (void)changed_properties; (void)invalidated_properties;
+    (void)invalidated_properties;
     MprisPluginState *state = user_data;
     
-    g_autoptr(GVariant) active_var = g_dbus_proxy_get_cached_property(proxy, "ActivePlayer");
-    const char *active_player = active_var ? g_variant_get_string(active_var, NULL) : "";
+    // Only recreate the view if the ActivePlayer string actually changes
+    if (changed_properties && g_variant_lookup_value(changed_properties, "ActivePlayer", NULL)) {
+        g_autoptr(GVariant) active_var = g_dbus_proxy_get_cached_property(proxy, "ActivePlayer");
+        const char *active_player = active_var ? g_variant_get_string(active_var, NULL) : "";
 
-    if (active_player && strlen(active_player) > 0) {
-        GtkWidget *old_view = gtk_stack_get_child_by_name(GTK_STACK(state->view_stack), "player-view");
-        if (old_view) gtk_stack_remove(GTK_STACK(state->view_stack), old_view);
-        
-        GtkWidget *new_view = create_mpris_view(active_player, &state->mpris_state, state->width, state->height);
-        if (new_view) {
-            state->mpris_state->window = GTK_WINDOW(gtk_widget_get_root(state->view_stack));
-            gtk_stack_add_named(GTK_STACK(state->view_stack), new_view, "player-view");
-            gtk_stack_set_visible_child_name(GTK_STACK(state->view_stack), "player-view");
+        if (active_player && strlen(active_player) > 0) {
+            GtkWidget *old_view = gtk_stack_get_child_by_name(GTK_STACK(state->view_stack), "player-view");
+            if (old_view) gtk_stack_remove(GTK_STACK(state->view_stack), old_view);
+            
+            // WE PASS THE MANAGER PROXY HERE
+            GtkWidget *new_view = create_mpris_view(state->manager_proxy, active_player, &state->mpris_state, state->width, state->height);
+            if (new_view) {
+                state->mpris_state->window = GTK_WINDOW(gtk_widget_get_root(state->view_stack));
+                gtk_stack_add_named(GTK_STACK(state->view_stack), new_view, "player-view");
+                gtk_stack_set_visible_child_name(GTK_STACK(state->view_stack), "player-view");
+            }
+        } else {
+            state->mpris_state = NULL;
+            gtk_stack_set_visible_child_name(GTK_STACK(state->view_stack), "default-view");
+            GtkWidget *old_view = gtk_stack_get_child_by_name(GTK_STACK(state->view_stack), "player-view");
+            if (old_view) gtk_stack_remove(GTK_STACK(state->view_stack), old_view);
         }
-    } else {
-        state->mpris_state = NULL;
-        gtk_stack_set_visible_child_name(GTK_STACK(state->view_stack), "default-view");
-        GtkWidget *old_view = gtk_stack_get_child_by_name(GTK_STACK(state->view_stack), "player-view");
-        if (old_view) gtk_stack_remove(GTK_STACK(state->view_stack), old_view);
     }
 }
 
@@ -56,7 +60,11 @@ static void on_media_manager_ready(GObject *source, GAsyncResult *res, gpointer 
     state->manager_proxy = g_dbus_proxy_new_for_bus_finish(res, &error);
     if (state->manager_proxy) {
         g_signal_connect(state->manager_proxy, "g-properties-changed", G_CALLBACK(on_media_manager_changed), state);
-        on_media_manager_changed(state->manager_proxy, NULL, NULL, state); // Trigger initial load
+        
+        // Force a fake property change to trigger initial load
+        g_autoptr(GVariantBuilder) builder = g_variant_builder_new(G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_add(builder, "{sv}", "ActivePlayer", g_variant_new_string("init"));
+        on_media_manager_changed(state->manager_proxy, g_variant_builder_end(builder), NULL, state);
     } else {
         g_warning("Failed to connect to MediaManager: %s", error->message);
         if(error) g_error_free(error);
@@ -93,10 +101,8 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     gtk_widget_set_size_request(state->view_stack, state->width, state->height);
 
     g_object_set_data_full(G_OBJECT(state->view_stack), "plugin-state", state, plugin_cleanup);
-
     gtk_stack_add_named(GTK_STACK(state->view_stack), create_default_view(), "default-view");
 
-    // Connect to our new centralized daemon
     g_dbus_proxy_new_for_bus(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL,
         "com.meismeric.aurora.MediaManager", "/com/meismeric/aurora/MediaManager", "com.meismeric.aurora.MediaManager",
         NULL, on_media_manager_ready, state);

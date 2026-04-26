@@ -1,12 +1,17 @@
 #include "NotificationBackend.h"
 #include <QDBusConnection>
 #include <QDBusMessage>
+#include <QDBusReply>
+#include <QDBusPendingCallWatcher>
+#include <QDBusVariant>
 #include <QDebug>
-#include <QDBusError>
 #include <QDir>
 #include <QFile>
 #include <QTextStream>
 #include <QRegularExpression>
+#include <QCryptographicHash>
+#include <QProcess>
+#include <QUrl>
 #include <csignal>
 #include <cstdlib>
 
@@ -17,6 +22,10 @@ NotificationBackend::NotificationBackend(QObject *parent) : QObject(parent) {
 
     setupThemeWatcher();
     reloadTheme();
+    setupMediaManager();
+    
+    connect(&m_positionTimer, &QTimer::timeout, this, &NotificationBackend::fetchPosition);
+    m_positionTimer.start(1000);
 }
 
 void NotificationBackend::setupThemeWatcher() {
@@ -69,6 +78,13 @@ void NotificationBackend::reloadTheme() {
     emit themeChanged();
 }
 
+void NotificationBackend::setIsExpanded(bool expanded) {
+    if (m_isExpanded != expanded) {
+        m_isExpanded = expanded;
+        emit isExpandedChanged();
+    }
+}
+
 void NotificationBackend::ShowNotification(uint id, const QString &icon, const QString &summary, const QString &body, const QStringList &actions) {
     NotificationData data;
     data.id = id;
@@ -96,29 +112,21 @@ void NotificationBackend::SetPrivacyStatus(const QString &payload) {
     
     QJsonArray arr = doc.array();
 
-    // 1. Prune ignored PIDs that have stopped streaming
     for (int i = m_ignoredPids.size() - 1; i >= 0; --i) {
         uint igPid = m_ignoredPids[i];
         bool stillRunning = false;
         for (int j = 0; j < arr.size(); ++j) {
-            // FIXED: Used .toInt() instead of .toUInt() for QJsonValueRef
-            if (arr[j].toObject()["pid"].toInt() == (int)igPid) {
-                stillRunning = true; break;
-            }
+            if (arr[j].toObject()["pid"].toInt() == (int)igPid) { stillRunning = true; break; }
         }
         if (!stillRunning) m_ignoredPids.removeAt(i);
     }
 
-    // 2. Prune ignored Names that have stopped streaming
     for (int i = m_ignoredNames.size() - 1; i >= 0; --i) {
         QString igName = m_ignoredNames[i];
         bool stillRunning = false;
         for (int j = 0; j < arr.size(); ++j) {
             QJsonObject obj = arr[j].toObject();
-            // FIXED: Used .toInt() instead of .toUInt() for QJsonValueRef
-            if (obj["pid"].toInt() == 0 && obj["name"].toString() == igName) {
-                stillRunning = true; break;
-            }
+            if (obj["pid"].toInt() == 0 && obj["name"].toString() == igName) { stillRunning = true; break; }
         }
         if (!stillRunning) m_ignoredNames.removeAt(i);
     }
@@ -126,14 +134,12 @@ void NotificationBackend::SetPrivacyStatus(const QString &payload) {
     QVariantList apps;
     bool globalHasMic = false, globalHasCam = false;
 
-    // 3. Process incoming apps
     for (int i = 0; i < arr.size(); ++i) {
         QJsonObject obj = arr[i].toObject();
         uint pid = obj["pid"].toInt();
         QString name = obj["name"].toString();
         int type = obj["type"].toInt();
         
-        // Skip apps that are currently in our active ignore lists
         if (pid > 0 && m_ignoredPids.contains(pid)) continue;
         if (pid == 0 && m_ignoredNames.contains(name)) continue;
 
@@ -175,12 +181,128 @@ void NotificationBackend::SetPrivacyStatus(const QString &payload) {
 }
 
 void NotificationBackend::ShowOSD(const QString &icon, double level) { 
+    if (m_isExpanded) return; 
+
     m_osdIcon = icon;
     m_osdLevel = level;
     m_isShowingOsd = true;
     
     emit osdChanged();
     updateDisplayMode();
+}
+
+void NotificationBackend::UpdateMediaInfo(const QString &playerName, const QString &title, const QString &artist, const QString &artUrl, const QString &status) {
+    m_activePlayerName = playerName;
+    bool changed = false;
+    bool trackChanged = false;
+    
+    if (m_mediaTitle != title || m_mediaArtist != artist) { 
+        m_mediaTitle = title; 
+        m_mediaArtist = artist; 
+        trackChanged = true;
+        changed = true; 
+        fetchDuration();
+    }
+    
+    if (m_mediaStatus != status) { m_mediaStatus = status; changed = true; }
+    
+    // THE FIX: Ignore empty artUrl updates if the song is still the exact same!
+    if (m_originalArtUrl != artUrl) {
+        if (artUrl.isEmpty() && !trackChanged && !m_mediaArt.isEmpty()) {
+            // Do nothing, keep the current art!
+        } else {
+            m_originalArtUrl = artUrl;
+            
+            if (artUrl.isEmpty()) {
+                m_mediaArt = "";
+                changed = true;
+            } else if (artUrl.startsWith("file://")) {
+                QUrl url(artUrl);
+                QString localPath = url.toLocalFile();
+                m_mediaArt = QFile::exists(localPath) ? "file://" + localPath : "";
+                changed = true;
+            } else if (artUrl.startsWith("http://") || artUrl.startsWith("https://")) {
+                QString checksum = QString(QCryptographicHash::hash(artUrl.toUtf8(), QCryptographicHash::Sha256).toHex());
+                QString cacheDir = QDir::homePath() + "/.cache/aurora-shell/art";
+                QDir().mkpath(cacheDir);
+                QString cachePath = cacheDir + "/" + checksum;
+
+                if (QFile::exists(cachePath)) {
+                    m_mediaArt = "file://" + cachePath;
+                    changed = true;
+                } else {
+                    m_mediaArt = ""; 
+                    changed = true;
+                    
+                    QProcess *proc = new QProcess(this);
+                    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc, cachePath](int exitCode, QProcess::ExitStatus exitStatus) {
+                        if (exitStatus == QProcess::NormalExit && exitCode == 0 && QFile::exists(cachePath)) {
+                            m_mediaArt = "file://" + cachePath;
+                            emit mediaChanged();
+                        }
+                        proc->deleteLater();
+                    });
+                    proc->start("curl", QStringList() << "-s" << "-L" << "-o" << cachePath << artUrl);
+                }
+            } else {
+                m_mediaArt = "";
+                changed = true;
+            }
+        }
+    }
+    
+    if (changed) {
+        emit mediaChanged();
+        updateDisplayMode(); 
+    }
+}
+
+void NotificationBackend::fetchPosition() {
+    if (m_activePlayerName.isEmpty() || m_mediaStatus != "Playing" || !m_isExpanded) return;
+    
+    QDBusMessage msg = QDBusMessage::createMethodCall(m_activePlayerName, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties", "Get");
+    msg << "org.mpris.MediaPlayer2.Player" << "Position";
+    
+    QDBusPendingCall call = QDBusConnection::sessionBus().asyncCall(msg);
+    QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(call, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
+        QDBusPendingReply<QDBusVariant> reply = *w;
+        if (!reply.isError()) {
+            qint64 posUs = reply.value().variant().toLongLong();
+            m_mediaPosition = posUs / 1000000;
+            emit positionChanged();
+        }
+        w->deleteLater();
+    });
+}
+
+void NotificationBackend::fetchDuration() {
+    if (m_activePlayerName.isEmpty()) return;
+    
+    QDBusMessage msg = QDBusMessage::createMethodCall(m_activePlayerName, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties", "Get");
+    msg << "org.mpris.MediaPlayer2.Player" << "Metadata";
+    
+    QDBusPendingCall call = QDBusConnection::sessionBus().asyncCall(msg);
+    QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(call, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
+        QDBusPendingReply<QDBusVariant> reply = *w;
+        if (!reply.isError()) {
+            QVariantMap meta = qdbus_cast<QVariantMap>(reply.value().variant().value<QDBusArgument>());
+            if (meta.contains("mpris:length")) {
+                m_mediaDuration = meta["mpris:length"].toLongLong() / 1000000;
+                emit durationChanged();
+            }
+        }
+        w->deleteLater();
+    });
+}
+
+void NotificationBackend::TriggerMediaPeek() {
+    if (m_isShowingNotif || m_isShowingOsd || !m_privacyApps.isEmpty()) return; 
+    
+    m_displayMode = "media";
+    emit displayModeChanged();
+    emit requestShow(); 
 }
 
 void NotificationBackend::processNext() {
@@ -198,6 +320,13 @@ void NotificationBackend::readyForNext() {
         m_isShowingOsd = false;
     } else if (m_displayMode == "notification") {
         m_isShowingNotif = false;
+    } else if (m_displayMode == "media") {
+        if (!m_mediaPinned) {
+            m_displayMode = "idle";
+            emit displayModeChanged();
+            emit requestHide();
+        }
+        return;
     }
     
     processNext();
@@ -212,6 +341,10 @@ void NotificationBackend::updateDisplayMode() {
         m_displayMode = "notification";
     } else if (!m_privacyApps.isEmpty()) {
         m_displayMode = "privacy";
+    } else if (m_mediaPinned && !m_activePlayerName.isEmpty()) {
+        m_displayMode = "media";
+    } else if (oldMode == "media" && !m_mediaPinned) {
+        m_displayMode = "media"; 
     } else {
         m_displayMode = "idle";
     }
@@ -294,4 +427,88 @@ void NotificationBackend::ignorePrivacyApp(uint pid, const QString& name) {
 
     emit privacyChanged();
     updateDisplayMode();
+}
+
+void NotificationBackend::setupMediaManager() {
+    QDBusConnection::sessionBus().connect(
+        "com.meismeric.aurora.MediaManager", "/com/meismeric/aurora/MediaManager",
+        "org.freedesktop.DBus.Properties", "PropertiesChanged",
+        this, SLOT(onMediaManagerPropsChanged(QString, QVariantMap, QStringList))
+    );
+
+    QDBusMessage msg = QDBusMessage::createMethodCall("com.meismeric.aurora.MediaManager", "/com/meismeric/aurora/MediaManager", "org.freedesktop.DBus.Properties", "GetAll");
+    msg << "com.meismeric.aurora.MediaManager";
+    QDBusReply<QVariantMap> reply = QDBusConnection::sessionBus().call(msg);
+    if (reply.isValid()) {
+        QVariantMap props = reply.value();
+        if (props.contains("CurrentLyrics")) {
+            parseLyrics(props["CurrentLyrics"].toString());
+        }
+        if (props.contains("CurrentLyricIndex")) {
+            m_currentLyricIndex = props["CurrentLyricIndex"].toInt();
+            emit lyricIndexChanged();
+        }
+    }
+}
+
+void NotificationBackend::onMediaManagerPropsChanged(const QString &interface, const QVariantMap &changed, const QStringList &invalidated) {
+    Q_UNUSED(interface); Q_UNUSED(invalidated);
+    
+    if (changed.contains("CurrentLyrics")) {
+        parseLyrics(changed["CurrentLyrics"].toString());
+    }
+    if (changed.contains("CurrentLyricIndex")) {
+        m_currentLyricIndex = changed["CurrentLyricIndex"].toInt();
+        emit lyricIndexChanged();
+    }
+}
+
+void NotificationBackend::parseLyrics(const QString& lrc) {
+    if (lrc == m_rawLyricsCache) return;
+    m_rawLyricsCache = lrc;
+
+    m_parsedLyrics.clear();
+    QRegularExpression re("\\[\\d{2}:\\d{2}[.:]\\d{2,3}\\](.*)");
+    QStringList lines = lrc.split('\n');
+    for (const QString& line : lines) {
+        QRegularExpressionMatch match = re.match(line);
+        if (match.hasMatch()) {
+            QString text = match.captured(1).trimmed();
+            m_parsedLyrics.append(text);
+        }
+    }
+    emit lyricsTextChanged();
+}
+
+QString NotificationBackend::mediaCurrentLyric() const {
+    if (m_currentLyricIndex >= 0 && m_currentLyricIndex < m_parsedLyrics.size()) {
+        return m_parsedLyrics[m_currentLyricIndex];
+    }
+    return "";
+}
+
+void NotificationBackend::mediaPlayPause() {
+    if (m_activePlayerName.isEmpty()) return;
+    QDBusMessage msg = QDBusMessage::createMethodCall(m_activePlayerName, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", "PlayPause");
+    QDBusConnection::sessionBus().call(msg, QDBus::NoBlock);
+}
+
+void NotificationBackend::mediaNext() {
+    if (m_activePlayerName.isEmpty()) return;
+    QDBusMessage msg = QDBusMessage::createMethodCall(m_activePlayerName, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", "Next");
+    QDBusConnection::sessionBus().call(msg, QDBus::NoBlock);
+}
+
+void NotificationBackend::mediaPrev() {
+    if (m_activePlayerName.isEmpty()) return;
+    QDBusMessage msg = QDBusMessage::createMethodCall(m_activePlayerName, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", "Previous");
+    QDBusConnection::sessionBus().call(msg, QDBus::NoBlock);
+}
+
+void NotificationBackend::setMediaPinned(bool pinned) {
+    if (m_mediaPinned != pinned) {
+        m_mediaPinned = pinned;
+        emit mediaPinnedChanged();
+        updateDisplayMode();
+    }
 }

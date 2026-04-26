@@ -3,6 +3,7 @@
     <qresource prefix="/">
         <file>ui/Main.qml</file>
         <file>ui/DynamicIsland.qml</file>
+        <file>ui/Player.qml</file>
         <file>ui/AppTheme.qml</file>
         <file>ui/qmldir</file>
     </qresource>
