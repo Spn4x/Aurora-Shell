@@ -8,10 +8,6 @@ Rectangle {
     state: "hidden" 
     
     property bool pendingReadyForNext: false
-    property bool pendingPrivacyAction: false
-    property string pendingPrivacyType: ""
-    property int pendingPrivacyPid: 0
-    property string pendingPrivacyName: ""
 
     ListModel { id: privacyAppModel }
 
@@ -65,7 +61,6 @@ Rectangle {
     height: state === "expanded" ? animatedExpandedHeight : AppTheme.pillHeight
     radius: state === "expanded" ? AppTheme.expandedRadius : AppTheme.pillRadius
     
-    // THE FIX: Using OutCubic to perfectly sync container resizing with text sliding
     Behavior on width { NumberAnimation { duration: 350; easing.type: Easing.OutCubic } }
     Behavior on height { NumberAnimation { duration: 350; easing.type: Easing.OutCubic } }
     Behavior on radius { NumberAnimation { duration: 350; easing.type: Easing.OutCubic } }
@@ -96,17 +91,11 @@ Rectangle {
         autoDismissTimer.restart()
     }
 
+    // THE FIX: Executes instantly. The backend DisplayMode update handles visual morphing dynamically.
     function requestPrivacyAction(type, pid, name) {
-        if (Backend.privacyApps.length === 1 || type === "killAll") {
-            island.pendingPrivacyAction = true
-            island.pendingPrivacyType = type
-            island.pendingPrivacyPid = pid
-            island.pendingPrivacyName = name
-            island.state = "hidden" 
-        } else {
-            if (type === "kill") Backend.killPrivacyApp(pid, name)
-            else if (type === "ignore") Backend.ignorePrivacyApp(pid, name)
-        }
+        if (type === "killAll") Backend.killAllPrivacyApps();
+        else if (type === "kill") Backend.killPrivacyApp(pid, name);
+        else if (type === "ignore") Backend.ignorePrivacyApp(pid, name);
     }
 
     onStateChanged: {
@@ -158,9 +147,10 @@ Rectangle {
                 island.state = "pill"; 
                 island.startTimer();
             } else if (Backend.displayMode === "media" && Backend.mediaPinned) {
-                if (island.state === "hidden") {
-                    island.state = "pill";
-                }
+                // Instantly snaps down to Pill if falling back from an expanded Privacy view
+                island.state = "pill"; 
+            } else if (Backend.displayMode === "privacy") {
+                if (island.state === "hidden") island.state = "pill";
             }
         }
     }
@@ -641,19 +631,12 @@ Rectangle {
             to: "hidden"
             SequentialAnimation {
                 ParallelAnimation {
+                    NumberAnimation { target: island; properties: "width"; to: AppTheme.pillWidth; duration: 300; easing.type: Easing.OutExpo }
+                    NumberAnimation { target: island; properties: "height"; to: AppTheme.pillHeight; duration: 300; easing.type: Easing.OutExpo }
+                    NumberAnimation { target: island; properties: "radius"; to: AppTheme.pillRadius; duration: 300; easing.type: Easing.OutExpo }
                     NumberAnimation { target: island; properties: "opacity"; to: 0; duration: 250; easing.type: Easing.InCubic }
                     NumberAnimation { target: island; properties: "scale"; to: 0.8; duration: 250; easing.type: Easing.InCubic }
                     NumberAnimation { targets: [pillView, expandedView]; property: "opacity"; duration: 250; easing.type: Easing.InCubic }
-                }
-                ScriptAction {
-                    script: {
-                        if (island.pendingPrivacyAction) {
-                            island.pendingPrivacyAction = false;
-                            if (island.pendingPrivacyType === "kill") Backend.killPrivacyApp(island.pendingPrivacyPid, island.pendingPrivacyName);
-                            else if (island.pendingPrivacyType === "ignore") Backend.ignorePrivacyApp(island.pendingPrivacyPid, island.pendingPrivacyName);
-                            else if (island.pendingPrivacyType === "killAll") Backend.killAllPrivacyApps();
-                        }
-                    }
                 }
             }
         },

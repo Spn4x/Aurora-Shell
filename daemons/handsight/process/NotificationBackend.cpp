@@ -206,10 +206,9 @@ void NotificationBackend::UpdateMediaInfo(const QString &playerName, const QStri
     
     if (m_mediaStatus != status) { m_mediaStatus = status; changed = true; }
     
-    // THE FIX: Ignore empty artUrl updates if the song is still the exact same!
     if (m_originalArtUrl != artUrl) {
         if (artUrl.isEmpty() && !trackChanged && !m_mediaArt.isEmpty()) {
-            // Do nothing, keep the current art!
+            // Keep current art
         } else {
             m_originalArtUrl = artUrl;
             
@@ -332,8 +331,12 @@ void NotificationBackend::readyForNext() {
     processNext();
 }
 
+// THE FIX: Bulletproof display hierarchy evaluation
 void NotificationBackend::updateDisplayMode() {
     QString oldMode = m_displayMode;
+    
+    // Media is only valid if a player is active and it isn't "Stopped"
+    bool mediaValid = !m_activePlayerName.isEmpty() && m_mediaStatus != "Stopped";
 
     if (m_isShowingOsd) {
         m_displayMode = "osd";
@@ -341,9 +344,9 @@ void NotificationBackend::updateDisplayMode() {
         m_displayMode = "notification";
     } else if (!m_privacyApps.isEmpty()) {
         m_displayMode = "privacy";
-    } else if (m_mediaPinned && !m_activePlayerName.isEmpty()) {
+    } else if (m_mediaPinned && mediaValid) {
         m_displayMode = "media";
-    } else if (oldMode == "media" && !m_mediaPinned) {
+    } else if (oldMode == "media" && !m_mediaPinned && mediaValid) {
         m_displayMode = "media"; 
     } else {
         m_displayMode = "idle";
@@ -358,6 +361,9 @@ void NotificationBackend::updateDisplayMode() {
         }
     } else if (m_displayMode == "notification" || m_displayMode == "osd") {
         emit requestShow(); 
+    } else if (m_displayMode == "idle") {
+        // Fallback: If it's already idle but the UI is stuck visible, force a hide
+        emit requestHide(); 
     }
 }
 
