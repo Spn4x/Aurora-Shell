@@ -1,6 +1,3 @@
-// ==================================================
-// FILE: ./ui/DynamicIsland.qml
-// ==================================================
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
