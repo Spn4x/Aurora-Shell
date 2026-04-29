@@ -9,7 +9,7 @@ Rectangle {
     state: "hidden" 
     
     property bool pendingReadyForNext: false
-    property bool physicsReady: false // THE FIX: Controls when physics wake up
+    property bool physicsReady: false 
 
     ListModel { id: privacyAppModel }
 
@@ -40,7 +40,6 @@ Rectangle {
 
     Component.onCompleted: {
         syncPrivacyModel()
-        // Wait 150ms for Wayland to assign the full screen width before turning on physics
         startupPhysicsTimer.start() 
     }
 
@@ -88,12 +87,12 @@ Rectangle {
     property real physicsY: targetY
 
     Behavior on physicsCenterX { 
-        enabled: physicsReady // Only animates after startup
+        enabled: physicsReady 
         SpringAnimation { spring: 2.2; damping: 0.2; mass: 1.5; epsilon: 0.01 } 
     }
     
     Behavior on physicsY { 
-        enabled: physicsReady // Only animates after startup
+        enabled: physicsReady 
         SpringAnimation { spring: 2.2; damping: 0.2; mass: 1.5; epsilon: 0.01 } 
     }
 
@@ -609,13 +608,16 @@ Rectangle {
         }
     }
 
-    // ==========================================
+// ==========================================
     // INTERACTION HANDLER
     // ==========================================
     MouseArea {
         id: mainInteractionArea
         anchors.fill: parent
         z: -1 
+        
+        // ACCEPT BOTH LEFT AND RIGHT CLICKS
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
 
         property real startGlobalX: 0
         property real startGlobalY: 0
@@ -624,6 +626,8 @@ Rectangle {
         property bool wasDragged: false
 
         onPressed: (mouse) => {
+            if (mouse.button === Qt.RightButton) return;
+
             snapBackTimer.stop()
             wasDragged = false
             
@@ -635,6 +639,8 @@ Rectangle {
         }
 
         onPositionChanged: (mouse) => {
+            if (!(mouse.buttons & Qt.LeftButton)) return;
+
             let globalPos = mapToItem(island.parent, mouse.x, mouse.y)
             let deltaX = globalPos.x - startGlobalX
             let deltaY = globalPos.y - startGlobalY
@@ -649,12 +655,35 @@ Rectangle {
             }
         }
 
-        onReleased: {
+        onReleased: (mouse) => {
+            if (mouse.button === Qt.RightButton) return;
             snapBackTimer.restart()
         }
 
-        onClicked: {
+        onClicked: (mouse) => {
             if (wasDragged) return;
+
+            // --- RIGHT CLICK DISMISS LOGIC ---
+            if (mouse.button === Qt.RightButton) {
+                // Cannot dismiss active privacy camera/mic warnings via right click!
+                if (Backend.displayMode === "privacy") return; 
+
+                // THE FIX: Unpin media so the backend allows it to be dismissed
+                if (Backend.displayMode === "media") {
+                    Backend.setMediaPinned(false);
+                }
+
+                // Smoothly dismiss Notifications, OSD, AND Media!
+                if (island.state === "expanded") {
+                    island.pendingReadyForNext = true;
+                    island.state = "pill";
+                } else {
+                    Backend.readyForNext();
+                }
+                return;
+            }
+
+            // --- LEFT CLICK EXPAND/ACTION LOGIC ---
             if (Backend.displayMode === "osd") return; 
 
             if (island.state === "pill") {
