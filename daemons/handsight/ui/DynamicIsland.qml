@@ -1,6 +1,10 @@
+// ==================================================
+// FILE: ./ui/DynamicIsland.qml
+// ==================================================
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import Aurora.Shell 
 
 Rectangle {
@@ -8,6 +12,7 @@ Rectangle {
     state: "hidden" 
     
     property bool pendingReadyForNext: false
+    property bool physicsReady: false // THE FIX: Controls when physics wake up
 
     ListModel { id: privacyAppModel }
 
@@ -36,7 +41,17 @@ Rectangle {
         }
     }
 
-    Component.onCompleted: syncPrivacyModel()
+    Component.onCompleted: {
+        syncPrivacyModel()
+        // Wait 150ms for Wayland to assign the full screen width before turning on physics
+        startupPhysicsTimer.start() 
+    }
+
+    Timer {
+        id: startupPhysicsTimer
+        interval: 150
+        onTriggered: island.physicsReady = true
+    }
 
     property int animatedExpandedHeight: {
         if (Backend.displayMode === "notification") return notifColumn.implicitHeight + 32
@@ -64,7 +79,41 @@ Rectangle {
     Behavior on width { NumberAnimation { duration: 350; easing.type: Easing.OutCubic } }
     Behavior on height { NumberAnimation { duration: 350; easing.type: Easing.OutCubic } }
     Behavior on radius { NumberAnimation { duration: 350; easing.type: Easing.OutCubic } }
+
+    // ==========================================
+    // FLAWLESS NATURAL PHYSICS SYSTEM
+    // ==========================================
     
+    property real targetCenterX: parent ? parent.width / 2 : Screen.width / 2
+    property real targetY: 10
+
+    property real physicsCenterX: targetCenterX
+    property real physicsY: targetY
+
+    Behavior on physicsCenterX { 
+        enabled: physicsReady // Only animates after startup
+        SpringAnimation { spring: 2.2; damping: 0.2; mass: 1.5; epsilon: 0.01 } 
+    }
+    
+    Behavior on physicsY { 
+        enabled: physicsReady // Only animates after startup
+        SpringAnimation { spring: 2.2; damping: 0.2; mass: 1.5; epsilon: 0.01 } 
+    }
+
+    x: physicsCenterX - width / 2
+    y: physicsY
+
+    Timer {
+        id: snapBackTimer
+        interval: 5000 
+        onTriggered: {
+            island.targetCenterX = Qt.binding(function() { return island.parent ? island.parent.width / 2 : Screen.width / 2 })
+            island.targetY = 10
+        }
+    }
+
+    // ==========================================
+
     opacity: 0
     scale: 0.8
     color: AppTheme.bg
@@ -91,7 +140,6 @@ Rectangle {
         autoDismissTimer.restart()
     }
 
-    // THE FIX: Executes instantly. The backend DisplayMode update handles visual morphing dynamically.
     function requestPrivacyAction(type, pid, name) {
         if (type === "killAll") Backend.killAllPrivacyApps();
         else if (type === "kill") Backend.killPrivacyApp(pid, name);
@@ -103,6 +151,9 @@ Rectangle {
         
         if (state === "pill" || state === "expanded") {
             island.startTimer()
+        } else if (state === "hidden") {
+            island.targetCenterX = Qt.binding(function() { return island.parent ? island.parent.width / 2 : Screen.width / 2 })
+            island.targetY = 10
         }
     }
 
@@ -147,7 +198,6 @@ Rectangle {
                 island.state = "pill"; 
                 island.startTimer();
             } else if (Backend.displayMode === "media" && Backend.mediaPinned) {
-                // Instantly snaps down to Pill if falling back from an expanded Privacy view
                 island.state = "pill"; 
             } else if (Backend.displayMode === "privacy") {
                 if (island.state === "hidden") island.state = "pill";
@@ -177,7 +227,6 @@ Rectangle {
         opacity: (island.state === "pill") ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
 
-        // OSD CONTAINER
         Item {
             id: osdContainer
             anchors.fill: parent
@@ -223,7 +272,6 @@ Rectangle {
             }
         }
 
-        // TEXT & INDICATOR CONTAINER
         Item {
             id: textContainer
             anchors.fill: parent
@@ -311,7 +359,6 @@ Rectangle {
             }
         }
         
-        // MEDIA CONTAINER
         Player {
             id: mediaPillComponent
             anchors.fill: parent
@@ -337,7 +384,6 @@ Rectangle {
         opacity: (island.state === "expanded") ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 150 } }
 
-        // NOTIFICATION CONTENT
         Column {
             id: notifColumn
             anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
@@ -400,7 +446,6 @@ Rectangle {
             }
         }
 
-        // PRIVACY DASHBOARD (SINGLE APP)
         Column {
             id: privacySingleColumn
             anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
@@ -457,7 +502,6 @@ Rectangle {
             }
         }
 
-        // PRIVACY DASHBOARD (MULTI APP)
         Column {
             id: privacyMultiColumn
             anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
@@ -556,7 +600,6 @@ Rectangle {
             }
         }
         
-        // MEDIA CONTAINER (EXPANDED)
         Player {
             id: mediaComponent
             anchors.top: parent.top
@@ -573,9 +616,48 @@ Rectangle {
     // INTERACTION HANDLER
     // ==========================================
     MouseArea {
+        id: mainInteractionArea
         anchors.fill: parent
         z: -1 
+
+        property real startGlobalX: 0
+        property real startGlobalY: 0
+        property real startTargetCenterX: 0
+        property real startTargetY: 0
+        property bool wasDragged: false
+
+        onPressed: (mouse) => {
+            snapBackTimer.stop()
+            wasDragged = false
+            
+            let globalPos = mapToItem(island.parent, mouse.x, mouse.y)
+            startGlobalX = globalPos.x
+            startGlobalY = globalPos.y
+            startTargetCenterX = island.targetCenterX
+            startTargetY = island.targetY
+        }
+
+        onPositionChanged: (mouse) => {
+            let globalPos = mapToItem(island.parent, mouse.x, mouse.y)
+            let deltaX = globalPos.x - startGlobalX
+            let deltaY = globalPos.y - startGlobalY
+
+            if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
+                wasDragged = true
+            }
+
+            if (wasDragged) {
+                island.targetCenterX = startTargetCenterX + deltaX
+                island.targetY = startTargetY + deltaY
+            }
+        }
+
+        onReleased: {
+            snapBackTimer.restart()
+        }
+
         onClicked: {
+            if (wasDragged) return;
             if (Backend.displayMode === "osd") return; 
 
             if (island.state === "pill") {

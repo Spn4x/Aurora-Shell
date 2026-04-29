@@ -34,13 +34,11 @@ int main(int argc, char *argv[])
 
     if (window && pill) {
         auto updateInputMask = [window, pill]() {
-            // THE FIX: If the pill is invisible, drop the mask to a 1x1 pixel so clicks pass to the desktop
             if (pill->opacity() <= 0.01) {
                 window->setMask(QRegion(0, 0, 1, 1));
                 return;
             }
 
-            // mapRectToScene automatically calculates the true size including the 'scale' property!
             QRectF rect = pill->mapRectToScene(QRectF(0, 0, pill->width(), pill->height()));
             
             if (rect.width() <= 0 || rect.height() <= 0) {
@@ -50,7 +48,6 @@ int main(int argc, char *argv[])
             }
         };
 
-        // THE FIX: Connect opacity and scale to ensure the Wayland mask shrinks dynamically with the animations
         QObject::connect(pill, &QQuickItem::xChanged, pill, updateInputMask);
         QObject::connect(pill, &QQuickItem::yChanged, pill, updateInputMask);
         QObject::connect(pill, &QQuickItem::widthChanged, pill, updateInputMask);
@@ -62,7 +59,8 @@ int main(int argc, char *argv[])
 
         LayerShellQt::Window *lsWindow = LayerShellQt::Window::get(window);
         lsWindow->setLayer(LayerShellQt::Window::LayerOverlay);
-        lsWindow->setAnchors(LayerShellQt::Window::AnchorTop);
+        // THE FIX: Stretch the invisible window layer across the entire screen!
+        lsWindow->setAnchors(static_cast<LayerShellQt::Window::Anchors>(LayerShellQt::Window::AnchorTop | LayerShellQt::Window::AnchorBottom | LayerShellQt::Window::AnchorLeft | LayerShellQt::Window::AnchorRight));
         lsWindow->setExclusiveZone(0);
         lsWindow->setMargins(QMargins(0, 0, 0, 0)); 
         

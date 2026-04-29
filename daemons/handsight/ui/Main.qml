@@ -4,8 +4,8 @@ import Aurora.Shell
 
 Window {
     id: root
-    width: 600 
-    height: 800 
+    width: Screen.width 
+    height: Screen.height 
     visible: false 
     color: "transparent"
     flags: Qt.FramelessWindowHint
@@ -13,8 +13,5 @@ Window {
     DynamicIsland {
         id: island
         objectName: "dynamicPill"
-        
-        anchors.horizontalCenter: parent.horizontalCenter
-        y: 10
     }
 }
