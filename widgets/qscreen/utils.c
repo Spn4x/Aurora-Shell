@@ -5,14 +5,10 @@
 #include <gtk/gtk.h>
 #include <string.h>
 
-// --- THE FIX: PART 1 ---
-// Helper struct to pass multiple pieces of data to our async callback.
-// This allows us to send both the new path AND the original UI state.
 typedef struct {
     gchar *temp_path;
     gpointer original_user_data;
 } CaptureData;
-// --- END FIX ---
 
 static void run_command_async(const gchar *command, GChildWatchFunc exit_callback, gpointer user_data) {
     g_autoptr(GError) error = NULL;
@@ -46,15 +42,10 @@ void run_command_with_stdin_sync(const gchar *command, const gchar *input) {
         "sh", "-c", command, NULL);
 
     if (error) {
-        g_warning("Failed to create subprocess for command '%s': %s", command, error->message);
+        g_warning("Failed to create subprocess: %s", error->message);
         return;
     }
-
     g_subprocess_communicate_utf8(subprocess, input, NULL, NULL, NULL, &error);
-    
-    if (error) {
-        g_warning("Failed to communicate with subprocess for command '%s': %s", command, error->message);
-    }
 }
 
 void process_precomposited_screenshot(const char *source_path, gboolean save_to_disk, QScreenState *state) {
@@ -69,12 +60,10 @@ void process_precomposited_screenshot(const char *source_path, gboolean save_to_
         g_autofree char *filename = g_strdup_printf("screenshot-%s.png", timestamp);
         output_path = g_build_filename(pictures_dir, filename, NULL);
         
-        command = g_strdup_printf("cp \"%s\" \"%s\" && wl-copy < \"%s\"", source_path, output_path, output_path);
+        command = g_strdup_printf("cp \"%s\" \"%s\" && wl-copy -t image/png < \"%s\"", source_path, output_path, output_path);
     } else {
-        command = g_strdup_printf("wl-copy < \"%s\"", source_path);
+        command = g_strdup_printf("wl-copy -t image/png < \"%s\"", source_path);
     }
-
-    g_print("Running composited command: %s\n", command);
 
     g_autoptr(GError) error = NULL;
     gint exit_status = 0;
@@ -83,10 +72,8 @@ void process_precomposited_screenshot(const char *source_path, gboolean save_to_
     if (success && exit_status == 0 && !error) {
         const char* msg = save_to_disk ? "Annotated screenshot saved and copied." : "Annotated image is on your clipboard.";
         g_autofree char* notify_cmd = g_strdup_printf("notify-send 'Screenshot Captured' '%s'", msg);
-        // We reuse the async command runner you already have
         g_spawn_command_line_async(notify_cmd, NULL);
     } else {
-        g_warning("Annotated screenshot command failed: %s", error ? error->message : "Unknown error");
         g_spawn_command_line_async("notify-send -u critical 'Screenshot Failed' 'Could not process the image.'", NULL);
     }
 }
@@ -99,26 +86,19 @@ void process_fullscreen_screenshot(QScreenState *state) {
         g_autofree char *timestamp = g_date_time_format(now, "%Y-%m-%d_%H-%M-%S");
         g_autofree char *filename = g_strdup_printf("screenshot-%s.png", timestamp);
         g_autofree char *output_path = g_build_filename(pictures_dir, filename, NULL);
-        command = g_strdup_printf("grim \"%s\" && wl-copy < \"%s\"", output_path, output_path);
+        command = g_strdup_printf("grim \"%s\" && wl-copy -t image/png < \"%s\"", output_path, output_path);
     } else {
-        command = g_strdup("grim - | wl-copy");
+        command = g_strdup("grim - | wl-copy -t image/png");
     }
 
-    g_print("Running direct command (sync): %s\n", command);
-    
     g_autoptr(GError) error = NULL;
     gint exit_status = 0;
     gboolean success = g_spawn_sync(NULL, (gchar*[]){ "sh", "-c", command, NULL }, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, &exit_status, &error);
 
     if (success && exit_status == 0 && !error) {
-        const char* msg = state->save_on_launch 
-            ? "Screenshot saved and copied." 
-            : "Image is on your clipboard.";
+        const char* msg = state->save_on_launch ? "Screenshot saved and copied." : "Image is on your clipboard.";
         g_autofree char* notify_cmd = g_strdup_printf("notify-send 'Screenshot Captured' '%s'", msg);
         run_command_async(notify_cmd, NULL, NULL);
-    } else {
-        g_warning("Fullscreen screenshot command failed: %s", error ? error->message : "Unknown error");
-        run_command_async("notify-send -u critical 'Screenshot Failed' 'Could not capture the screen.'", NULL, NULL);
     }
 }
 
@@ -138,46 +118,28 @@ void process_final_screenshot(const char *source_path, GdkRectangle *geometry, g
     g_autofree char* crop_geom = g_strdup_printf("%dx%d+%d+%d", geometry->width, geometry->height, geometry->x, geometry->y);
 
     GString *command_str = g_string_new("");
-    
-    g_string_printf(command_str, "magick \"%s\" -crop %s \"%s\" && wl-copy < \"%s\"",
-                    source_path, crop_geom, output_path, output_path);
+    g_string_printf(command_str, "magick \"%s\" -crop %s \"%s\" && wl-copy -t image/png < \"%s\"", source_path, crop_geom, output_path, output_path);
 
-    if (!save_to_disk) {
-        g_string_append_printf(command_str, " && rm \"%s\"", output_path);
-    }
+    if (!save_to_disk) g_string_append_printf(command_str, " && rm \"%s\"", output_path);
 
     g_autofree char *command = g_string_free(command_str, FALSE);
-    g_print("Running final command (sync): %s\n", command);
-
     g_autoptr(GError) error = NULL;
     gint exit_status = 0;
     gboolean success = g_spawn_sync(NULL, (gchar*[]){ "sh", "-c", command, NULL }, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, &exit_status, &error);
     
     if (success && exit_status == 0 && !error) {
-        const char* msg = save_to_disk 
-            ? "Screenshot saved and copied." 
-            : "Image is on your clipboard.";
+        const char* msg = save_to_disk ? "Screenshot saved and copied." : "Image is on your clipboard.";
         g_autofree char* notify_cmd = g_strdup_printf("notify-send 'Screenshot Captured' '%s'", msg);
         run_command_async(notify_cmd, NULL, NULL);
-    } else {
-        g_warning("Final screenshot command failed: %s", error ? error->message : "Unknown error");
-        run_command_async("notify-send -u critical 'Screenshot Failed' 'Could not process the image.'", NULL, NULL);
     }
-
-    // In the plugin version, the cleanup of the temp file is handled
-    // by the UIState struct's destructor.
 }
 
-// --- THE FIX: PART 2 ---
-// The corrected function now uses the CaptureData struct.
 void capture_fullscreen_for_overlay(GChildWatchFunc on_captured, gpointer user_data) {
-    // 1. Create a bundle to hold both the path and your UIState*
     CaptureData *capture_data = g_new(CaptureData, 1);
     capture_data->temp_path = g_build_filename(g_get_tmp_dir(), "qscreen_overlay.png", NULL);
-    capture_data->original_user_data = user_data; // Keep track of the original state
+    capture_data->original_user_data = user_data;
 
     g_autofree char *grim_command = g_strdup_printf("grim \"%s\"", capture_data->temp_path);
-    g_print("Capturing background: %s\n", grim_command);
 
     GPid pid;
     g_autoptr(GError) error = NULL;
@@ -186,99 +148,102 @@ void capture_fullscreen_for_overlay(GChildWatchFunc on_captured, gpointer user_d
                   NULL, NULL, &pid, &error);
 
     if (error) {
-        g_warning("Failed to spawn grim: %s", error->message);
         g_free(capture_data->temp_path);
         g_free(capture_data);
         return;
     }
-
-    // 2. Pass the BUNDLE to the callback, not just the path.
     g_child_watch_add(pid, on_captured, capture_data);
 }
-// --- END FIX ---
 
+// --- NIRI WINDOW DETAILS ACQUISITION ---
 
-static gchar* hyprland_ipc_get_reply(const char *command) {
-    g_autofree char *signature = g_strdup(g_getenv("HYPRLAND_INSTANCE_SIGNATURE"));
-    if (!signature) { g_warning("HYPRLAND_INSTANCE_SIGNATURE not set."); return NULL; }
-    g_autofree char *socket_path = g_build_filename(g_get_user_runtime_dir(), "hypr", signature, ".socket.sock", NULL);
-
-    g_autoptr(GError) error = NULL;
-    g_autoptr(GSocketClient) client = g_socket_client_new();
-    g_autoptr(GSocketAddress) address = g_unix_socket_address_new(socket_path);
-    g_autoptr(GSocketConnection) conn = g_socket_client_connect(client, G_SOCKET_CONNECTABLE(address), NULL, &error);
-    if (error) { g_warning("Failed to connect to Hyprland socket: %s", error->message); return NULL; }
-
-    GInputStream *istream = g_io_stream_get_input_stream(G_IO_STREAM(conn));
-    g_output_stream_write_all(g_io_stream_get_output_stream(G_IO_STREAM(conn)), command, strlen(command), NULL, NULL, NULL);
-
-    GByteArray *bytes = g_byte_array_new();
-    char buffer[4096]; gssize read;
-    while ((read = g_input_stream_read(istream, buffer, sizeof(buffer), NULL, &error)) > 0) {
-        g_byte_array_append(bytes, (const guint8*)buffer, read);
-    }
-    if (error) { g_warning("Failed to read from Hyprland socket: %s", error->message); g_byte_array_free(bytes, TRUE); return NULL; }
-
-    g_byte_array_append(bytes, (const guint8*)"\0", 1);
-    return (gchar*)g_byte_array_free(bytes, FALSE);
+void niri_window_info_free(gpointer data) {
+    if (!data) return;
+    NiriWindowInfo *info = (NiriWindowInfo*)data;
+    g_free(info->title);
+    g_free(info->app_id);
+    g_free(info);
 }
 
-GList* get_hyprland_windows_geometry(QScreenState *state) {
-    (void)state;
-    g_autofree gchar *monitors_reply = hyprland_ipc_get_reply("j/monitors");
-    if (!monitors_reply) return NULL;
+gchar* run_niri_ipc(const char *cmd) {
+    g_autofree gchar *command = g_strdup_printf("niri msg -j %s", cmd);
+    FILE *fp = popen(command, "r");
+    if (!fp) return NULL;
+    char buffer[4096];
+    GString *out = g_string_new("");
+    while (fgets(buffer, sizeof(buffer), fp)) g_string_append(out, buffer);
+    pclose(fp);
+    return g_string_free(out, FALSE);
+}
 
-    g_autoptr(JsonParser) monitor_parser = json_parser_new();
-    json_parser_load_from_data(monitor_parser, monitors_reply, -1, NULL);
-    JsonNode *root_node = json_parser_get_root(monitor_parser);
-    if (!root_node) { g_warning("Failed to parse monitors JSON."); return NULL; }
-    JsonArray *monitors = json_node_get_array(root_node);
+GList* get_niri_windows_info(QScreenState *state) {
+    (void)state;
     
-    gint64 monitor_x = 0, monitor_y = 0;
-    gint64 active_workspace_id = -1;
-    for (guint i = 0; i < json_array_get_length(monitors); i++) {
-        JsonObject *mon_obj = json_array_get_object_element(monitors, i);
-        if (json_object_get_boolean_member(mon_obj, "focused")) {
-            monitor_x = json_object_get_int_member(mon_obj, "x");
-            monitor_y = json_object_get_int_member(mon_obj, "y");
-            active_workspace_id = json_object_get_int_member(json_object_get_object_member(mon_obj, "activeWorkspace"), "id");
-            break;
+    // 1. Get active workspace ID
+    g_autofree gchar *ws_reply = run_niri_ipc("workspaces");
+    if (!ws_reply) return NULL;
+
+    guint64 active_ws_id = 0;
+
+    g_autoptr(JsonParser) ws_parser = json_parser_new();
+    if (json_parser_load_from_data(ws_parser, ws_reply, -1, NULL)) {
+        JsonNode *root = json_parser_get_root(ws_parser);
+        if (JSON_NODE_HOLDS_ARRAY(root)) {
+            JsonArray *arr = json_node_get_array(root);
+            for (guint i = 0; i < json_array_get_length(arr); i++) {
+                JsonObject *ws = json_array_get_object_element(arr, i);
+                gboolean is_active = json_object_has_member(ws, "is_active") && json_object_get_boolean_member(ws, "is_active");
+                gboolean is_focused = json_object_has_member(ws, "is_focused") && json_object_get_boolean_member(ws, "is_focused");
+                if (is_active || is_focused) {
+                    active_ws_id = json_object_get_int_member(ws, "id");
+                    break;
+                }
+            }
         }
     }
-    
-    g_autofree gchar *clients_reply = hyprland_ipc_get_reply("j/clients");
-    if (!clients_reply) return NULL;
 
-    g_autoptr(JsonParser) client_parser = json_parser_new();
-    json_parser_load_from_data(client_parser, clients_reply, -1, NULL);
-    root_node = json_parser_get_root(client_parser);
-    if (!root_node) { g_warning("Failed to parse clients JSON."); return NULL; }
-    JsonArray *clients = json_node_get_array(root_node);
-    
+    if (active_ws_id == 0) return NULL;
+
+    // 2. Get windows safely (Width and Height only)
+    g_autofree gchar *win_reply = run_niri_ipc("windows");
+    if (!win_reply) return NULL;
+
     GList *result = NULL;
-    for (guint i = 0; i < json_array_get_length(clients); i++) {
-        JsonObject *obj = json_array_get_object_element(clients, i);
-        if (json_object_has_member(obj, "workspace")) {
-            JsonObject *workspace_obj = json_object_get_object_member(obj, "workspace");
-            if (json_object_get_int_member(workspace_obj, "id") == active_workspace_id) {
-                JsonArray *at = json_object_get_array_member(obj, "at");
-                JsonArray *size = json_object_get_array_member(obj, "size");
+
+    g_autoptr(JsonParser) win_parser = json_parser_new();
+    if (json_parser_load_from_data(win_parser, win_reply, -1, NULL)) {
+        JsonNode *root = json_parser_get_root(win_parser);
+        if (JSON_NODE_HOLDS_ARRAY(root)) {
+            JsonArray *arr = json_node_get_array(root);
+            for (guint i = 0; i < json_array_get_length(arr); i++) {
+                JsonObject *win = json_array_get_object_element(arr, i);
                 
-                GdkRectangle *rect = g_new(GdkRectangle, 1);
-                rect->x = json_array_get_int_element(at, 0) - monitor_x;
-                rect->y = json_array_get_int_element(at, 1) - monitor_y;
-                rect->width = json_array_get_int_element(size, 0);
-                rect->height = json_array_get_int_element(size, 1);
-                result = g_list_prepend(result, rect);
+                guint64 ws_id = json_object_get_int_member(win, "workspace_id");
+                gboolean is_focused = json_object_has_member(win, "is_focused") && json_object_get_boolean_member(win, "is_focused");
+
+                if (ws_id == active_ws_id) {
+                    JsonObject *layout = json_object_get_object_member(win, "layout");
+                    if (layout && json_object_has_member(layout, "window_size")) {
+                        JsonArray *size_arr = json_object_get_array_member(layout, "window_size");
+                        
+                        NiriWindowInfo *info = g_new0(NiriWindowInfo, 1);
+                        info->id = json_object_get_int_member(win, "id");
+                        info->title = g_strdup(json_object_get_string_member_with_default(win, "title", "Unknown"));
+                        info->app_id = g_strdup(json_object_get_string_member_with_default(win, "app_id", "application-x-executable"));
+                        
+                        info->geometry.width = json_array_get_int_element(size_arr, 0);
+                        info->geometry.height = json_array_get_int_element(size_arr, 1);
+                        info->geometry.x = 0;
+                        info->geometry.y = 0;
+                        info->is_visible = is_focused;
+
+                        result = g_list_prepend(result, info);
+                    }
+                }
             }
         }
     }
     return g_list_reverse(result);
 }
 
-gboolean check_dependencies(void) {
-    // This function is not used in the plugin version, as dependencies
-    // are assumed to be handled by the user's system setup.
-    // It can be removed or left here for completeness.
-    return TRUE;
-}
+gboolean check_dependencies(void) { return TRUE; }

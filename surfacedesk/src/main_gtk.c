@@ -3,7 +3,7 @@
 #include <gtk4-layer-shell.h>
 #include <math.h>
 #include <gdk/gdk.h>
-#include <gio/gunixsocketaddress.h>
+#include <json-glib/json-glib.h>
 
 #include "globals.h"
 #include "drawer.h"
@@ -19,39 +19,45 @@ static GtkWidget *dim_layer = NULL;
 static guint dbus_owner_id = 0;
 
 // --- GLOBALS FOR SPECIAL MODE (WORKSPACE & WIDGET TOGGLING) ---
-static int saved_workspace_id = -1;
+static int saved_workspace_idx = -1;
 static gboolean is_in_special_mode = FALSE;
 static guint special_mode_delay_id = 0; 
 
-// --- FAST IPC HELPER ---
+// --- NIRI IPC HELPER ---
 static int get_active_workspace_ipc() {
-    const gchar *sig = g_getenv("HYPRLAND_INSTANCE_SIGNATURE");
-    const gchar *xdg = g_getenv("XDG_RUNTIME_DIR");
-    if (!sig || !xdg) return -1;
+    FILE *fp = popen("niri msg -j workspaces", "r");
+    if (!fp) return -1;
     
-    g_autofree gchar *socket_path = g_build_filename(xdg, "hypr", sig, ".socket.sock", NULL);
+    char buffer[4096];
+    GString *json_str = g_string_new("");
+    while (fgets(buffer, sizeof(buffer), fp)) {
+        g_string_append(json_str, buffer);
+    }
+    pclose(fp);
+
+    int active_idx = -1;
+    g_autoptr(JsonParser) parser = json_parser_new();
     
-    g_autoptr(GSocketClient) client = g_socket_client_new();
-    g_autoptr(GSocketAddress) address = g_unix_socket_address_new(socket_path);
-    g_autoptr(GError) error = NULL;
-    
-    g_autoptr(GSocketConnection) conn = g_socket_client_connect(client, G_SOCKET_CONNECTABLE(address), NULL, &error);
-    if (error || !conn) return -1;
-    
-    GOutputStream *ostream = g_io_stream_get_output_stream(G_IO_STREAM(conn));
-    GInputStream *istream = g_io_stream_get_input_stream(G_IO_STREAM(conn));
-    
-    const char *cmd = "activeworkspace";
-    if (!g_output_stream_write_all(ostream, cmd, strlen(cmd), NULL, NULL, NULL)) return -1;
-    
-    char buffer[256] = {0};
-    if (g_input_stream_read(istream, buffer, sizeof(buffer) - 1, NULL, NULL) > 0) {
-        int id = -1;
-        if (sscanf(buffer, "workspace ID %d", &id) == 1) {
-            return id;
+    if (json_parser_load_from_data(parser, json_str->str, -1, NULL)) {
+        JsonNode *root = json_parser_get_root(parser);
+        if (JSON_NODE_HOLDS_ARRAY(root)) {
+            JsonArray *arr = json_node_get_array(root);
+            for (guint i = 0; i < json_array_get_length(arr); i++) {
+                JsonObject *ws = json_array_get_object_element(arr, i);
+                
+                // Niri outputs is_active or is_focused depending on the context
+                gboolean is_active = json_object_has_member(ws, "is_active") && json_object_get_boolean_member(ws, "is_active");
+                gboolean is_focused = json_object_has_member(ws, "is_focused") && json_object_get_boolean_member(ws, "is_focused");
+                
+                if (is_active || is_focused) {
+                    active_idx = json_object_get_int_member(ws, "idx");
+                    break;
+                }
+            }
         }
     }
-    return -1;
+    g_string_free(json_str, TRUE);
+    return active_idx;
 }
 
 static void hide_orchestrator_widgets() {
@@ -73,8 +79,10 @@ static void enter_special_mode() {
     if (is_in_special_mode) return;
     is_in_special_mode = TRUE;
 
-    saved_workspace_id = get_active_workspace_ipc();
-    g_spawn_command_line_async("hyprctl dispatch workspace empty", NULL);
+    saved_workspace_idx = get_active_workspace_ipc();
+    
+    // Niri doesn't have an "empty" command. Focusing index 9 usually creates a clean, empty workspace at the end.
+    g_spawn_command_line_async("niri msg action focus-workspace 9", NULL);
 
     hide_orchestrator_widgets();
 }
@@ -88,10 +96,10 @@ static void exit_special_mode() {
 
     restore_orchestrator_widgets();
 
-    if (saved_workspace_id != -1) {
-        g_autofree gchar *cmd = g_strdup_printf("hyprctl dispatch workspace %d", saved_workspace_id);
+    if (saved_workspace_idx != -1) {
+        g_autofree gchar *cmd = g_strdup_printf("niri msg action focus-workspace %d", saved_workspace_idx);
         g_spawn_command_line_async(cmd, NULL);
-        saved_workspace_id = -1; 
+        saved_workspace_idx = -1; 
     }
 }
 // ------------------------------------------------------------------
@@ -272,7 +280,7 @@ void app_set_wallpaper_mode(gboolean enable) {
         
         enter_special_mode(); 
         
-        // Wait 210ms for Hyprland to finish sliding before rendering GTK layout
+        // Wait 210ms for Niri to finish sliding before rendering GTK layout
         special_mode_delay_id = g_timeout_add(210, delayed_wallpaper_visuals, NULL);
     } else {
         app_state.is_picking_wallpaper = FALSE;
@@ -308,7 +316,7 @@ static void set_edit_mode(gboolean enable) {
         
         enter_special_mode(); 
         
-        // Wait 400ms for Hyprland to finish sliding before rendering GTK layout
+        // Wait 400ms for Niri to finish sliding before rendering GTK layout
         special_mode_delay_id = g_timeout_add(400, delayed_editor_visuals, NULL);
     } else {
         app_state.is_editing = FALSE;

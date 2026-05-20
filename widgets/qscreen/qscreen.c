@@ -91,7 +91,6 @@ static void on_widget_realize(GtkWidget *widget, gpointer user_data) {
 
 static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
     (void)widget; (void)user_data;
-    g_print("qscreen: Window destroyed, cleaning up.\n");
 }
 
 static void ui_state_free(gpointer data) {
@@ -103,7 +102,6 @@ static void ui_state_free(gpointer data) {
         g_remove(state->temp_screenshot_path);
         g_free(state->temp_screenshot_path);
     }
-    if (state->window_geometries) g_list_free_full(state->window_geometries, g_free);
     if (state->text_boxes) free_ocr_results(state->text_boxes);
     g_list_free(state->selected_text_boxes);
     annotation_items_free_list(state->strokes);
@@ -155,17 +153,20 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
     (void)area; UIState *state = data;
     if (!state->screenshot_pixbuf || width == 0 || height == 0) return;
 
+    cairo_rectangle(cr, 0, 0, width, height);
+    cairo_clip(cr);
+
     double sel_x = state->current_x / state->scale_x;
     double sel_y = state->current_y / state->scale_y;
     double sel_w = state->current_w / state->scale_x;
     double sel_h = state->current_h / state->scale_y;
 
-    if (state->current_mode != MODE_TEXT && state->current_mode != MODE_COLOR) {
+    if (state->current_mode != MODE_TEXT && state->current_mode != MODE_COLOR && state->current_mode != MODE_WINDOW) {
         cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.5);
         cairo_paint(cr);
     }
     
-    if (state->current_w > 1 && state->current_h > 1 && state->current_mode != MODE_TEXT && state->current_mode != MODE_COLOR) {
+    if (state->current_w > 1 && state->current_h > 1 && state->current_mode != MODE_TEXT && state->current_mode != MODE_COLOR && state->current_mode != MODE_WINDOW) {
         cairo_save(cr);
         create_rounded_rect_path(cr, sel_x, sel_y, sel_w, sel_h, 10.0);
         cairo_clip(cr);
@@ -181,13 +182,12 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
 
     if (state->strokes) {
         cairo_save(cr);
-        if (state->current_w > 1 && state->current_h > 1) {
+        if (state->current_w > 1 && state->current_h > 1 && state->current_mode != MODE_WINDOW) {
             create_rounded_rect_path(cr, sel_x, sel_y, sel_w, sel_h, 10.0);
             cairo_clip(cr);
         }
         
         annotation_draw_all(cr, state->strokes, state->screenshot_pixbuf, state->selected_item, 0, 0, 1.0 / state->scale_x, 1.0 / state->scale_y);
-        
         cairo_restore(cr);
     }
 
@@ -228,30 +228,46 @@ static void draw_selection_overlay(GtkDrawingArea *area, cairo_t *cr, int width,
         cairo_stroke(cr);
 
         g_autofree gchar *hex = NULL;
-        eyedrop_get_color_at_pixel(state->screenshot_pixbuf, 
-                                   (int)(state->hover_x * state->scale_x), 
-                                   (int)(state->hover_y * state->scale_y), 
-                                   NULL, &hex);
-        
+        eyedrop_get_color_at_pixel(state->screenshot_pixbuf, (int)(state->hover_x * state->scale_x), (int)(state->hover_y * state->scale_y), NULL, &hex);
         if (hex) {
             cairo_select_font_face(cr, "monospace", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
             cairo_set_font_size(cr, 16.0);
-            
             cairo_move_to(cr, cx + 28, cy + 6);
             cairo_text_path(cr, hex);
-            
             cairo_set_source_rgba(cr, 0, 0, 0, 0.8);
             cairo_set_line_width(cr, 3.0);
             cairo_stroke_preserve(cr);
-            
             cairo_set_source_rgb(cr, 1, 1, 1);
             cairo_fill(cr);
         }
     }
 }
 
+static void set_toolbars_dimmed(UIState *state, gboolean dimmed) {
+    GtkWidget *widgets[] = {
+        GTK_WIDGET(state->bottom_panel_revealer),
+        GTK_WIDGET(state->top_panel_revealer),
+        GTK_WIDGET(state->ann_bottom_panel_revealer),
+        GTK_WIDGET(state->ocr_notification_revealer)
+    };
+    for (int i = 0; i < 4; i++) {
+        if (widgets[i]) {
+            if (dimmed) gtk_widget_add_css_class(widgets[i], "toolbar-dimmed");
+            else gtk_widget_remove_css_class(widgets[i], "toolbar-dimmed");
+        }
+    }
+}
+
 static void on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data) {
     (void)gesture; UIState *state = data;
+    
+    // Explicitly rip focus back to the canvas when the user starts interacting with it!
+    gtk_widget_grab_focus(state->drawing_area);
+
+    if (state->current_mode == MODE_WINDOW && !state->is_annotating) return;
+
+    set_toolbars_dimmed(state, TRUE);
+
     double scaled_x = x * state->scale_x;
     double scaled_y = y * state->scale_y;
     state->drag_start_x = scaled_x; 
@@ -269,6 +285,9 @@ static void on_drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer 
 
 static void on_drag_update(GtkGestureDrag *gesture, double offset_x, double offset_y, gpointer data) {
     (void)gesture; UIState *state = data;
+    
+    if (state->current_mode == MODE_WINDOW && !state->is_annotating) return;
+
     double scaled_offset_x = offset_x * state->scale_x;
     double scaled_offset_y = offset_y * state->scale_y;
     double end_x = state->drag_start_x + scaled_offset_x;
@@ -297,6 +316,10 @@ static void on_drag_update(GtkGestureDrag *gesture, double offset_x, double offs
 static void on_drag_end(GtkGestureDrag *gesture, double offset_x, double offset_y, gpointer data) {
     (void)gesture; (void)offset_x; (void)offset_y; UIState *state = data;
     
+    if (state->current_mode == MODE_WINDOW && !state->is_annotating) return;
+    
+    set_toolbars_dimmed(state, FALSE);
+
     if (state->is_annotating) return;
 
     if (state->current_mode == MODE_TEXT) {
@@ -305,8 +328,7 @@ static void on_drag_end(GtkGestureDrag *gesture, double offset_x, double offset_
             state->selected_text_boxes = g_list_reverse(state->selected_text_boxes);
             for (GList *l = state->selected_text_boxes; l != NULL; l = l->next) { 
                 QScreenTextBox *box = l->data; 
-                g_string_append(final_text, box->text); 
-                g_string_append_c(final_text, ' '); 
+                g_string_append(final_text, box->text); g_string_append_c(final_text, ' '); 
             }
             run_command_with_stdin_sync("wl-copy", final_text->str); 
             run_command_with_stdin_sync("notify-send 'Text Copied' 'Selected text is on your clipboard.'", NULL);
@@ -340,19 +362,6 @@ static void on_mouse_motion(GtkEventControllerMotion *controller, double x, doub
         gtk_widget_queue_draw(state->drawing_area);
         return;
     }
-
-    if (state->current_mode == MODE_WINDOW) {
-        gboolean found_window = FALSE;
-        for (GList *l = state->window_geometries; l != NULL; l = l->next) { 
-            GdkRectangle *rect = l->data; 
-            if (scaled_x >= rect->x && scaled_x <= (rect->x + rect->width) && scaled_y >= rect->y && scaled_y <= (rect->y + rect->height)) { 
-                set_selection_target(state, rect->x, rect->y, rect->width, rect->height); 
-                found_window = TRUE; 
-                break; 
-            } 
-        }
-        if (!found_window) set_selection_target(state, scaled_x, scaled_y, 0, 0);
-    }
     
     if (state->current_mode == MODE_TEXT) {
         gboolean hovering_text = FALSE;
@@ -360,8 +369,7 @@ static void on_mouse_motion(GtkEventControllerMotion *controller, double x, doub
             QScreenTextBox *box = l->data;
             if (scaled_x >= box->geometry.x && scaled_x <= (box->geometry.x + box->geometry.width) &&
                 scaled_y >= box->geometry.y && scaled_y <= (box->geometry.y + box->geometry.height)) {
-                hovering_text = TRUE;
-                break;
+                hovering_text = TRUE; break;
             }
         }
         gtk_widget_set_cursor_from_name(state->drawing_area, hovering_text ? "text" : "default");
@@ -371,11 +379,11 @@ static void on_mouse_motion(GtkEventControllerMotion *controller, double x, doub
 static void on_window_click(GtkGestureClick *gesture, int n_press, double x, double y, gpointer data) {
     (void)gesture; UIState *state = data;
     
-    // --- NEW: Intercept Double Clicks while Annotating ---
+    // Explicitly rip focus back to the canvas when the user clicks it!
+    gtk_widget_grab_focus(state->drawing_area);
+    
     if (state->is_annotating) {
-        if (n_press == 2) {
-            annotation_ui_double_click(state, x, y);
-        }
+        if (n_press == 2) annotation_ui_double_click(state, x, y);
         return;
     }
     
@@ -390,23 +398,12 @@ static void on_window_click(GtkGestureClick *gesture, int n_press, double x, dou
             run_command_with_stdin_sync(msg, NULL);
         }
         if (state->window) gtk_window_destroy(state->window);
-        return;
-    }
-
-    if (state->current_mode == MODE_WINDOW && !state->is_annotating && state->current_w > 0 && state->current_h > 0) {
-        if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(state->annotate_toggle_btn))) {
-            enter_annotation_phase(state);
-        } else {
-            capture_selection_immediately(state);
-        }
     }
 }
 
 static gboolean on_key_pressed(GtkEventControllerKey* controller, guint keyval, guint keycode, GdkModifierType mod_state, gpointer user_data) {
     (void)controller; (void)keycode; UIState *state = user_data;
-    
     if (annotation_ui_handle_key(state, keyval, mod_state)) return TRUE;
-
     if (keyval == GDK_KEY_Escape && !state->is_annotating) {
         if (state->window) gtk_window_destroy(state->window);
         return TRUE;
@@ -414,20 +411,254 @@ static gboolean on_key_pressed(GtkEventControllerKey* controller, guint keyval, 
     return FALSE;
 }
 
+// --- APP GRID PICKER LOGIC ---
+
+static void hide_window_picker_grid(UIState *state) {
+    GtkWidget *image_overlay = gtk_widget_get_parent(state->drawing_area);
+    GtkWidget *aspect = gtk_widget_get_parent(image_overlay);
+    GtkWidget *root_overlay = gtk_widget_get_parent(aspect);
+    
+    if (!root_overlay) return;
+
+    GtkWidget *child = gtk_widget_get_first_child(root_overlay);
+    while (child) {
+        GtkWidget *next = gtk_widget_get_next_sibling(child);
+        if (g_strcmp0(gtk_widget_get_name(child), "qscreen-window-picker") == 0) {
+            gtk_widget_unparent(child);
+        }
+        child = next;
+    }
+}
+
+static gchar* resolve_icon_name(const char *app_id) {
+    if (!app_id || strlen(app_id) == 0) return g_strdup("application-x-executable");
+    
+    GtkIconTheme *theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
+    if (gtk_icon_theme_has_icon(theme, app_id)) return g_strdup(app_id);
+    
+    g_autofree gchar *lower = g_ascii_strdown(app_id, -1);
+    if (gtk_icon_theme_has_icon(theme, lower)) return g_strdup(lower);
+
+    const char *last_dot = strrchr(app_id, '.');
+    if (last_dot && *(last_dot + 1) != '\0') {
+        const char *suffix = last_dot + 1;
+        if (gtk_icon_theme_has_icon(theme, suffix)) return g_strdup(suffix);
+        g_autofree gchar *lower_suffix = g_ascii_strdown(suffix, -1);
+        if (gtk_icon_theme_has_icon(theme, lower_suffix)) return g_strdup(lower_suffix);
+    }
+
+    if (strstr(lower, "brave")) {
+        const char *brave_icons[] = {"brave-browser", "brave", "com.brave.Browser", "browser", NULL};
+        for (int i=0; brave_icons[i]; i++) {
+            if (gtk_icon_theme_has_icon(theme, brave_icons[i])) return g_strdup(brave_icons[i]);
+        }
+    }
+    if (strstr(lower, "code") || strstr(lower, "vscode")) return g_strdup("visual-studio-code");
+    if (strstr(lower, "chrome")) return g_strdup("google-chrome");
+    if (strstr(lower, "firefox")) return g_strdup("firefox");
+    if (strstr(lower, "foot") || strstr(lower, "alacritty") || strstr(lower, "kitty")) return g_strdup("utilities-terminal");
+    if (strstr(lower, "nautilus")) return g_strdup("org.gnome.Nautilus");
+    if (strstr(lower, "obsidian")) return g_strdup("obsidian");
+    if (strstr(lower, "discord")) return g_strdup("discord");
+    if (strstr(lower, "spotify")) return g_strdup("spotify");
+    
+    return g_strdup("application-x-executable");
+}
+
+typedef struct {
+    UIState *state;
+    gboolean save;
+    gboolean annotate;
+} WindowScreenshotCtx;
+
+static gboolean process_screenshot_cb(gpointer user_data) {
+    WindowScreenshotCtx *ctx = user_data;
+    UIState *state = ctx->state;
+
+    if (ctx->annotate) {
+        g_autofree char *paste_cmd = g_strdup_printf("wl-paste -t image/png > \"%s\"", state->temp_screenshot_path);
+        g_spawn_sync(NULL, (gchar*[]){ "sh", "-c", paste_cmd, NULL }, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, NULL, NULL);
+
+        GdkPixbuf *raw_pixbuf = gdk_pixbuf_new_from_file(state->temp_screenshot_path, NULL);
+        if (raw_pixbuf) {
+            int raw_w = gdk_pixbuf_get_width(raw_pixbuf);
+            int raw_h = gdk_pixbuf_get_height(raw_pixbuf);
+
+            if (raw_w > 10 && raw_h > 10) {
+                GdkPixbuf *sub = gdk_pixbuf_new_subpixbuf(raw_pixbuf, 2, 2, raw_w - 4, raw_h - 4);
+                if (state->screenshot_pixbuf) g_object_unref(state->screenshot_pixbuf);
+                state->screenshot_pixbuf = gdk_pixbuf_copy(sub);
+                g_object_unref(sub);
+                gdk_pixbuf_save(state->screenshot_pixbuf, state->temp_screenshot_path, "png", NULL, NULL);
+            } else {
+                if (state->screenshot_pixbuf) g_object_unref(state->screenshot_pixbuf);
+                state->screenshot_pixbuf = g_object_ref(raw_pixbuf);
+            }
+            g_object_unref(raw_pixbuf);
+            
+            int win_width = gdk_pixbuf_get_width(state->screenshot_pixbuf);
+            int win_height = gdk_pixbuf_get_height(state->screenshot_pixbuf);
+
+            GtkWidget *image_overlay = gtk_widget_get_parent(state->drawing_area);
+            if (image_overlay) {
+                GtkWidget *aspect = gtk_widget_get_parent(image_overlay);
+                if (aspect && GTK_IS_ASPECT_FRAME(aspect) && win_height > 0) {
+                    gtk_aspect_frame_set_ratio(GTK_ASPECT_FRAME(aspect), (float)win_width / (float)win_height);
+                }
+            }
+            
+            GtkPicture *bg_pic = g_object_get_data(G_OBJECT(state->drawing_area), "bg_picture");
+            if (bg_pic) {
+                GFile *f = g_file_new_for_path(state->temp_screenshot_path);
+                gtk_picture_set_file(bg_pic, f);
+                g_object_unref(f);
+            }
+            
+            state->current_x = 0;
+            state->current_y = 0;
+            state->current_w = win_width;
+            state->current_h = win_height;
+            
+            hide_window_picker_grid(state);
+            qscreen_set_mode(state, MODE_WINDOW);
+            gtk_widget_set_can_target(state->annotation_fixed, FALSE);
+            enter_annotation_phase(state);
+            gtk_widget_set_visible(GTK_WIDGET(state->window), TRUE);
+            
+        } else {
+            g_spawn_command_line_async("notify-send -u critical 'Screenshot Failed' 'Could not parse the copied window image.'", NULL);
+            if (state->window) gtk_window_destroy(state->window);
+        }
+    } else {
+        const char* msg = ctx->save ? "Screenshot saved and copied." : "Window copied to clipboard.";
+        g_autofree char* notify_cmd = g_strdup_printf("notify-send 'Screenshot Captured' '%s'", msg);
+        g_spawn_command_line_async(notify_cmd, NULL);
+        if (state->window) gtk_window_destroy(state->window);
+    }
+
+    g_free(ctx);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean take_screenshot_cb(gpointer user_data) {
+    WindowScreenshotCtx *ctx = user_data;
+    g_spawn_command_line_sync("niri msg action screenshot-window", NULL, NULL, NULL, NULL);
+    g_timeout_add(400, process_screenshot_cb, ctx);
+    return G_SOURCE_REMOVE;
+}
+
+static void on_list_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
+    (void)box;
+    UIState *state = (UIState*)user_data;
+    NiriWindowInfo *win = g_object_get_data(G_OBJECT(row), "window-info");
+    if (!win) return;
+
+    WindowScreenshotCtx *ctx = g_new0(WindowScreenshotCtx, 1);
+    ctx->state = state;
+    ctx->save = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(state->save_button));
+    ctx->annotate = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(state->annotate_toggle_btn));
+
+    gtk_widget_set_visible(GTK_WIDGET(state->window), FALSE);
+
+    g_autofree char *focus_cmd = g_strdup_printf("niri msg action focus-window --id %ld", win->id);
+    g_spawn_command_line_async(focus_cmd, NULL);
+    
+    g_timeout_add(400, take_screenshot_cb, ctx);
+}
+
+static void show_window_picker_grid(UIState *state) {
+    state->current_x = 0; state->current_y = 0; state->current_w = 0; state->current_h = 0;
+    gtk_widget_queue_draw(state->drawing_area);
+
+    GtkWidget *frame = gtk_frame_new(NULL);
+    gtk_widget_set_name(frame, "qscreen-window-picker");
+    gtk_widget_set_halign(frame, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(frame, GTK_ALIGN_CENTER);
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 16);
+    gtk_widget_add_css_class(box, "portal-container");
+    gtk_frame_set_child(GTK_FRAME(frame), box);
+
+    GtkWidget *title = gtk_label_new("Choose what you'd like to capture.");
+    gtk_widget_add_css_class(title, "title-3");
+    gtk_widget_set_margin_bottom(title, 8);
+    gtk_box_append(GTK_BOX(box), title);
+
+    GtkWidget *scrolled = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(scrolled, 450, 300); 
+    gtk_box_append(GTK_BOX(box), scrolled);
+
+    GtkWidget *listbox = gtk_list_box_new();
+    gtk_widget_add_css_class(listbox, "portal-list");
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(listbox), GTK_SELECTION_SINGLE);
+    g_signal_connect(listbox, "row-activated", G_CALLBACK(on_list_row_activated), state);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), listbox);
+
+    GList *windows = get_niri_windows_info(state->app_state);
+    
+    for (GList *l = windows; l != NULL; l = l->next) {
+        NiriWindowInfo *win = (NiriWindowInfo*)l->data;
+
+        GtkWidget *row = gtk_list_box_row_new();
+        g_object_set_data_full(G_OBJECT(row), "window-info", win, niri_window_info_free);
+
+        GtkWidget *row_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
+        gtk_widget_set_valign(row_box, GTK_ALIGN_CENTER);
+
+        g_autofree gchar *icon_name = resolve_icon_name(win->app_id);
+        GtkWidget *icon = gtk_image_new_from_icon_name(icon_name);
+        gtk_image_set_pixel_size(GTK_IMAGE(icon), 32);
+        gtk_box_append(GTK_BOX(row_box), icon);
+
+        GtkWidget *lbl = gtk_label_new(win->title);
+        gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
+        gtk_widget_set_halign(lbl, GTK_ALIGN_START);
+        gtk_widget_set_hexpand(lbl, TRUE);
+        gtk_box_append(GTK_BOX(row_box), lbl);
+
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), row_box);
+        gtk_list_box_append(GTK_LIST_BOX(listbox), row);
+    }
+    g_list_free(windows);
+
+    GtkWidget *image_overlay = gtk_widget_get_parent(state->drawing_area);
+    GtkWidget *aspect = gtk_widget_get_parent(image_overlay);
+    GtkWidget *root_overlay = gtk_widget_get_parent(aspect);
+    if (root_overlay) {
+        gtk_overlay_add_overlay(GTK_OVERLAY(root_overlay), frame);
+    }
+}
+
+static void on_region_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); hide_window_picker_grid(s); qscreen_set_mode(s,MODE_REGION); }}
+static void on_text_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); hide_window_picker_grid(s); qscreen_set_mode(s,MODE_TEXT); }}
+static void on_color_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); hide_window_picker_grid(s); qscreen_set_mode(s,MODE_COLOR); }}
+static void on_window_button_toggled(GtkToggleButton *b, gpointer d) { UIState *s = d; if (gtk_toggle_button_get_active(b)) { qscreen_set_mode(s, MODE_WINDOW); show_window_picker_grid(s); } else { hide_window_picker_grid(s); }}
+
 void qscreen_set_mode(UIState *state, SelectionMode mode) {
     state->current_mode = mode;
     
-    gboolean needs_motion_click = (mode == MODE_WINDOW || mode == MODE_COLOR || mode == MODE_TEXT);
-    gboolean needs_drag = (mode == MODE_REGION || mode == MODE_TEXT);
+    gboolean needs_motion_click = (mode == MODE_COLOR || mode == MODE_TEXT);
+    gboolean needs_drag = (mode == MODE_REGION || mode == MODE_TEXT || mode == MODE_WINDOW);
 
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(state->motion_controller), needs_motion_click ? GTK_PHASE_CAPTURE : GTK_PHASE_NONE);
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(state->click_gesture), needs_motion_click ? GTK_PHASE_CAPTURE : GTK_PHASE_NONE);
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(state->drag_gesture), needs_drag ? GTK_PHASE_CAPTURE : GTK_PHASE_NONE);
     
+    g_signal_handlers_block_by_func(state->region_button, on_region_button_toggled, state);
+    g_signal_handlers_block_by_func(state->window_button, on_window_button_toggled, state);
+    g_signal_handlers_block_by_func(state->text_button, on_text_button_toggled, state);
+    g_signal_handlers_block_by_func(state->color_button, on_color_button_toggled, state);
+    
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->region_button), mode == MODE_REGION);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->window_button), mode == MODE_WINDOW);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->text_button), mode == MODE_TEXT);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->color_button), mode == MODE_COLOR);
+
+    g_signal_handlers_unblock_by_func(state->region_button, on_region_button_toggled, state);
+    g_signal_handlers_unblock_by_func(state->window_button, on_window_button_toggled, state);
+    g_signal_handlers_unblock_by_func(state->text_button, on_text_button_toggled, state);
+    g_signal_handlers_unblock_by_func(state->color_button, on_color_button_toggled, state);
 
     state->has_hovered_color = FALSE; 
     
@@ -445,24 +676,13 @@ void qscreen_set_mode(UIState *state, SelectionMode mode) {
     }
 }
 
-static void on_region_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); qscreen_set_mode(s,MODE_REGION); }}
-static void on_window_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); qscreen_set_mode(s,MODE_WINDOW); }}
-static void on_text_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); qscreen_set_mode(s,MODE_TEXT); }}
-static void on_color_button_toggled(GtkToggleButton *b, gpointer d) { if(gtk_toggle_button_get_active(b)){ UIState *s=d; set_selection_target(s, s->current_x+s->current_w/2, s->current_y+s->current_h/2,0,0); qscreen_set_mode(s,MODE_COLOR); }}
-
 static void on_screen_button_clicked(GtkButton *b, gpointer d) { 
     (void)b; UIState *s=d; 
-    
-    s->current_x = 0;
-    s->current_y = 0;
+    s->current_x = 0; s->current_y = 0;
     s->current_w = gdk_pixbuf_get_width(s->screenshot_pixbuf);
     s->current_h = gdk_pixbuf_get_height(s->screenshot_pixbuf);
-
-    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->annotate_toggle_btn))) {
-        enter_annotation_phase(s);
-    } else {
-        capture_selection_immediately(s);
-    }
+    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->annotate_toggle_btn))) enter_annotation_phase(s);
+    else capture_selection_immediately(s);
 }
 
 static gboolean hide_notification_and_redraw(gpointer d) { UIState *s=d; gtk_revealer_set_reveal_child(GTK_REVEALER(s->ocr_notification_revealer),FALSE); gtk_widget_queue_draw(s->drawing_area); return G_SOURCE_REMOVE; }
@@ -472,6 +692,25 @@ static void on_ocr_finished(GList *text_boxes, gpointer data) {
 }
 
 G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
+    static gboolean css_loaded = FALSE;
+    if (!css_loaded) {
+        GtkCssProvider *p = gtk_css_provider_new();
+        gtk_css_provider_load_from_string(p, 
+            ".qscreen-black-bg { background-color: black; }"
+            ".toolbar-container { transition: opacity 0.2s ease; }"
+            ".toolbar-dimmed { opacity: 0.15; pointer-events: none; }"
+            ".portal-container { background-color: rgba(30, 30, 34, 0.95); border-radius: 12px; border: 1px solid rgba(255,255,255,0.1); padding: 16px; }"
+            ".portal-list { background-color: rgba(0, 0, 0, 0.2); border-radius: 8px; border: 1px solid rgba(255,255,255,0.05); }"
+            ".portal-list row { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.05); transition: background-color 0.1s ease; }"
+            ".portal-list row:last-child { border-bottom: none; }"
+            ".portal-list row:hover { background-color: rgba(255,255,255,0.05); }"
+            ".portal-list row:selected { background-color: rgba(138, 173, 244, 0.3); }"
+        );
+        gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(p), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(p);
+        css_loaded = TRUE;
+    }
+
     g_autoptr(JsonParser) parser = json_parser_new();
     if (!config_string || !json_parser_load_from_data(parser, config_string, -1, NULL)) {
         GtkWidget *dummy = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0); gtk_widget_set_size_request(dummy, 1, 1); gtk_widget_set_opacity(dummy, 0.0); return dummy;
@@ -486,8 +725,7 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     state->app_state = g_new0(QScreenState, 1);
     state->temp_screenshot_path = g_strdup(json_object_get_string_member(root_obj, "temp_screenshot_path"));
     state->scale_x = 1.0; state->scale_y = 1.0;
-    state->current_brush_size = 6.0;
-    state->current_font_size = 32.0;
+    state->current_brush_size = 6.0; state->current_font_size = 32.0;
     state->has_hovered_color = FALSE; 
 
     if (json_object_has_member(root_obj, "config")) {
@@ -503,30 +741,38 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     state->screenshot_pixbuf = gdk_pixbuf_new_from_file(state->temp_screenshot_path, &error);
     if (error) { ui_state_free(state); GtkWidget *dummy = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0); gtk_widget_set_size_request(dummy, 1, 1); gtk_widget_set_opacity(dummy, 0.0); return dummy; }
 
-    GtkAspectFrame *aspect_frame = GTK_ASPECT_FRAME(gtk_aspect_frame_new(0.5, 0.5, (float)gdk_pixbuf_get_width(state->screenshot_pixbuf) / (float)gdk_pixbuf_get_height(state->screenshot_pixbuf), FALSE));
-    GtkWidget *overlay = gtk_overlay_new();
-    gtk_aspect_frame_set_child(aspect_frame, overlay);
-    gtk_widget_set_name(GTK_WIDGET(aspect_frame), "qscreen-widget");
-    g_object_set_data_full(G_OBJECT(aspect_frame), "ui-state", state, ui_state_free);
+    GtkWidget *root_overlay = gtk_overlay_new();
+    gtk_widget_set_name(root_overlay, "qscreen-widget"); 
+    gtk_widget_add_css_class(root_overlay, "qscreen-black-bg"); 
+    g_object_set_data_full(G_OBJECT(root_overlay), "ui-state", state, ui_state_free);
+
+    GtkAspectFrame *aspect_frame = GTK_ASPECT_FRAME(gtk_aspect_frame_new(0.5, 0.5, 
+        (float)gdk_pixbuf_get_width(state->screenshot_pixbuf) / (float)gdk_pixbuf_get_height(state->screenshot_pixbuf), FALSE));
+    gtk_overlay_set_child(GTK_OVERLAY(root_overlay), GTK_WIDGET(aspect_frame));
+
+    GtkWidget *image_overlay = gtk_overlay_new();
+    gtk_aspect_frame_set_child(aspect_frame, image_overlay);
     
     GtkWidget *picture = gtk_picture_new_for_filename(state->temp_screenshot_path);
     gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_FILL);
-    gtk_overlay_set_child(GTK_OVERLAY(overlay), picture);
+    gtk_overlay_set_child(GTK_OVERLAY(image_overlay), picture);
 
     state->drawing_area = gtk_drawing_area_new();
+    g_object_set_data(G_OBJECT(state->drawing_area), "bg_picture", picture);
     gtk_widget_set_focusable(state->drawing_area, TRUE); 
     g_signal_connect(state->drawing_area, "resize", G_CALLBACK(on_drawing_area_resize), state);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(state->drawing_area), draw_selection_overlay, state, NULL);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), state->drawing_area);
+    gtk_overlay_add_overlay(GTK_OVERLAY(image_overlay), state->drawing_area);
 
     state->annotation_fixed = gtk_fixed_new();
     gtk_widget_set_can_target(state->annotation_fixed, FALSE);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), state->annotation_fixed);
+    gtk_overlay_add_overlay(GTK_OVERLAY(image_overlay), state->annotation_fixed);
 
-    g_signal_connect(GTK_WIDGET(aspect_frame), "unrealize", G_CALLBACK(on_window_destroy), NULL);
+    // FIX: Set Phase to CAPTURE. This intercepts Ctrl+Z and Ctrl+V before the SpinButton even realizes you pressed a key!
     GtkEventController *key_controller = gtk_event_controller_key_new();
+    gtk_event_controller_set_propagation_phase(key_controller, GTK_PHASE_CAPTURE);
     g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), state);
-    gtk_widget_add_controller(GTK_WIDGET(aspect_frame), key_controller);
+    gtk_widget_add_controller(root_overlay, key_controller);
     
     state->ocr_notification_revealer = gtk_revealer_new();
     gtk_revealer_set_transition_type(GTK_REVEALER(state->ocr_notification_revealer), GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
@@ -539,10 +785,9 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     GtkWidget *done_content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6); gtk_box_append(GTK_BOX(done_content), gtk_label_new("\u2713 Done!"));
     gtk_stack_add_named(GTK_STACK(state->ocr_notification_stack), scanning_content, "scanning"); gtk_stack_add_named(GTK_STACK(state->ocr_notification_stack), done_content, "done");
     gtk_box_append(GTK_BOX(notification_container), state->ocr_notification_stack); gtk_revealer_set_child(GTK_REVEALER(state->ocr_notification_revealer), notification_container);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), state->ocr_notification_revealer);
+    gtk_overlay_add_overlay(GTK_OVERLAY(root_overlay), state->ocr_notification_revealer);
     gtk_widget_set_valign(state->ocr_notification_revealer, GTK_ALIGN_START); gtk_widget_set_halign(state->ocr_notification_revealer, GTK_ALIGN_CENTER);
 
-    // Initial Mode Toolbar
     state->bottom_panel_revealer = GTK_REVEALER(gtk_revealer_new());
     gtk_revealer_set_transition_type(state->bottom_panel_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
     GtkWidget *panel_frame = gtk_frame_new(NULL); gtk_widget_add_css_class(panel_frame, "panel");
@@ -592,33 +837,35 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     gtk_box_append(GTK_BOX(main_box), button_box);
     
     gtk_revealer_set_child(state->bottom_panel_revealer, panel_frame);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(state->bottom_panel_revealer));
+    gtk_overlay_add_overlay(GTK_OVERLAY(root_overlay), GTK_WIDGET(state->bottom_panel_revealer));
     gtk_widget_set_valign(GTK_WIDGET(state->bottom_panel_revealer), GTK_ALIGN_END); 
     gtk_widget_set_halign(GTK_WIDGET(state->bottom_panel_revealer), GTK_ALIGN_CENTER);
     gtk_widget_set_margin_bottom(GTK_WIDGET(state->bottom_panel_revealer), 40);
     gtk_revealer_set_reveal_child(state->bottom_panel_revealer, TRUE);
 
-    // Phase 2 Toolbar - Top
     state->top_panel_revealer = GTK_REVEALER(gtk_revealer_new());
     gtk_revealer_set_transition_type(state->top_panel_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
     GtkWidget *annotation_toolbar_top = create_annotation_toolbar_top(state);
     gtk_revealer_set_child(state->top_panel_revealer, annotation_toolbar_top);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(state->top_panel_revealer));
+    gtk_overlay_add_overlay(GTK_OVERLAY(root_overlay), GTK_WIDGET(state->top_panel_revealer));
     gtk_widget_set_valign(GTK_WIDGET(state->top_panel_revealer), GTK_ALIGN_START);
     gtk_widget_set_halign(GTK_WIDGET(state->top_panel_revealer), GTK_ALIGN_CENTER);
     gtk_widget_set_margin_top(GTK_WIDGET(state->top_panel_revealer), 15);
 
-    // --- FIX: Phase 2 Toolbar - Now at the Bottom ---
     state->ann_bottom_panel_revealer = GTK_REVEALER(gtk_revealer_new());
     gtk_revealer_set_transition_type(state->ann_bottom_panel_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
     GtkWidget *annotation_toolbar_bottom = create_annotation_toolbar_bottom(state);
     gtk_revealer_set_child(state->ann_bottom_panel_revealer, annotation_toolbar_bottom);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(state->ann_bottom_panel_revealer));
+    gtk_overlay_add_overlay(GTK_OVERLAY(root_overlay), GTK_WIDGET(state->ann_bottom_panel_revealer));
     gtk_widget_set_valign(GTK_WIDGET(state->ann_bottom_panel_revealer), GTK_ALIGN_END);
     gtk_widget_set_halign(GTK_WIDGET(state->ann_bottom_panel_revealer), GTK_ALIGN_CENTER);
-    gtk_widget_set_margin_bottom(GTK_WIDGET(state->ann_bottom_panel_revealer), 40); // Matches the Phase 1 bar placement
+    gtk_widget_set_margin_bottom(GTK_WIDGET(state->ann_bottom_panel_revealer), 40);
 
-    // Gestures
+    gtk_widget_add_css_class(GTK_WIDGET(state->bottom_panel_revealer), "toolbar-container");
+    gtk_widget_add_css_class(GTK_WIDGET(state->top_panel_revealer), "toolbar-container");
+    gtk_widget_add_css_class(GTK_WIDGET(state->ann_bottom_panel_revealer), "toolbar-container");
+    gtk_widget_add_css_class(GTK_WIDGET(state->ocr_notification_revealer), "toolbar-container");
+
     g_signal_connect(state->region_button, "toggled", G_CALLBACK(on_region_button_toggled), state);
     g_signal_connect(state->window_button, "toggled", G_CALLBACK(on_window_button_toggled), state);
     g_signal_connect(state->text_button, "toggled", G_CALLBACK(on_text_button_toggled), state);
@@ -628,20 +875,26 @@ G_MODULE_EXPORT GtkWidget* create_widget(const char *config_string) {
     state->motion_controller = gtk_event_controller_motion_new();
     g_signal_connect(state->motion_controller, "motion", G_CALLBACK(on_mouse_motion), state);
     gtk_widget_add_controller(state->drawing_area, state->motion_controller);
+    
     state->click_gesture = gtk_gesture_click_new();
     g_signal_connect(state->click_gesture, "pressed", G_CALLBACK(on_window_click), state);
     gtk_widget_add_controller(state->drawing_area, GTK_EVENT_CONTROLLER(state->click_gesture));
+    
     state->drag_gesture = gtk_gesture_drag_new();
     g_signal_connect(state->drag_gesture, "drag-begin", G_CALLBACK(on_drag_begin), state);
     g_signal_connect(state->drag_gesture, "drag-update", G_CALLBACK(on_drag_update), state);
     g_signal_connect(state->drag_gesture, "drag-end", G_CALLBACK(on_drag_end), state);
     gtk_widget_add_controller(state->drawing_area, GTK_EVENT_CONTROLLER(state->drag_gesture));
 
-    state->window_geometries = get_hyprland_windows_geometry(state->app_state);
-    
     qscreen_set_mode(state, (SelectionMode)state->app_state->initial_mode);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->save_button), state->app_state->save_on_launch);
-    g_signal_connect(GTK_WIDGET(aspect_frame), "realize", G_CALLBACK(on_widget_realize), state);
     
-    return GTK_WIDGET(aspect_frame);
+    if (state->app_state->initial_mode == QSCREEN_MODE_WINDOW) {
+        show_window_picker_grid(state);
+    }
+    
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(state->save_button), state->app_state->save_on_launch);
+    g_signal_connect(root_overlay, "unrealize", G_CALLBACK(on_window_destroy), NULL);
+    g_signal_connect(root_overlay, "realize", G_CALLBACK(on_widget_realize), state);
+    
+    return root_overlay;
 }

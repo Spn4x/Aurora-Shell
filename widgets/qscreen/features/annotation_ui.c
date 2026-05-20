@@ -74,8 +74,6 @@ void finalize_text_entry(UIState *state) {
     state->active_text_rotation = 0.0; 
     
     gtk_fixed_remove(GTK_FIXED(state->annotation_fixed), entry);
-    
-    // --- FIX: Turn off the invisible shield so we can click the canvas again! ---
     gtk_widget_set_can_target(state->annotation_fixed, FALSE);
     
     gtk_widget_queue_draw(state->drawing_area);
@@ -291,7 +289,6 @@ void annotation_ui_drag_begin(UIState *state, double scaled_x, double scaled_y, 
         gtk_editable_select_region(GTK_EDITABLE(state->active_text_entry), 0, -1);
         resize_text_entry(state);
 
-        // Turn on the invisible shield so the entry can receive mouse focus
         gtk_widget_set_can_target(state->annotation_fixed, TRUE);
 
         gtk_fixed_put(GTK_FIXED(state->annotation_fixed), state->active_text_entry, raw_x, raw_y);
@@ -439,7 +436,6 @@ void annotation_ui_double_click(UIState *state, double raw_x, double raw_y) {
                 gtk_editable_select_region(GTK_EDITABLE(state->active_text_entry), 0, -1);
                 resize_text_entry(state);
 
-                // Turn on the invisible shield again!
                 gtk_widget_set_can_target(state->annotation_fixed, TRUE);
 
                 gtk_fixed_put(GTK_FIXED(state->annotation_fixed), state->active_text_entry, place_raw_x, place_raw_y);
@@ -552,12 +548,17 @@ gboolean annotation_ui_handle_key(UIState *state, guint keyval, GdkModifierType 
         else annotation_ui_confirm(state);
         return TRUE;
     } else if (keyval == GDK_KEY_z || keyval == GDK_KEY_Z) {
-        if ((mod_state & GDK_CONTROL_MASK) && (mod_state & GDK_SHIFT_MASK)) annotation_ui_redo(state);
-        else if (mod_state & GDK_CONTROL_MASK) annotation_ui_undo(state);
-        return TRUE;
+        // We only process Canvas Undo if the user isn't currently typing inside the on-canvas text tool
+        if (state->active_text_entry == NULL) {
+            if ((mod_state & GDK_CONTROL_MASK) && (mod_state & GDK_SHIFT_MASK)) annotation_ui_redo(state);
+            else if (mod_state & GDK_CONTROL_MASK) annotation_ui_undo(state);
+            return TRUE;
+        }
     } else if ((keyval == GDK_KEY_y || keyval == GDK_KEY_Y || keyval == GDK_KEY_r || keyval == GDK_KEY_R) && (mod_state & GDK_CONTROL_MASK)) {
-        annotation_ui_redo(state);
-        return TRUE;
+        if (state->active_text_entry == NULL) {
+            annotation_ui_redo(state);
+            return TRUE;
+        }
     }
     return FALSE;
 }
