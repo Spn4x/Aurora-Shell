@@ -1,6 +1,5 @@
 #include "workspaces.h"
 #include <adwaita.h>
-#include <gio/gunixsocketaddress.h>
 #include <json-glib/json-glib.h>
 #include <stdlib.h>
 #include <math.h>
@@ -8,14 +7,20 @@
 #define WIDTH_PER_WORKSPACE 45
 
 typedef struct {
+    guint64 id;
+    int idx;
+} NiriWorkspace;
+
+typedef struct {
     GtkWidget *container; 
     GtkWidget *drawing_area;
-    GSocketConnection *event_connection;
+    GSubprocess *niri_proc;
     GDataInputStream *event_stream;
     GCancellable *cancellable;
-    GList *workspace_ids;
-    gint max_workspace_id;
-    gint active_workspace_id;
+    
+    GList *workspaces; // List of NiriWorkspace*
+    int max_workspace_idx;
+    int active_workspace_idx;
 
     gboolean is_initialized;
     double current_animated_index; 
@@ -25,7 +30,19 @@ typedef struct {
     AdwAnimation *resize_anim;
 } WorkspacesModule;
 
-static void on_hyprland_event(GObject *source, GAsyncResult *res, gpointer user_data);
+// --- Helper Functions ---
+
+static void free_niri_workspace(gpointer data) {
+    g_free(data);
+}
+
+static int get_idx_for_id(WorkspacesModule *module, guint64 id) {
+    for (GList *l = module->workspaces; l != NULL; l = l->next) {
+        NiriWorkspace *ws = l->data;
+        if (ws->id == id) return ws->idx;
+    }
+    return -1;
+}
 
 static void on_resize_anim_value_changed(double value, gpointer user_data) {
     WorkspacesModule *module = (WorkspacesModule *)user_data;
@@ -43,25 +60,31 @@ static void workspaces_module_cleanup(gpointer data) {
         adw_animation_pause(module->resize_anim);
         g_object_unref(module->resize_anim);
     }
+    if (module->niri_proc) {
+        g_subprocess_force_exit(module->niri_proc);
+        g_object_unref(module->niri_proc);
+    }
+    g_list_free_full(module->workspaces, free_niri_workspace);
     module->drawing_area = NULL; 
 }
 
-// Controls the smooth sliding of the active highlight
+// --- Animation & Drawing ---
+
 static gboolean animation_tick(gpointer user_data) {
     WorkspacesModule *module = user_data;
     if (!module->drawing_area || !GTK_IS_WIDGET(module->drawing_area)) {
         module->animation_timer_id = 0; return G_SOURCE_REMOVE;
     }
-    if (module->max_workspace_id == 0) return G_SOURCE_CONTINUE; 
+    if (module->max_workspace_idx == 0) return G_SOURCE_CONTINUE; 
     
-    if (fabs(module->current_animated_index - module->active_workspace_id) < 0.01) {
-        module->current_animated_index = module->active_workspace_id;
+    if (fabs(module->current_animated_index - module->active_workspace_idx) < 0.01) {
+        module->current_animated_index = module->active_workspace_idx;
         module->animation_timer_id = 0;
         gtk_widget_queue_draw(module->drawing_area);
         return G_SOURCE_REMOVE;
     }
     
-    module->current_animated_index += (module->active_workspace_id - module->current_animated_index) * 0.2;
+    module->current_animated_index += (module->active_workspace_idx - module->current_animated_index) * 0.2;
     gtk_widget_queue_draw(module->drawing_area);
     return G_SOURCE_CONTINUE;
 }
@@ -75,14 +98,14 @@ static void start_workspace_animation(WorkspacesModule *module) {
 static void update_workspace_display(WorkspacesModule *module) {
     if (!module->drawing_area || !GTK_IS_WIDGET(module->drawing_area)) return;
     
-    module->max_workspace_id = 0;
-    for (GList *l = module->workspace_ids; l != NULL; l = l->next) {
-        gint id = GPOINTER_TO_INT(l->data);
-        if (id > module->max_workspace_id) module->max_workspace_id = id;
+    module->max_workspace_idx = 0;
+    for (GList *l = module->workspaces; l != NULL; l = l->next) {
+        NiriWorkspace *ws = l->data;
+        if (ws->idx > module->max_workspace_idx) module->max_workspace_idx = ws->idx;
     }
-    if (module->max_workspace_id < 1) module->max_workspace_id = 1;
+    if (module->max_workspace_idx < 1) module->max_workspace_idx = 1;
 
-    int target_width = module->max_workspace_id * WIDTH_PER_WORKSPACE;
+    int target_width = module->max_workspace_idx * WIDTH_PER_WORKSPACE;
 
     if (module->current_container_width != target_width) {
         if (module->current_container_width == 0) {
@@ -100,7 +123,6 @@ static void update_workspace_display(WorkspacesModule *module) {
 
             AdwAnimationTarget *target = adw_callback_animation_target_new(on_resize_anim_value_changed, module, NULL);
             module->resize_anim = adw_timed_animation_new(module->drawing_area, actual_w, target_width, 300, target);
-            // Switch to EASE_OUT_CUBIC for a more snappy drawer-opening feel
             adw_timed_animation_set_easing(ADW_TIMED_ANIMATION(module->resize_anim), ADW_EASE_OUT_CUBIC);
             adw_animation_play(module->resize_anim);
         }
@@ -117,10 +139,10 @@ static void cairo_rounded_rectangle(cairo_t *cr, double x, double y, double widt
 
 static void draw_workspaces(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data) {
     WorkspacesModule *module = user_data;
-    if (module->max_workspace_id == 0) return;
+    if (module->max_workspace_idx == 0) return;
     
     if (!module->is_initialized && width > 0) {
-        module->current_animated_index = module->active_workspace_id;
+        module->current_animated_index = module->active_workspace_idx;
         module->is_initialized = TRUE;
     }
     
@@ -135,7 +157,6 @@ static void draw_workspaces(GtkDrawingArea *area, cairo_t *cr, int width, int he
     cairo_rounded_rectangle(cr, 0, 0, width, height, 8.0); 
     cairo_fill(cr);
     
-    // Hardcode the slot width! This prevents the numbers from squishing or stretching.
     double slot_width = WIDTH_PER_WORKSPACE; 
     double active_width = module->current_animated_index * slot_width;
     
@@ -150,17 +171,15 @@ static void draw_workspaces(GtkDrawingArea *area, cairo_t *cr, int width, int he
     cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD); 
     cairo_set_font_size(cr, 12.0);
     
-    for (gint id = 1; id <= module->max_workspace_id; ++id) {
-        g_autofree gchar *id_str = g_strdup_printf("%d", id);
+    for (gint idx = 1; idx <= module->max_workspace_idx; ++idx) {
+        g_autofree gchar *id_str = g_strdup_printf("%d", idx);
         cairo_text_extents_t extents; cairo_text_extents(cr, id_str, &extents);
         
-        double x_pos = (id - 1) * slot_width + (slot_width / 2.0) - (extents.width / 2.0);
+        double x_pos = (idx - 1) * slot_width + (slot_width / 2.0) - (extents.width / 2.0);
         double y_pos = (height / 2.0) + (extents.height / 2.0);
-        double text_center_x = (id - 1) * slot_width + (slot_width / 2.0);
+        double text_center_x = (idx - 1) * slot_width + (slot_width / 2.0);
         
-        // Corrected Smooth Alpha Fade
-        // Calculate how much of THIS specific slot has been revealed by the animation
-        double slot_start_x = (id - 1) * slot_width;
+        double slot_start_x = (idx - 1) * slot_width;
         double visible_pixels = width - slot_start_x;
         double alpha_multiplier = 1.0;
         
@@ -179,130 +198,132 @@ static void draw_workspaces(GtkDrawingArea *area, cairo_t *cr, int width, int he
     }
 }
 
+// --- Interaction ---
+
 static void on_level_bar_clicked(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) {
     (void)n_press; (void)y; WorkspacesModule *module = (WorkspacesModule *)user_data;
-    if (module->max_workspace_id == 0) return;
-    int clicked_id = (int)((x / (double)WIDTH_PER_WORKSPACE)) + 1; // Updated to match hardcoded width
-    g_autofree gchar *command = g_strdup_printf("hyprctl dispatch workspace %d", clicked_id);
-    GError *error = NULL; if (!g_spawn_command_line_async(command, &error)) { g_error_free(error); }
+    if (module->max_workspace_idx == 0) return;
+    
+    int clicked_idx = (int)((x / (double)WIDTH_PER_WORKSPACE)) + 1; 
+    
+    g_autofree gchar *command = g_strdup_printf("niri msg action focus-workspace %d", clicked_idx);
+    g_spawn_command_line_async(command, NULL);
 }
 
-static void on_hyprland_event(GObject *source, GAsyncResult *res, gpointer user_data) {
+// --- Niri JSON Parsing ---
+
+static void parse_workspaces_array(WorkspacesModule *module, JsonArray *workspaces_array) {
+    gboolean needs_update = FALSE;
+    
+    g_list_free_full(module->workspaces, free_niri_workspace);
+    module->workspaces = NULL;
+
+    for (guint i = 0; i < json_array_get_length(workspaces_array); i++) {
+        JsonObject *ws_obj = json_array_get_object_element(workspaces_array, i);
+        if (!ws_obj) continue;
+
+        NiriWorkspace *ws = g_new0(NiriWorkspace, 1);
+        ws->id = json_object_get_int_member(ws_obj, "id");
+        ws->idx = json_object_get_int_member(ws_obj, "idx");
+        module->workspaces = g_list_append(module->workspaces, ws);
+
+        if (json_object_has_member(ws_obj, "is_active") && json_object_get_boolean_member(ws_obj, "is_active")) {
+            if (module->active_workspace_idx != ws->idx) {
+                module->active_workspace_idx = ws->idx;
+                needs_update = TRUE;
+            }
+        } else if (json_object_has_member(ws_obj, "is_focused") && json_object_get_boolean_member(ws_obj, "is_focused")) {
+            if (module->active_workspace_idx != ws->idx) {
+                module->active_workspace_idx = ws->idx;
+                needs_update = TRUE;
+            }
+        }
+    }
+    
+    if (needs_update || TRUE) {
+        update_workspace_display(module);
+    }
+}
+
+static void on_niri_event(GObject *source, GAsyncResult *res, gpointer user_data) {
     WorkspacesModule *module = (WorkspacesModule *)user_data;
     g_autoptr(GError) error = NULL;
-    g_autofree gchar *line = g_data_input_stream_read_line_finish(G_DATA_INPUT_STREAM(source), res, NULL, &error);
+    gsize length;
     
-    if (error) {
-        g_list_free(module->workspace_ids);
-        if (module->event_stream) g_object_unref(module->event_stream);
-        if (module->event_connection) g_object_unref(module->event_connection);
-        if (module->cancellable) g_object_unref(module->cancellable);
-        g_free(module);
+    char *line = g_data_input_stream_read_line_finish(G_DATA_INPUT_STREAM(source), res, &length, &error);
+    
+    if (error || !line) {
+        if (error) g_warning("Niri workspace stream error: %s", error->message);
         return; 
     }
     
-    if (line) {
-        gboolean needs_update = FALSE;
-        if (g_str_has_prefix(line, "workspacev2>>")) {
-            gchar **parts = g_strsplit(line, ">>", 2);
-            if (parts[1]) {
-                gchar **data_parts = g_strsplit(parts[1], ",", 2);
-                if (data_parts[0]) {
-                    gint new_id = atoi(data_parts[0]);
-                    if (module->active_workspace_id != new_id) {
-                        module->active_workspace_id = new_id;
-                        start_workspace_animation(module);
-                    }
+    g_autoptr(JsonParser) parser = json_parser_new();
+    if (json_parser_load_from_data(parser, line, length, NULL)) {
+        JsonNode *root = json_parser_get_root(parser);
+        if (JSON_NODE_HOLDS_OBJECT(root)) {
+            JsonObject *root_obj = json_node_get_object(root);
+
+            if (json_object_has_member(root_obj, "WorkspacesChanged")) {
+                JsonObject *wc = json_object_get_object_member(root_obj, "WorkspacesChanged");
+                if (json_object_has_member(wc, "workspaces")) {
+                    parse_workspaces_array(module, json_object_get_array_member(wc, "workspaces"));
                 }
-                g_strfreev(data_parts);
-            }
-            g_strfreev(parts);
-        } 
-        else if (g_str_has_prefix(line, "createworkspacev2>>")) {
-            gchar **parts = g_strsplit(line, ">>", 2);
-            if (parts[1]) {
-                gchar **data_parts = g_strsplit(parts[1], ",", 2);
-                if (data_parts[0]) {
-                    gint id = atoi(data_parts[0]);
-                    if (!g_list_find(module->workspace_ids, GINT_TO_POINTER(id))) {
-                        module->workspace_ids = g_list_append(module->workspace_ids, GINT_TO_POINTER(id));
-                        needs_update = TRUE;
-                    }
+            } 
+            else if (json_object_has_member(root_obj, "WorkspaceActivated")) {
+                JsonObject *wa = json_object_get_object_member(root_obj, "WorkspaceActivated");
+                guint64 id = json_object_get_int_member(wa, "id");
+                
+                int new_idx = get_idx_for_id(module, id);
+                if (new_idx != -1 && module->active_workspace_idx != new_idx) {
+                    module->active_workspace_idx = new_idx;
+                    start_workspace_animation(module);
                 }
-                g_strfreev(data_parts);
             }
-            g_strfreev(parts);
         }
-        else if (g_str_has_prefix(line, "destroyworkspacev2>>")) {
-            gchar **parts = g_strsplit(line, ">>", 2);
-            if (parts[1]) {
-                gchar **data_parts = g_strsplit(parts[1], ",", 2);
-                if (data_parts[0]) {
-                    gint id = atoi(data_parts[0]);
-                    module->workspace_ids = g_list_remove(module->workspace_ids, GINT_TO_POINTER(id));
-                    needs_update = TRUE;
-                }
-                g_strfreev(data_parts);
-            }
-            g_strfreev(parts);
-        }
-        if (needs_update) update_workspace_display(module);
     }
     
-    g_data_input_stream_read_line_async(G_DATA_INPUT_STREAM(source), G_PRIORITY_DEFAULT, module->cancellable, on_hyprland_event, module);
+    g_free(line);
+    g_data_input_stream_read_line_async(G_DATA_INPUT_STREAM(source), G_PRIORITY_DEFAULT, module->cancellable, on_niri_event, module);
 }
 
-static void on_socket_connected(GObject *source, GAsyncResult *res, gpointer user_data) {
-    WorkspacesModule *module = (WorkspacesModule *)user_data;
-    g_autoptr(GError) error = NULL;
-    module->event_connection = g_socket_client_connect_finish(G_SOCKET_CLIENT(source), res, &error);
-    
-    if (error || g_cancellable_is_cancelled(module->cancellable)) {
-        g_list_free(module->workspace_ids);
-        if (module->cancellable) g_object_unref(module->cancellable);
-        g_free(module);
-        return;
-    }
-    
-    g_autoptr(GInputStream) istream = g_io_stream_get_input_stream(G_IO_STREAM(module->event_connection));
-    module->event_stream = g_data_input_stream_new(istream);
-    g_data_input_stream_read_line_async(module->event_stream, G_PRIORITY_DEFAULT, module->cancellable, on_hyprland_event, module);
-}
-
-static void connect_to_event_socket(WorkspacesModule *module) {
-    const gchar *instance_signature = getenv("HYPRLAND_INSTANCE_SIGNATURE");
-    const gchar *xdg_runtime_dir = getenv("XDG_RUNTIME_DIR");
-    if (!instance_signature || !xdg_runtime_dir) return;
-    g_autofree gchar *socket_path = g_build_filename(xdg_runtime_dir, "hypr", instance_signature, ".socket2.sock", NULL);
-    g_autoptr(GSocketClient) client = g_socket_client_new();
-    g_autoptr(GSocketAddress) address = g_unix_socket_address_new(socket_path);
-    g_socket_client_connect_async(client, G_SOCKET_CONNECTABLE(address), module->cancellable, on_socket_connected, module);
-}
+// --- Initialization ---
 
 static gchar* run_command_and_get_output(const char* command) {
     FILE *fp = popen(command, "r"); if (!fp) return NULL;
-    gchar buffer[256]; GString *output_str = g_string_new("");
+    gchar buffer[1024]; GString *output_str = g_string_new("");
     while (fgets(buffer, sizeof(buffer), fp) != NULL) g_string_append(output_str, buffer);
     pclose(fp); return g_string_free(output_str, FALSE);
 }
 
 static void populate_initial_workspaces(WorkspacesModule *module) {
     g_autoptr(JsonParser) parser = json_parser_new();
-    g_autofree gchar *workspaces_json = run_command_and_get_output("hyprctl -j workspaces");
+    g_autofree gchar *workspaces_json = run_command_and_get_output("niri msg -j workspaces");
+    
     if (workspaces_json && json_parser_load_from_data(parser, workspaces_json, -1, NULL)) {
-        JsonArray *workspaces_array = json_node_get_array(json_parser_get_root(parser));
-        for (guint i = 0; i < json_array_get_length(workspaces_array); i++) {
-            JsonObject *ws = json_array_get_object_element(workspaces_array, i);
-            gint id = json_object_get_int_member(ws, "id");
-            if (id > 0) module->workspace_ids = g_list_append(module->workspace_ids, GINT_TO_POINTER(id));
+        JsonNode *root = json_parser_get_root(parser);
+        if (JSON_NODE_HOLDS_ARRAY(root)) {
+            parse_workspaces_array(module, json_node_get_array(root));
         }
     }
-    g_autofree gchar *active_json = run_command_and_get_output("hyprctl -j activeworkspace");
-    if (active_json && json_parser_load_from_data(parser, active_json, -1, NULL)) {
-        JsonObject *active_ws = json_node_get_object(json_parser_get_root(parser));
-        module->active_workspace_id = json_object_get_int_member(active_ws, "id");
+}
+
+static void connect_to_event_stream(WorkspacesModule *module) {
+    g_autoptr(GError) error = NULL;
+    
+    module->niri_proc = g_subprocess_new(
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE, &error, 
+        "niri", "msg", "--json", "event-stream", NULL
+    );
+
+    if (!module->niri_proc) {
+        g_warning("Failed to start Niri event stream: %s", error->message);
+        return;
     }
-    update_workspace_display(module);
+
+    GInputStream *stdout_stream = g_subprocess_get_stdout_pipe(module->niri_proc);
+    module->event_stream = g_data_input_stream_new(stdout_stream);
+    
+    g_data_input_stream_read_line_async(module->event_stream, G_PRIORITY_DEFAULT, module->cancellable, on_niri_event, module);
 }
 
 GtkWidget* create_workspaces_module() {
@@ -324,7 +345,7 @@ GtkWidget* create_workspaces_module() {
     g_object_set_data_full(G_OBJECT(module->container), "module-state", module, workspaces_module_cleanup);
     
     populate_initial_workspaces(module);
-    connect_to_event_socket(module);
+    connect_to_event_stream(module);
     
     return module->container; 
 }
